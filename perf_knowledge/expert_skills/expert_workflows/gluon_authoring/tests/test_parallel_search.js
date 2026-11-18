@@ -131,11 +131,18 @@ const three = [{ specialty: 'compute', layer: '7' }, { specialty: 'memory', laye
     const y = await launch({ ...climb, budget: 1 }, (label, prompt) => {
       if (label === 'tech_lead:plan r1') return planReturn(prompt, paired);
       if (/^gluon_engineer:/.test(label)) return engineerReturn(prompt, { layer: '4', att: goodAtt,
-        pair_screen: { prerequisite_json: '/x/pre.json', prerequisite_delta_pct: -1.7, pair_json: '/x/pair.json', pair_delta_pct: 39.3 } });
+        pair_screen: { prerequisite_json: '/x/pre.json', prerequisite_delta_pct: -1.7, pair_json: '/x/pair.json', pair_delta_pct: 39.3, outcome: 'pair' } });
       return undefined;
     }, inc);
     ok(y.result.rounds[0].status === 'verified', 'with both screens: verified', y.result.rounds[0]);
     ok(/pair_screen/.test(y.calls.find(c => c.label === 'gluon_engineer:climb r1_d0').prompt), 'the engineer is told what a pair owes');
+    const z = await launch({ ...climb, budget: 1 }, (label, prompt) => {
+      if (label === 'tech_lead:plan r1') return planReturn(prompt, paired);
+      if (/^gluon_engineer:/.test(label)) return engineerReturn(prompt, { layer: '4', att: goodAtt,
+        pair_screen: { prerequisite_json: '/x/pre.json', prerequisite_delta_pct: 4, pair_json: '/x/pair.json', pair_delta_pct: -2 } });
+      return undefined;
+    }, inc);
+    ok(z.result.rounds[0].missing.some(m => /pair_screen\.outcome/.test(m)), 'a pair must say which half it returns', z.result.rounds[0]);
   }
 
   console.log('\n# 7. recover: one direction per suspect, G2 on the round winner (integrated or single)');
@@ -192,6 +199,10 @@ const three = [{ specialty: 'compute', layer: '7' }, { specialty: 'memory', laye
     const plan = x.calls.find(c => c.label === 'tech_lead:plan r1').prompt;
     ok(plan.includes(`Then Read ${WF_DIR}/roles/tech_lead.md`) && /PHASE=plan_round/.test(plan), 'tech_lead.md PHASE=plan_round');
     ok(/gluon_authoring expert workflow/.test(plan) && /Layer Backbone/.test(plan) && /paired: true/.test(plan), 'the Gluon addendum is appended');
+    ok(/LEARNED_KB: on/.test(plan) && /LEARNED_KB_BUDGET: At most 1 of this round/.test(plan), 'the learned KB is on with kernel_lane.js\'s budget');
+    const off = await launch({ ...climb, budget: 1, use_learned_kb: 'false' }, undefined, inc);
+    const planOff = off.calls.find(c => c.label === 'tech_lead:plan r1').prompt;
+    ok(/LEARNED_KB: off/.test(planOff) && !/LEARNED_KB_BUDGET/.test(planOff), 'use_learned_kb=false turns it off');
     const mem = x.calls.find(c => c.label === 'tech_lead:memory r1').prompt;
     ok(mem.includes(`Then Read ${WF_DIR}/roles/tech_lead.md`) && /PHASE=update_memory/.test(mem), 'tech_lead.md PHASE=update_memory');
   }

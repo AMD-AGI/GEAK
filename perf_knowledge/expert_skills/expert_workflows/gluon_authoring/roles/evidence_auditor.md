@@ -31,6 +31,12 @@ naming the field and what is wrong). `ok` is true only when `findings` is empty.
    compare the exit code and ratio.
 7. Equivalence: `equivalence.output_path` shows the `ttgir_bridge.py verify` verdict claimed in
    `layout_diff`.
+9. Boundary shapes: `edge_shapes.json_path` exists; its `regressions` is empty when `exit_code` is 0
+   or 3, and its `baseline_fails` is non-empty exactly when `exit_code` is 3; `baseline` matches the
+   json's `baseline`.
+10. Pair: `pair_screen.prerequisite_json` and `pair_json` are permuted ab_bench runs whose deltas match
+   the returned ones, and `outcome` names the half whose screen is better (or `neither`), which is the
+   half `patch_file` installs.
 
 Return:
 ```json

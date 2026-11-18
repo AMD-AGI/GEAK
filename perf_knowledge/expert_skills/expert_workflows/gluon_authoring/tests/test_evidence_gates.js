@@ -5,7 +5,7 @@
 // the pack's gluon_profile.py with every layer's state stated.
 'use strict';
 
-const { escapeRe, launch, ok, done, engineerReturn, refsIn, goodAtt, goodProfileCmd, SKILL } = require('./harness');
+const { goodEdge, escapeRe, launch, ok, done, engineerReturn, refsIn, goodAtt, goodProfileCmd, SKILL } = require('./harness');
 
 const climbOnly = { budget: 1, entry_mode: 'incumbent' };
 
@@ -203,6 +203,40 @@ const climbOnly = { budget: 1, entry_mode: 'incumbent' };
       return undefined;
     }, { entry: 'incumbent' });
     ok(noAttLayer.result.rounds[0].status === 'rejected_missing_evidence', 'gluon_profile.py without its att layer is not ATT evidence', noAttLayer.result.rounds[0]);
+    const byLocation = await launch(climbOnly, (label, prompt) => {
+      if (/^gluon_engineer:/.test(label)) return engineerReturn(prompt, { stage: 'climb', layer: '4',
+        att: { status: 'captured', tool: 'gluon_profile.py', command: 'cat /x/prof/capture/att_run.log', exit_code: 0,
+          output_dir: '/x/prof/capture/att', state: 'ok' } });
+      return undefined;
+    }, { entry: 'incumbent' });
+    ok(byLocation.result.rounds[0].status === 'verified' && !byLocation.labels.some(l => /reask/.test(l)),
+      'ATT inside the round\'s own profile_dir counts when profile_command collected it', byLocation.labels);
+    const elsewhere = await launch(climbOnly, (label, prompt) => {
+      if (/^gluon_engineer:/.test(label)) return engineerReturn(prompt, { stage: 'climb', layer: '4',
+        att: { status: 'captured', tool: 'x', command: 'cat /y/att.log', exit_code: 0, output_dir: '/y/att', state: 'ok' } });
+      return undefined;
+    }, { entry: 'incumbent' });
+    ok(elsewhere.result.rounds[0].status === 'rejected_missing_evidence', 'an ATT dir outside the round profile still needs its command', elsewhere.result.rounds[0]);
+  }
+
+  console.log('\n# 10b. boundary shapes: required where masks are authored, a regression rejects anywhere');
+  {
+    const port = (over) => launch({ budget: 2 }, (label, prompt) => {
+      if (/^gluon_engineer:(transcribe|evidence) r1\b/.test(label)) { const r = engineerReturn(prompt, { stage: 'transcribe', ...over }); if (over.drop) delete r.edge_shapes; return r; }
+      return undefined;
+    }, { entry: 'port' });
+    const x = await port({ drop: true });
+    ok(x.result.stopped_by === 'transcribe_failed' && x.result.rounds[0].missing.some(m => /edge_shapes/.test(m)),
+      'a transcription without edge_shapes is rejected', x.result.rounds[0]);
+    const y = await port({ edge_shapes: { ...goodEdge, exit_code: 1 } });
+    ok(y.result.stopped_by === 'transcribe_failed' && y.result.rounds[0].missing.some(m => /exit 1/.test(m)),
+      'an anchor failing shapes the champion passes is not equivalent', y.result.rounds[0]);
+    const z = await port({ edge_shapes: { ...goodEdge, exit_code: 3, shared_limitation: 'tail of a reduction dim' } });
+    ok(z.result.stopped_by !== 'transcribe_failed' && z.result.caveats.some(c => /boundary_limitation: .*tail of a reduction dim/.test(c)),
+      'a limitation the champion shares is carried as a caveat', z.result.caveats);
+    const w = await launch(climbOnly, (label, prompt) => /^gluon_engineer:/.test(label)
+      ? engineerReturn(prompt, { stage: 'climb', edge_shapes: { ...goodEdge, exit_code: 1 } }) : undefined, { entry: 'incumbent' });
+    ok(w.result.rounds[0].status === 'rejected_missing_evidence', 'a climb candidate that breaks a boundary shape is rejected', w.result.rounds[0]);
   }
 
   console.log('\n# 11. a climb round re-profiles with gluon_profile.py');

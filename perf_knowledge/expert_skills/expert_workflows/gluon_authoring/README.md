@@ -50,7 +50,8 @@ refused while time is left), `parity_threshold` 0.95, `max_recover_rounds` ceil(
 `max_no_improve` (port 6, else 2; climb rounds without progress), `progress_delta` (port −0.05, else
 `min_improve`; how far over the best candidate seen a round's winner must land to count as progress),
 `enabling_delta` (port −0.05, else 0; how far an `enabling_step` may sit below the track best and still
-be kept),
+be kept), `use_learned_kb` true, `kb_dir_cap` 1 and `kb_cold_direction` true (kernel-workflow's learned
+cards for the planner, with its budget),
 `deadline_reserve_s` 1800, `round_time_cap_s` 3600, `evidence_reasks` 1, `evidence_audit` true,
 `token_reserve` 150000, `agent_timeout_ms` 3600000, `engineer_timeout_ms` 7200000, `eval_dir`,
 `apply_to_original` false, `skill_dir` / `expert_workflow_dir` (default: the in-tree pack and this
@@ -149,7 +150,9 @@ The return is `ROUND_SCHEMA`; `missingEvidence()` checks it per stage:
 | `equivalence` | transcribe | `layout_diff` ∈ PASS/RECONCILED/FAIL from `ttgir_bridge.py verify`; `numeric`, `determinism`, `asm_parity` recorded |
 | `g3_occupancy` (G3) | transcribe, author, recover repayment, climb | `probe.py measure` command, exit 0, `ir_dir`, both limiters (`vgpr_wg_per_cu`, `lds_wg_per_cu`; `null` only with `missing_reason`), `binding` |
 | `g4_screen` (G4) | recover repayment, climb | `ab_bench.py ... --permute`, exit code, `json_path`, `resolved` |
-| `att` | layers 1.5, 4, 4+ and a `lost_pipeline` repayment | the round's `gluon_profile.py` (att layer on), `capture.sh` without `--no-att/--lite/--isa-only`, or `rocprofv3_safe.sh --att`, with `output_dir` and `state: ok` (another state needs a reason); or `status: unavailable` with a reason (≥ 20 chars) |
+| `att` | layers 1.5, 4, 4+ and a `lost_pipeline` repayment | the round's `gluon_profile.py` (att layer on), `capture.sh` without `--no-att/--lite/--isa-only`, or `rocprofv3_safe.sh --att`, with `output_dir` and `state: ok` (another state needs a reason); an `output_dir` inside the round's `profile_dir` stands for itself when `profile_command` collected ATT; or `status: unavailable` with a reason (≥ 20 chars) |
+| `edge_shapes` | transcribe (baseline: the champion), author; recover/climb when masks, indexing, a tile or loop bounds change | `edge_shapes.py` command and exit code: 1 (fails a boundary shape the baseline passes) is a gap — for a transcription, not equivalent; 3 (the baseline fails it too) becomes a `boundary_limitation` caveat |
+| `pair_screen` | a paired direction | both permuted screens (prerequisite alone, pair) vs `TRACK_START` and `outcome` (pair / prerequisite / neither: the half the candidate is) |
 | `parity_gate` (G2) | recover | `parity_gate.py` command, exit code, `mode: gate`; on an incumbent only `mode: diagnostic` is allowed |
 | `layer`, `profile_dir`, `profile_command` | climb | layer ∈ 1.5/2/3/4/4+/5/6/7; this round's re-profile by `gluon_profile.py` (`--compare LAST_PROFILE` gives the profile delta) |
 | `suspect` | recover repayment | `lost_pipeline` / `lost_layout` / `lost_RA` (repaid at layer 4 / 3 / 5) |
@@ -224,7 +227,8 @@ planner schema or rules move.
 | profile | `profile_kernel.sh` (`profile_engineer`) | `gluon_profile.py`: every direction's round profile, `--compare` the last kept one |
 | stall, commit, stop | `max_no_improve` 2, `progress_delta` = `min_improve`, `min_improve` 0.02; no early stop with a deadline | the same; a port gives ground (6, −0.05) |
 | added | — | entry modes, G1 champion gate, transcribe with equivalence, recover with G2, layer gating inside a round, paired directions |
-| not wired | warm start, learned KB, deep research, EVO, routing, analyze phase | `LEARNED_KB: off`; the entry, budget and baseline profile stand in for analyze |
+| learned KB | planner reads `knowledge/learned/` with a per-round budget | the same switch, cap and control direction |
+| not wired | warm start, deep research, EVO, routing, analyze phase | the entry, budget and baseline profile stand in for analyze |
 
 ## Open points
 

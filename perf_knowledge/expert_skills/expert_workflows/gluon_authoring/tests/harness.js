@@ -24,6 +24,8 @@ const goodG4 = { command: 'python3 kt/ab_bench.py --module a.py --permute --json
 const goodAtt = { status: 'captured', tool: 'capture.sh', command: 'bash kt/capture.sh r /x/att --kernel k --source k.py -- python run.py',
   exit_code: 0, output_dir: '/x/att', state: 'ok' };
 const goodProfileCmd = 'python3 skill/scripts/gluon_profile.py /x/prof --kernel k --source k.py --gpu 6 --compare /x/prev -- python run.py';
+const goodEdge = { command: 'python3 skill/scripts/edge_shapes.py --module a.py --dims M=64:16 --json /x/edge.json', exit_code: 0,
+  json_path: '/x/edge.json', baseline: 'champion' };
 const gate = (exit) => ({ command: 'python3 skill/scripts/parity_gate.py --champion-ms 1 --anchor-ms 1.2', exit_code: exit,
   ratio: exit === 0 ? 0.97 : 0.8, suspects: [], json_path: '/x/parity.json', mode: 'gate' });
 
@@ -41,9 +43,9 @@ function engineerReturn(prompt, over) {
   const layer = (over && over.layer) || (stage === 'recover' || stage === 'climb' ? '3' : '');
   const reads = [...refsIn(prompt), ...(layer ? layerRefsIn(prompt, layer) : [])];
   const base = { stage, references_read: reads, track_tag: tag, patch_file: `/x/${tag}.diff`, correctness: 'pass' };
-  if (stage === 'transcribe') Object.assign(base, { g3_occupancy: goodG3,
+  if (stage === 'transcribe') Object.assign(base, { g3_occupancy: goodG3, edge_shapes: goodEdge,
     equivalence: { layout_diff: 'PASS', numeric: 'pass', determinism: 'pass', asm_parity: 'pass', output_path: '/x/eq' } });
-  if (stage === 'author') Object.assign(base, { g3_occupancy: goodG3 });
+  if (stage === 'author') Object.assign(base, { g3_occupancy: goodG3, edge_shapes: goodEdge });
   if (stage === 'recover') Object.assign(base, { suspect: 'lost_layout', layer: '3', g3_occupancy: goodG3, g4_screen: goodG4, parity_gate: gate(0), claim: 'recovery' });
   if (stage === 'climb') Object.assign(base, { layer: '3', profile_dir: '/x/prof', profile_command: goodProfileCmd, g3_occupancy: goodG3, g4_screen: goodG4, claim: 'win' });
   return Object.assign(base, over || {});
@@ -132,4 +134,4 @@ const inOrder = (labels, sub) => {
   return true;
 };
 
-module.exports = { escapeRe, PKG, ROOT, WF_DIR, SKILL, launch, engineerReturn, planReturn, integrateReturn, refsIn, layerRefsIn, gate, goodAtt, goodG3, goodG4, goodProfileCmd, ok, done, inOrder };
+module.exports = { goodEdge, escapeRe, PKG, ROOT, WF_DIR, SKILL, launch, engineerReturn, planReturn, integrateReturn, refsIn, layerRefsIn, gate, goodAtt, goodG3, goodG4, goodProfileCmd, ok, done, inOrder };

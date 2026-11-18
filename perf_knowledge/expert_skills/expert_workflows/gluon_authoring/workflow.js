@@ -60,6 +60,11 @@ const MAX_DIRECTIONS = Math.max(0, Math.floor(num(A.max_directions, 0)));
 // With a deadline, a tech_lead stop is refused while more than NO_STOP_S remain (MAX_FORCED_REPLANS times).
 const NO_STOP_S = Math.max(0, num(A.no_stop_s, 900));
 const MAX_FORCED_REPLANS = Math.max(1, Math.floor(num(A.max_forced_replans, 6)));
+// kernel_workflow/knowledge/learned/ for the planner, with kernel_lane.js's budget on how much of a
+// round it may steer: at most KB_DIR_CAP directions cite cards, one direction is profile-only.
+const USE_LEARNED_READ = String(A.use_learned_kb != null ? A.use_learned_kb : 'true') === 'true';
+const KB_DIR_CAP = Math.max(0, Math.floor(num(A.kb_dir_cap, 1)));
+const KB_COLD_DIRECTION = String(A.kb_cold_direction != null ? A.kb_cold_direction : 'true') === 'true';
 const ENTRY_HINT = String(A.entry_mode || 'auto').trim().toLowerCase();
 if (!['auto', 'port', 'incumbent', 'fresh'].includes(ENTRY_HINT)) {
   throw new Error(`args.entry_mode must be auto, port, incumbent or fresh, got '${ENTRY_HINT}'`);
@@ -293,9 +298,14 @@ const ROUND_SCHEMA = obj({
     layout_diff: { type: 'string' }, numeric: { type: 'string' }, determinism: { type: 'string' },
     asm_parity: { type: 'string' }, output_path: { type: 'string' },
   }),
+  edge_shapes: obj({
+    command: { type: 'string' }, exit_code: { type: ['number', 'null'] }, json_path: { type: 'string' },
+    baseline: { type: 'string' }, shared_limitation: { type: 'string' },
+  }),
   pair_screen: obj({
     prerequisite_json: { type: 'string' }, prerequisite_delta_pct: { type: ['number', 'null'] },
     pair_json: { type: 'string' }, pair_delta_pct: { type: ['number', 'null'] },
+    outcome: { type: 'string', enum: ['pair', 'prerequisite', 'neither'] },
   }),
   inline_asm: { type: 'boolean' }, disassembly_ref: { type: 'string' },
   enabling_step: { type: 'boolean' }, claim: { type: 'string' }, lesson: { type: 'string' },
@@ -384,13 +394,22 @@ function g4Missing(g) {
 // capture.sh / rocprofv3_safe.sh --att directly. A capture whose collection state is not `ok`
 // (rocprofv3_safe.json: partial, kernel identity unverified, ...) is evidence only with a reason.
 const ATT_CMD = 'gluon_profile.py (att layer on), capture.sh without --no-att, or rocprofv3_safe.sh --att';
-function attMissing(a) {
+// The round's own gluon_profile.py call collects ATT unless its --layers leaves att out.
+const profileHasAtt = (cmd) => {
+  const layersFlag = /--layers[ =](\S+)/.exec(cmd || '');
+  return /gluon_profile\.py/.test(cmd || '') && (!layersFlag || /\batt\b/.test(layersFlag[1]));
+};
+function attMissing(a, r) {
   if (!a || typeof a !== 'object' || a.status === 'not_required') return [`att (${ATT_CMD}; or status unavailable with a reason)`];
   if (a.status === 'captured') {
     const out = [];
     const cmd = a.command || '';
-    const layersFlag = /--layers[ =](\S+)/.exec(cmd);
-    const viaProfile = /gluon_profile\.py/.test(cmd) && (!layersFlag || /\batt\b/.test(layersFlag[1]));
+    // ATT that came out of the round's re-profile may cite it by where it landed: an output_dir
+    // inside profile_dir, with profile_command the gluon_profile.py call (att layer on).
+    const fromRoundProfile = r && has(r.profile_dir) && has(a.output_dir) &&
+      String(a.output_dir).startsWith(String(r.profile_dir).replace(/\/+$/, '')) && profileHasAtt(r.profile_command);
+    // A cited gluon_profile.py call speaks for itself (its --layers may leave att out).
+    const viaProfile = /gluon_profile\.py/.test(cmd) ? profileHasAtt(cmd) : fromRoundProfile;
     const viaCapture = /capture\.sh/.test(cmd) && !/--no-att|--lite|--isa-only/.test(cmd);
     const viaSafe = /rocprofv3_safe\.sh/.test(cmd) && /--att/.test(cmd);
     if (!viaProfile && !viaCapture && !viaSafe) out.push(`att.command (${ATT_CMD})`);
@@ -418,6 +437,8 @@ function missingEvidence(stage, r, ctx) {
     out.push(...g3Missing(r.g3_occupancy));
   }
   if (stage === 'author') out.push(...g3Missing(r.g3_occupancy));
+  if (stage === 'transcribe' || stage === 'author') out.push(...edgeMissing(r.edge_shapes, true));
+  else if (!r.no_change && r.edge_shapes) out.push(...edgeMissing(r.edge_shapes, false));
   if (stage === 'recover') {
     const p = r.parity_gate;
     if (!p || !/parity_gate\.py/.test(p.command || '') || !isNum(p.exit_code)) out.push('parity_gate (parity_gate.py command and exit_code)');
@@ -425,7 +446,7 @@ function missingEvidence(stage, r, ctx) {
     if (!r.no_change) {
       if (!SUSPECT_LAYER[r.suspect]) out.push('suspect (lost_pipeline|lost_layout|lost_RA)');
       out.push(...g3Missing(r.g3_occupancy), ...g4Missing(r.g4_screen));
-      if (PIPELINE_LAYERS.has(layer)) out.push(...attMissing(r.att));
+      if (PIPELINE_LAYERS.has(layer)) out.push(...attMissing(r.att, r));
     }
   }
   if (stage === 'climb') {
@@ -433,7 +454,7 @@ function missingEvidence(stage, r, ctx) {
     if (!has(r.profile_dir)) out.push('profile_dir (this round\'s re-profile)');
     if (!/gluon_profile\.py/.test(r.profile_command || '')) out.push('profile_command (the gluon_profile.py call behind profile_dir, with --compare LAST_PROFILE)');
     out.push(...g3Missing(r.g3_occupancy), ...g4Missing(r.g4_screen));
-    if (PIPELINE_LAYERS.has(String(r.layer))) out.push(...attMissing(r.att));
+    if (PIPELINE_LAYERS.has(String(r.layer))) out.push(...attMissing(r.att, r));
     if (r.inline_asm && !has(r.disassembly_ref)) out.push('disassembly_ref (inline asm is accepted on the disassembly)');
     if (ctx.entry === 'incumbent' && r.parity_gate && r.parity_gate.mode === 'gate') out.push('parity_gate.mode=diagnostic (an incumbent has no parity gate)');
   }
@@ -441,11 +462,24 @@ function missingEvidence(stage, r, ctx) {
   if (!r.no_change && ((ctx.direction && ctx.direction.paired) || r.paired === true)) out.push(...pairMissing(r.pair_screen));
   return out;
 }
+// Boundary-shape correctness (edge_shapes.py): required where masks are authored (transcribe,
+// author), checked wherever it is reported. Exit 1 = the candidate fails a shape its baseline
+// passes; exit 3 = the baseline fails it too (a shared limitation, carried as a caveat).
+function edgeMissing(e, required) {
+  if (!e || typeof e !== 'object') return required ? ['edge_shapes (edge_shapes.py on the candidate and its baseline)'] : [];
+  if (!/edge_shapes\.py/.test(e.command || '') || !isNum(e.exit_code)) return ['edge_shapes.command (edge_shapes.py) and exit_code'];
+  if (e.exit_code === 1) return ['edge_shapes: exit 1 -- the candidate fails boundary shapes its baseline passes (fix the masks)'];
+  if (![0, 3].includes(e.exit_code)) return [`edge_shapes.exit_code ${e.exit_code} (0 clean | 3 shared limitation)`];
+  return [];
+}
 function pairMissing(s) {
   if (!s || typeof s !== 'object') return ['pair_screen (ab_bench.py --permute: the prerequisite alone and the pair, each vs TRACK_START)'];
   const out = [];
   for (const k of ['prerequisite_json', 'pair_json']) if (!has(s[k])) out.push(`pair_screen.${k}`);
   for (const k of ['prerequisite_delta_pct', 'pair_delta_pct']) if (!isNum(s[k])) out.push(`pair_screen.${k}`);
+  if (!['pair', 'prerequisite', 'neither'].includes(s.outcome)) {
+    out.push('pair_screen.outcome (pair | prerequisite | neither: which half the returned candidate is)');
+  }
   return out;
 }
 // An integrated candidate owes the track tag and patch, its correctness, the permuted screen against the
@@ -675,8 +709,9 @@ const STAGE_PHASE = { transcribe: 'Transcribe', author: 'Transcribe', recover: '
 
 function evidenceTail(stg, d) {
   const lines = ['## Evidence this round must return (checked in code; a gap is sent back, then rejected)'];
-  if (stg === 'transcribe') lines.push('- equivalence: layout_diff (ttgir_bridge.py verify), numeric, determinism, asm_parity', '- g3_occupancy: probe.py measure on the anchor IR, BOTH limiters');
-  if (stg === 'author') lines.push('- correctness of the first Gluon kernel; g3_occupancy: probe.py measure, BOTH limiters');
+  if (stg === 'transcribe') lines.push('- equivalence: layout_diff (ttgir_bridge.py verify), numeric, determinism, asm_parity', '- g3_occupancy: probe.py measure on the anchor IR, BOTH limiters', '- edge_shapes: edge_shapes.py with the champion as --baseline and the anchor as a variant (exit 1 is not equivalent)');
+  if (stg === 'author') lines.push('- correctness of the first Gluon kernel; g3_occupancy: probe.py measure, BOTH limiters', '- edge_shapes: edge_shapes.py on the kernel (exit 3 = boundary shapes it does not handle; say which in shared_limitation)');
+  if (stg === 'recover' || stg === 'climb') lines.push('- edge_shapes (when the change touches masks, index arithmetic, tile or loop bounds): edge_shapes.py with TRACK_START as --baseline; exit 1 rejects the candidate');
   if (stg === 'recover') lines.push('- parity_gate: parity_gate.py run as the gate (mode=gate), exit code, ratio, suspects', '- for a repayment: suspect, g3_occupancy, g4_screen (ab_bench.py --permute --json), and ATT when the suspect is lost_pipeline', '- a gate-only direction (nothing left to repay or nothing attributable) sets no_change=true');
   if (stg === 'climb') lines.push(`- layer (one of ${LAYERS.join(', ')}), profile_dir + profile_command (gluon_profile.py ... --compare LAST_PROFILE)`, '- g3_occupancy: probe.py measure, BOTH limiters (a missing one as null + missing_reason)', '- g4_screen: ab_bench.py --module <adapter> --permute --json', `- att for layers ${[...PIPELINE_LAYERS].join('/')}: ${ATT_CMD} with state ok, or status=unavailable with the reason`, '- inline asm rounds: disassembly_ref');
   if (d && d.paired) lines.push('- pair_screen: ab_bench.py --permute of the prerequisite alone and of the pair, each vs TRACK_START (prerequisite_json, prerequisite_delta_pct, pair_json, pair_delta_pct)');
@@ -741,6 +776,9 @@ async function runDirection(d, stg, roundInputs, engTimeout) {
     kept: false, accepted: false };
   if (r && has(r.resweep_request)) requests.push({ round: inputs.ROUND, id: d.id, kind: 'resweep_request', ref: r.resweep_request });
   if (r && has(r.structure_suspect)) requests.push({ round: inputs.ROUND, id: d.id, kind: 'structure_suspect', ref: r.structure_suspect });
+  if (r && r.edge_shapes && r.edge_shapes.exit_code === 3 && !caveats.some(c => c.startsWith('boundary_limitation'))) {
+    caveats.push(`boundary_limitation: the baseline fails boundary shapes too (${d.id}: ${r.edge_shapes.shared_limitation || r.edge_shapes.json_path || 'see edge_shapes json'})`);
+  }
   if (audit && Array.isArray(audit.findings) && audit.findings.length) row.audit = audit.findings.slice(0, 5);
   if (missing.length) {
     rejected++;
@@ -777,14 +815,22 @@ function planAddendum(stg) {
     '- Orthogonality (rule 2): the kernel is one file, so a distinct `focus_files` set becomes a distinct `layer` and code ' +
       'region. Layers that gate each other never share a round (1.5 with 4/4+/5, two layer-1.5 scheduling models, 3 with 4, ' +
       '4 with 4+); the script defers the later one of such a pair without charging it. Coupled work goes in one paired direction.',
-    '- `paired: true` declares a prerequisite + the lever it makes legal or profitable when neither half pays alone (e.g. a ' +
-      'second LDS buffer for one operand + moving the barrier it frees). The engineer measures the prerequisite alone and ' +
-      'the pair. Use it when HISTORY shows a lever measured null for want of its prerequisite.',
+    '- `paired: true` declares a prerequisite + the lever it makes legal or profitable (e.g. a second LDS buffer for one ' +
+      'operand + moving the barrier it frees). The engineer screens the prerequisite alone and the pair and returns the ' +
+      'better one, saying which (`pair_screen.outcome`). Use it when HISTORY shows a lever measured null for want of its ' +
+      'prerequisite, or when a prerequisite costs a resource (registers, LDS) the lever needs.',
     '- HISTORY.rounds lists every direction with its verified number, `claim` and `lesson`, null and rejected ones included: ' +
       'do not re-issue a lever measured null on the same body unless its lesson names what was missing, and then pair it.',
-    '- host_runtime is the launch side the frozen harness allows: grid order, GROUP_SIZE_M, XCD-aware pid remap, persistent CTAs (layer 6).',
+    '- A verdict holds for the body it was measured on. When a kept change moves the binding occupancy limiter, the ' +
+      'register budget or the bottleneck class (compare.md), re-issue the directions HISTORY marked rival or null whose ' +
+      'lesson depended on what moved; a rival of one kept line can stack on the next.',
+    '- host_runtime is the launch side the frozen harness allows: grid order, workgroup grouping, XCD-aware pid remap, ' +
+      'persistent CTAs (layer 6). A launch parameter is screened at a handful of points, not swept.',
     `- deep_explore is a Gluon rewrite with broad authority (re-tile, layout, pipeline structure); it costs ${DEEP_COST} and ` +
-      'runs alone in its round. Use it on a structure_suspect in HISTORY or a plateau.',
+      'runs alone in its round. A tile or warp re-cut is structure and goes here, with the occupancy arithmetic as its ' +
+      'reason (both limiters from probe.py, workgroups per CU before and after): the usual trigger is both limiters binding ' +
+      'at one workgroup per CU while the stall sits on waits a second workgroup could cover. Also use it on a ' +
+      'structure_suspect or resweep_request in HISTORY, or a plateau.',
     ...(stg === 'recover' ? [
       `- STAGE=recover (port; G2 is not cleared at ${PARITY_THRESHOLD} of the champion): each direction repays ONE ` +
       'transcription-debt `suspect` (lost_pipeline -> layer 4, lost_layout -> layer 3, lost_RA -> layer 5; ' +
@@ -808,7 +854,13 @@ async function planRound(stg, left) {
       bottleneck_now: memory.bottleneck_now, suggest_next: memory.suggest_next },
     GFX, DEVICE_TARGET: setup.device_target || '', PHYSICAL_CU_COUNT: setup.physical_cu_count || 0,
     ROOFLINE_STATUS: budgetRes && budgetRes.exit_code === 0 ? `tabulated-${GFX}` : `unknown-${GFX}`,
-    BUDGET_JSON: budgetRes ? budgetRes.budget_json : '', LEARNED_KB: 'off',
+    BUDGET_JSON: budgetRes ? budgetRes.budget_json : '', LEARNED_KB: USE_LEARNED_READ ? 'on' : 'off',
+    ...(USE_LEARNED_READ ? { LEARNED_KB_BUDGET:
+      `At most ${KB_DIR_CAP} of this round's directions may draw on learned cards, and you must cite ` +
+      'the cards you used in that direction\'s `learned_refs`. ' +
+      (KB_COLD_DIRECTION ? 'At least ONE direction must be planned from the profile alone, with an empty ' +
+        '`learned_refs` -- it is this round\'s control. ' : '') +
+      'Read as much of the index as you like; the budget is on how much of the ROUND the KB steers.' } : {}),
     ...(Number.isFinite(left) ? { MINUTES_REMAINING: Math.round(left / 60) } : {}),
     ...(forbidStop ? { STOP_NOT_PERMITTED:
       `You returned stop=true with ${Math.round(left / 60)} min of the wall-clock window still unspent. This run is a ` +

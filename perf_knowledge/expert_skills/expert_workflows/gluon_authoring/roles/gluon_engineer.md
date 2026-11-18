@@ -48,12 +48,15 @@ field names the command you ran, its exit code and where its output is.
   `GEAK_SOURCE_INVALID` means discard that invocation's output.
 - If `ROUND_DEADLINE_EPOCH` is set, return before it (`date +%s`), with what you have.
 - Correctness first: run the COMMANDMENT correctness command on the candidate and report
-  `correctness`; scan for non-finite outputs (a tolerance check cannot fail on NaN).
+  `correctness`; scan for non-finite outputs (a tolerance check cannot fail on NaN). Do not run the
+  COMMANDMENT's full benchmark yourself: your screen is G4, and `verify_engineer` measures the
+  candidate with the frozen commands right after you return.
 - Two comparators on every number: `CHAMPION_VS_BASELINE` converts a speedup vs the frozen baseline
   into one vs the champion. `vs_anchor` alone is never a result.
 - No config sweep, no branch, no `num_warps` change on a transcribed kernel: a suspect config is a
   `resweep_request` and a suspect structure is a `structure_suspect` (path to the evidence) in your
-  return; the workflow carries them to the close.
+  return; tech_lead may turn it into a deep_explore direction, and the workflow carries it to the
+  close. A tile or warp re-cut happens only inside a deep_explore direction.
 
 ## The gates (field names are what you return)
 
@@ -63,12 +66,26 @@ field names the command you ran, its exit code and where its output is.
   not state is `null` with `missing_reason`, never 0.
 - `g4_screen` (G4): `python3 $KT/ab_bench.py --module <adapter>.py --permute --json OUTPUT_DIR/ab/ab.json`
   under `gpu_lock.sh`, candidate vs `TRACK_START` (each arm its own kernel object and cache dir, a
-  `fingerprint()` hook). Write the adapter once (`variants()`, `oracle()` or `outputs()`+`reference()`,
-  `fingerprint()` — the contract is in `ab_bench.py --help`; `$KT/create_harness.py` scaffolds a
-  harness_lib-timed harness it can import) under `$EVAL_DIR/gluon/ab_adapter/` and reuse it in later
-  rounds; never edit the task's own harness. Return `exit_code`, `json_path`, `delta_pct`, `noise_band_pct`, `resolved`
-  (false = inside the band, `NOT RESOLVED`) and `valid` (the json's `validity.valid`). A screen is not
-  acceptance; verify is.
+  `fingerprint()` hook), with `--tol` set to the task's own correctness tolerance (the default is
+  stricter than most tasks). Take the arms from the track, not from hand copies:
+  `python3 $SKILL/scripts/track_variants.py --track "$WS" --file <kernel source path> --out OUTPUT_DIR/ab/arms "$TRACK_START" "$ROUND_TAG"`
+  writes each revision's file and `variants.json`. Write the adapter once, reading `variants.json`
+  (`variants()`, `oracle()` or `outputs()`+`reference()`, `fingerprint()` — the contract is in
+  `ab_bench.py --help`; `$KT/create_harness.py` scaffolds a harness_lib-timed harness it can import),
+  under `$EVAL_DIR/gluon/ab_adapter/`, and reuse it in later rounds; never edit the task's own harness.
+  Return `exit_code`, `json_path`, `delta_pct`, `noise_band_pct`, `resolved` (false = inside the band,
+  `NOT RESOLVED`) and `valid` (the json's `validity.valid`). A NOT RESOLVED screen whose
+  `noise_band_arm` is `baseline` is a noisy window, not a null: re-measure with more `--cells` (or
+  `--preload`) before you call it. A screen is not acceptance; verify is.
+- `edge_shapes`: `python3 $SKILL/scripts/edge_shapes.py --module <adapter>.py --dims NAME=value:block,... --baseline <arm> --tol <task tolerance> --json OUTPUT_DIR/gates/edge.json`
+  runs every arm and a reference on the boundary shapes the task's cases skip (each tiled dimension at
+  1, block±1 and the tails around its value). Its adapter adds `run(name, shape)` and
+  `reference(shape)` (contract in `edge_shapes.py --help`); keep it beside the G4 adapter. Required in
+  transcribe (baseline: the champion) and author; in recover and climb whenever the change touches
+  masks, index arithmetic, a tile size or loop bounds (baseline: `TRACK_START`). Return `command`,
+  `exit_code`, `json_path`, `baseline` and, for exit 3, `shared_limitation` (which shapes, which
+  dimension). Exit 1 — the candidate fails a shape its baseline passes — rejects the candidate; exit 3
+  — the baseline fails it too — is carried as a caveat.
 - Profiling: `python3 $SKILL/scripts/gluon_profile.py OUTPUT_DIR/profile --kernel <substr> --source <kernel.py> --gpu <one id of GPU_ID> --arch $GFX --compare LAST_PROFILE -- <cmd...>`
   is this workflow's profiling entry (not `profile_kernel.sh`). One call gives the four dials of
   `profile.md ## 3.1` — A from the IR (both occupancy limiters, spill, hot-loop mix), B from ATT
@@ -94,17 +111,21 @@ field names the command you ran, its exit code and where its output is.
 `CHAMPION_BUNDLE`), `ttgir_bridge.py recover`, **apply** every recovered layout, compile, dump the
 anchor's IR, and drive `ttgir_bridge.py verify` to `PASS` or `RECONCILED` (every difference named).
 Record the four equivalence checks in `equivalence`: `layout_diff` (PASS|RECONCILED|FAIL), `numeric`
-(oracle at tolerance), `determinism` (~40 launches), `asm_parity` (mix and sequence). Name every
-divergence (faithful / forced / elective) in `round.md`. Do not optimize in this round.
+(oracle at tolerance), `determinism` (~40 launches), `asm_parity` (mix and sequence), and run
+`edge_shapes` with the champion as the baseline: a transcription owns every mask the compiler used to
+emit, so a tail the champion handles and the anchor does not is a divergence, not an optimization
+detail. Name every divergence (faithful / forced / elective) in `round.md`. Do not optimize in this round.
 If the workspace source is already the Gluon anchor (the champion is only the golden copy), do not
 re-transcribe: verify the existing anchor against the champion's IR, set `anchor_provided: true`,
-`patch_file` may be empty and `track_tag` is `geak_base`. Also return `g3_occupancy` on the anchor.
+`patch_file` may be empty and `track_tag` is `geak_base`. Also return `g3_occupancy` and `edge_shapes`
+on the anchor.
 
 ## PHASE=author (fresh)
 
 No champion to transcribe: write the simplest correct Gluon kernel for this operator from the API
 references (explicit layouts, MFMA for the matmul, the target's memory path), wire it into the task
-source so the frozen harness calls it, pass correctness, and return `g3_occupancy` on it. No
+source so the frozen harness calls it, pass correctness, and return `g3_occupancy` and `edge_shapes`
+on it (no champion: the kernel is its own baseline, so exit 3 names the shapes it does not handle). No
 optimization in this round.
 
 ## PHASE=recover (port)
@@ -136,11 +157,14 @@ gate (`references/pitfalls/negative-patterns.md`): `inline_asm: true` plus `disa
   legal or profitable (e.g. a second LDS buffer for one operand + moving the barrier it frees). Commit
   the prerequisite alone first and screen it, then the pair: `pair_screen` carries both permuted
   screens vs `TRACK_START` (`prerequisite_json`, `prerequisite_delta_pct`, `pair_json`,
-  `pair_delta_pct`). The pair is the candidate; the other gates are on the pair.
+  `pair_delta_pct`). Return the better of the two as the candidate and say which in
+  `pair_screen.outcome` (`pair` | `prerequisite` | `neither`); the other gates are on that candidate.
+  A prerequisite that wins alone is a result, and the lever's failure on top of it is the lesson.
 - **deep_explore** (`DIRECTION.specialty`): broad authority over one coherent Gluon rewrite (re-tile,
   layout, pipeline structure) with your own measure → profile → rewrite loop toward `DIRECTION.prompt`'s
   target; it runs alone in its round. The returned candidate still owes every climb gate, with `layer`
-  the primary layer it changes.
+  the primary layer it changes. A re-tile owes its occupancy arithmetic: `probe.py` on the old and new
+  tile (both limiters, workgroups per CU) in `round.md`, and `edge_shapes` (the tile moved every mask).
 
 ## PHASE=integrate
 
@@ -186,7 +210,8 @@ Return (`conclusion: "no_improvement"` with no tag when nothing beats `BEST_INDI
          "exit_code": 0, "output_dir": "...", "state": "ok", "reason": ""},
  "parity_gate": {"command": "...", "exit_code": 2, "ratio": 0.81, "suspects": [], "json_path": "...", "mode": "gate"},
  "equivalence": {"layout_diff": "PASS", "numeric": "pass", "determinism": "pass", "asm_parity": "pass", "output_path": "..."},
- "pair_screen": {"prerequisite_json": "...", "prerequisite_delta_pct": -1.7, "pair_json": "...", "pair_delta_pct": 39.3},
+ "edge_shapes": {"command": "python3 $SKILL/scripts/edge_shapes.py ...", "exit_code": 0, "json_path": "...", "baseline": "...", "shared_limitation": ""},
+ "pair_screen": {"prerequisite_json": "...", "prerequisite_delta_pct": 0.0, "pair_json": "...", "pair_delta_pct": 0.0, "outcome": "pair|prerequisite|neither"},
  "inline_asm": false, "disassembly_ref": "", "enabling_step": false, "claim": "win",
  "lesson": "...", "resweep_request": "", "structure_suspect": "", "notes": "..."}
 ```

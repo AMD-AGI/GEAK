@@ -26,6 +26,11 @@ const enumOf = (block) => ((block.match(/specialty: \{ type: 'string', enum: (\[
   }
   ok(laneDefault('max_no_improve') === '2' && /max_no_improve, ENTRY === 'port' \? 6 : 2\)/.test(wf),
     'max_no_improve: 2 as in kernel_lane.js (a port keeps its own 6)');
+  for (const [key, val] of [['use_learned_kb', "'true'"], ['kb_dir_cap', '1'], ['kb_cold_direction', "'true'"]]) {
+    const re = (src) => new RegExp(`A\\.${key} != null \\? A\\.${key} : ${val.replace(/'/g, "\\'")}`).test(src) ||
+      new RegExp(`num\\(A\\.${key}, ${val}\\)`).test(src);
+    ok(re(lane) && re(wf), `${key} defaults to ${val} in both`);
+  }
   ok(laneDefault('progress_delta') === 'MIN_IMPROVE' && /progress_delta, ENTRY === 'port' \? -0\.05 : MIN_IMPROVE\)/.test(wf),
     'progress_delta: MIN_IMPROVE as in kernel_lane.js (a port gives ground)');
 
