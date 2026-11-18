@@ -77,6 +77,9 @@ image's code/configs. `USER` and `LOGNAME` identify the host user even when the
 image lacks that UID's passwd entry, for libraries using `getpass.getuser()`.
 Container names default to a wave-specific prefix; an explicit
 `UT_WAVE_CONTAINER_PREFIX` must be unique per campaign and is saved for resume.
+PyTorch's disposable kernel cache defaults to writable container-local storage:
+ROCm ISA filenames contain colons that some shared filesystems reject. All legs
+in that worker share it; an explicit `PYTORCH_KERNEL_CACHE_PATH` is preserved.
 Command-specific exports require `gpu --env K=V`; CPU-container `/tmp` is not shared.
 Local mode uses visibility masks and a Linux subreaper for trusted runners/tests.
 After controller death the broker drains jobs before releasing locks; resume drains

@@ -7,14 +7,14 @@
     "references/delivery-contract.md": "888be480426fdda80d0c7d4304fd610976fe5ed68349bbb467488ed8e78ac996",
     "references/joint-indexer-ut.md": "815a3f4099040035289e7e714621f96e4fed1f85f5be98934fc8ac5d20612e9f",
     "references/pipeline-handoff.md": "fcecedc1add2c2f1f09c85e832ec835e548c8ad4ed1ea64a3b8afd733cffb28d",
-    "references/setup.md": "970fb09033e5dd159e0b877af65ec64e1c504028a1b2427b178d84110a215664",
+    "references/setup.md": "2c614c78d29bfb4d7d7a7aa07b78aa175b746b3c2a361fff728795d7d7c24315",
     "references/source-delivery-records.md": "52890f74ed1731f8c90e11abcf6f8e9ec720ae42e2ea1192b5b837c4ca327c6d",
     "references/source-extraction.md": "eb5a218097f18c05a543ad5d3342f2ba09e50247da815f4ce2f72c557a798c46",
     "references/task-authoring.md": "88f67034d7cc9260b01fe8852b09387023d9324d2337a49e0f64a349d3ba8386",
     "references/ut-lane.md": "4afe39295d343deda8f1be94045023e47aaba1071423eba79af1bd6db9c72b3d",
     "scripts/scaffold_tasks.py": "e0bfde7cf8efe55d3b5c06dd5b74bee3c57b9af64870a12f064863351e46bca5",
     "scripts/ut_gpu_queue.py": "98fb2b624e4b5b4ef44428523d6f8954fc93693958b62720a77c969187c43183",
-    "scripts/ut_wave.py": "4133116ac3dfc2a250240ff90aba702a4b73bd43f07593aedc04e919d046b8f3",
+    "scripts/ut_wave.py": "67199ac4125a3bd7cd21bbe018076ea8cd841ce994f3795772ded04ae6422fc9",
     "shared/delivery_contract.mjs": "3b8674016eaf1c7e70278911d5dcc181587b29d87cbc1882f4e895b0415f96ce",
     "shared/harness_lib.py": "32c062eb15ba445ac2da911b048d03e1ac524ba449fa36a6d3516f44fd7bde80",
     "shared/kernel_extraction_delivery.mjs": "212ee4a108b77fc9fba056a059e0a01a6cd728331a9b0aa9378e30cffb3a44f9",
@@ -55,9 +55,9 @@
     "ut_contracts/ut_driver.py": "188aa6f7c086690da2e151f0182092e6b66e102cbb76c6415e4d2576d9bea2d9"
   },
   "modified_from_origin": false,
-  "note": "Installs a ut_request.json (scaffold_tasks.py) and writes/qualifies its tasks, including mono_layer. Reads no profile evidence. Rebased onto geak-x ccc7427: preserve the upstream requirement for distinct replay-call IDs and compilation-variant links in kernel-ut/SKILL.md. c28 regression: host UID/GID Docker writers with writable AITER cache, shared-lock broker liveness across PID namespaces, read-only GPU flock handles, and native delivery verification before wave completion. Explicit resumes retain logs and renew attempts; finite request weights are enforced. Rebased onto geak-x f3d2153; keep the split driver's selective CPU copy of top-k score inputs, which already avoids copying unused comparison inputs (236ee03). Timing now batches shapes per immutable side/round, streams input factories, reports setup/input timing, and retains fresh-process A/A mode with separate resume identity. No user scheduling flag; retain timing errors and provide writable FlyDSL/AITER runtime caches. Current canonical UT receipts use the explicit ut_driver/source_snapshot/v1 delivery contract and full-report verification. Scoped wave freshness now uses native source/input hashes, not unrelated delivery/cache timestamps; explicit legacy snapshot contracts remain supported. Accept the driver's positive-infinite SQNR only in successful zero-error comparison diagnostics; preserve strict bounds, timing and other nonfinite rejection.",
+  "note": "Installs a ut_request.json (scaffold_tasks.py) and writes/qualifies its tasks, including mono_layer. Reads no profile evidence. Rebased onto geak-x ccc7427: preserve the upstream requirement for distinct replay-call IDs and compilation-variant links in kernel-ut/SKILL.md. c28 regression: host UID/GID Docker writers with writable AITER cache, shared-lock broker liveness across PID namespaces, read-only GPU flock handles, and native delivery verification before wave completion. Explicit resumes retain logs and renew attempts; finite request weights are enforced. Rebased onto geak-x f3d2153; keep the split driver's selective CPU copy of top-k score inputs, which already avoids copying unused comparison inputs (236ee03). Timing now batches shapes per immutable side/round, streams input factories, reports setup/input timing, and retains fresh-process A/A mode with separate resume identity. No user scheduling flag; retain timing errors and provide writable FlyDSL/AITER runtime caches. Current canonical UT receipts use the explicit ut_driver/source_snapshot/v1 delivery contract and full-report verification. Scoped wave freshness now uses native source/input hashes, not unrelated delivery/cache timestamps; explicit legacy snapshot contracts remain supported. Accept the driver's positive-infinite SQNR only in successful zero-error comparison diagnostics; preserve strict bounds, timing and other nonfinite rejection. Keep the default PyTorch HIP kernel cache on container-local Linux storage because ISA filenames with colons fail on some shared filesystems.",
   "origin": "AMD-AGI/GEAK refactor/profile-ut-split: UT half of kernel-extract",
   "skill": "kernel-ut",
   "stage": "ut",
-  "tree_sha256": "a6a0be8282a0b8943423d86158a802feee107319d121aeef14853ff33e96c209"
+  "tree_sha256": "4570c45541b52010065001e57848ddac428ac86e78bb5cd06084972aa65ed68c"
 }

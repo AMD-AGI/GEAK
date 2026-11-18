@@ -58,6 +58,10 @@ wave=Path(os.environ['UT_WAVE_DIR'])
 assert getpass.getuser() == os.environ['USER']
 Path('/tmp/aiter_configs/writable').touch()
 assert os.environ['FLYDSL_RUNTIME_CACHE_DIR'].startswith(str(wave))
+cache=Path(os.environ['PYTORCH_KERNEL_CACHE_PATH'])
+assert not str(cache).startswith('/shared_nfs/')
+(cache/'exp2_kernel_archgfx950:sramecc+:xnack-_tmp_12').write_text('cache')
+assert (cache/'exp2_kernel_archgfx950:sramecc+:xnack-_tmp_12').read_text() == 'cache'
 # The deadline expires before the broker can acquire devices. This exercises
 # real submit, liveness, finish and result transport without any GPU access.
 rc=Q.submit(SimpleNamespace(count=1,timeout=.000001,command=['true'],env=[],cwd=None))

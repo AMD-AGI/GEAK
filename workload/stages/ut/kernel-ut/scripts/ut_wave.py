@@ -355,6 +355,13 @@ class Docker(object):
         # override keeps new builds writable and shared with this task's workers.
         env.setdefault('AITER_JIT_DIR', os.path.join(home, '.cache', 'aiter'))
         env.setdefault('FLYDSL_RUNTIME_CACHE_DIR', os.path.join(home, '.cache', 'flydsl'))
+        # ROCm's torch JIT cache names contain ISA colons (gfx950:sramecc+:...).
+        # Some shared filesystems reject them with EINVAL, causing every leg to
+        # recompile. Keep this disposable cache on container-local Linux storage.
+        if 'PYTORCH_KERNEL_CACHE_PATH' not in env:
+            env['PYTORCH_KERNEL_CACHE_PATH'] = '/tmp/geak_torch_kernels'
+            cmd += ['--tmpfs', '/tmp/geak_torch_kernels:rw,uid=%d,gid=%d,mode=0700' %
+                    (os.getuid(), os.getgid())]
         # The image may have no passwd entry for this numeric UID. Libraries
         # commonly resolve their cache owner with getpass.getuser().
         import pwd
