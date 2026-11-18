@@ -33,3 +33,28 @@ crossover. Its 20% crossover share is the first knob to cut if runs confirm this
 Not yet run on GPU. Next: hillclimb vs evo (vs avo) from c000, same GPUs and hours, ≥ 2 seeds per arm.
 "avo" here means agentic variation operators (the agent as a directed mutation operator with failure
 briefs and named operators). If a specific published AVO method is meant, `search/avo.md` should follow it.
+
+## Mapping to GEAK-evo (PR #580)
+
+`search/evo.md` is meant to reach PR #580's evolutionary search as skills. Below, each PR #580 feature
+next to where v4 has it:
+
+| GEAK-evo (PR #580) | v4 |
+|---|---|
+| archive of all attempts with source, schema `geak.evolution/1`, `best_id` tracked separately | `bin/archive.py build` → `RUN/archive.json` (`schema`, `entries`, `best_id` from `RUN/shipped/ID`) |
+| status correct / slower / incorrect / unverified; retention ≠ promotion | `archive.py` status mapping; COMMON "retention never promotes"; ship rule unchanged |
+| planner picks `parent_id`, `donor_ids`, `approach` per direction | lead decision `mutate {parent_id, donor_ids, approach, question}` |
+| private workspace = fixed base + parent's cumulative patch | `bin/mkws.sh $RUN <ws> cands/<parent>/patch.diff` (base = `RUN/orig`) |
+| donors as references; the engineer combines and checks the contribution is present | engineer `DONORS`: name the contribution, verify it is in the executed code |
+| `evolution_return_development` / `preserve_founder_attempts` | engineer `RETAIN=development`: the best correct realization even if slower, retained as `slower` |
+| `evolution_start` first_stall / search_start | lead `EVOLUTION_START` |
+| planner sees the latest 12 entries + best, full archive on disk | evo.md "Planner view" |
+| ledger: approach continuity, outcome classes, subsumed / reopen | evo.md "Ledger discipline" |
+| `population_lineage` checkpoint migration (publish / import named peers; imports become parents and donors, never auto-incumbent) | `bin/population.py publish / import` (base-hash + metric + patch-hash checks); evo.md "Population" |
+| `evolution_evidence_handoff` / case-evidence views | the decision `question` + failure brief (avo); `archive.py views` per-regime front |
+| greedy remains selectable | `SEARCH=hillclimb` |
+
+Not reproduced: PR #580's JS runtime (budget/deep_cost accounting, process-bounded clocks, native evaluator,
+Hyperloom handoff). v4 relies on the lead's time boxes and the v3 instrument instead. PR #580's reported
+selected results (+5.85% over GEAK on 2 AgentX comparisons; +8.59% on 3 InferenceX rows) are its own;
+v4's evo has not been run yet.
