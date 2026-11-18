@@ -5,9 +5,11 @@ provider for AMD GPUs, validated on Strix Halo (gfx1151) with Qwen3.8-27B int4. 
 rebuilds the release's kernel library, measures TTFT and decode with an A/A of the rebuild,
 profiles the prefill and decode forwards, and refreshes hip-ep's own autotune tables
 (matmul_nbits, gqa) for the model wherever their kernels hold at least 20% of the
-prefill or of a decode step (the tuning lane). A candidate is accepted only through an
-interleaved A/B and a logits parity gate, and the final package is re-measured against
-the release. The design is in [DESIGN.md](DESIGN.md).
+prefill or of a decode step (the tuning lane). It then runs GEAK's unchanged
+`kernel_workflow` on a task built from hip-ep's own unit tests (the 4-bit MatMulNBits
+prefill GEMM) and rebuilds the library with its patch (the kernel lane). A candidate
+is accepted only through an interleaved A/B and a logits parity gate, and the final
+package is re-measured against the release. The design is in [DESIGN.md](DESIGN.md).
 
 ## Prerequisites
 
@@ -28,6 +30,7 @@ With the Workflow tool, `scriptPath` = `hip_ep_e2e_workflow.js`:
 {"model_path": "/models/qwen3.8-27b-int4-oga019",
  "hipep_pkg": "/opt/hip-ep-0.5.3",
  "tools_dir": "<GEAK>/tools/hip_ep_e2e",
+ "kernel_workflow_dir": "<GEAK>/kernel_workflow",
  "exp_root": "/work/hipep-runs",
  "therock": "/opt/therock-10.1.0",
  "sysroot": "/opt/sysroot-u2604",
@@ -36,7 +39,8 @@ With the Workflow tool, `scriptPath` = `hip_ep_e2e_workflow.js`:
  "hipep_build": "/work/hip-ep-build"}
 ```
 
-Optional: `lens` (`1024,2048`), `gen` (128), `reps` (3), `rounds` (2).
+Optional: `lens` (`1024,2048`), `gen` (128), `reps` (3), `rounds` (2),
+`kernel_budget` (6) and `kernel_hours` (6; no kernel-lane round starts after it).
 The run writes `report.md` and `workflow_return.json` into its eval dir.
 
 Each tool also runs alone with the `HIPEP_*` variables set, e.g.

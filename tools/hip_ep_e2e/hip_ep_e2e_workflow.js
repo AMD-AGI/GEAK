@@ -1,12 +1,14 @@
 export const meta = {
   name: 'hip-ep-e2e-workflow',
-  description: 'End-to-end optimizer for an OGA model served by hip-ep (the ONNX Runtime EP for AMD GPUs). Measures TTFT and decode with model_benchmark and profiles the prefill and decode forwards. For the ops whose kernels carry the prefill or decode (matmul_nbits, gqa), it refreshes hip-ep\'s own autotune tables for the model (the tuning lane). The candidate is a rebuilt libcustom_kernels library in a copy of the release package, accepted only through an interleaved TTFT/decode A/B and a teacher-forced logits parity gate. The tools it drives live next to this script (tools/hip_ep_e2e).',
-  whenToUse: 'Optimize an OGA-exported model on hip-ep. Pass args.model_path (OGA model dir), args.hipep_pkg (release package dir), args.tools_dir (this script\'s dir), args.exp_root, and the machine paths args.therock, args.sysroot, args.py314, args.hipep_src and args.hipep_build (tools/hip_ep_e2e/README.md).',
+  description: 'End-to-end optimizer for an OGA model served by hip-ep (the ONNX Runtime EP for AMD GPUs). Measures TTFT and decode with model_benchmark and profiles the prefill and decode forwards. For the ops whose kernels carry the prefill or decode, it runs two lanes: a tuning lane (refresh hip-ep\'s own autotune tables, matmul_nbits and gqa, for the model) and a kernel lane (the UNCHANGED kernel_workflow on a task built from hip-ep\'s own unit-test leaves; the 4-bit MatMulNBits prefill GEMM is the op it has a task for). Every candidate is a rebuilt libcustom_kernels library in a copy of the release package, accepted only through an interleaved TTFT/decode A/B and a teacher-forced logits parity gate. The tools it drives live next to this script (tools/hip_ep_e2e).',
+  whenToUse: 'Optimize an OGA-exported model on hip-ep. Pass args.model_path (OGA model dir), args.hipep_pkg (release package dir), args.tools_dir (this script\'s dir), args.kernel_workflow_dir (GEAK kernel_workflow/ dir), args.exp_root, and the machine paths args.therock, args.sysroot, args.py314, args.hipep_src and args.hipep_build (tools/hip_ep_e2e/README.md). Optional: args.kernel_budget, args.kernel_hours.',
   phases: [
     { title: 'Setup', detail: 'Director rebuilds the release library and measures it against the release (A/A, baseline)' },
     { title: 'Profile', detail: 'Profiler traces one run -> per-phase kernel shares with sources' },
-    { title: 'Strategize', detail: 'The tuning lane runs for the tunable ops that carry enough of the prefill or decode' },
+    { title: 'Strategize', detail: 'Each lane runs for the ops that carry enough of the prefill or decode' },
     { title: 'Tuning', detail: 'Tuner refreshes those ops\' autotune tables for the model -> rebuild -> gate' },
+    { title: 'HeadKernel', detail: 'Extractor builds the kernel task -> nested kernel_workflow lane' },
+    { title: 'Integrate', detail: 'Integrator rebuilds the library with the kernel patch (and re-tuned tables) -> gate' },
     { title: 'Validate', detail: 'Validator re-measures the final package against the release and writes the report' },
   ],
 };
@@ -28,6 +30,11 @@ const MODEL_PATH = need('model_path');
 const BASE_PKG = need('hipep_pkg');
 const TOOLS_DIR = need('tools_dir');
 const EXP_ROOT = need('exp_root');
+const KERNEL_WF_DIR = need('kernel_workflow_dir');
+// The single-language worker, called directly: going through the kernel_workflow.js dispatcher would
+// nest this workflow -> dispatcher -> worker (3 levels), which the runtime forbids (as in
+// e2e_workflow.js).
+const KERNEL_LANE_SCRIPT = `${KERNEL_WF_DIR}/kernel_lane.js`;
 // Every machine path the tools read (hipep_env.PATHS). None has a default.
 const TOOL_ENV = {
   HIPEP_PKG: BASE_PKG, HIPEP_THEROCK: need('therock'), HIPEP_SYSROOT: need('sysroot'),
@@ -45,6 +52,13 @@ const TUNABLE = [
   { op: 'gqa', kernels: /^gqa_flash/, phases: ['prefill', 'decode'] },
 ];
 const MIN_SHARE = 0.2;
+const KERNEL_BUDGET = parseInt(A.kernel_budget != null ? A.kernel_budget : 6, 10);
+const KERNEL_HOURS = Number(A.kernel_hours != null ? A.kernel_hours : 6);
+// The op the kernel lane has a GEAK task for (make_task.py --op), the kernels its editable sources
+// compile, and the autotune tables to re-sweep on the edited kernel. It runs under the same
+// MIN_SHARE rule as the tuning lane.
+const KERNEL_OP = { op: 'matmul_nbits_u4_prefill', kernels: /^MatMulNBitsWMMA/, phases: ['prefill'],
+  retune: ['matmul_nbits'] };
 const AGENT_RETRIES = 2;
 const MIN = 60000;
 
@@ -153,18 +167,21 @@ if (!prof || !prof.heads_json) throw new Error('Profile failed: no heads.json');
 // ===========================================================================
 phase('Strategize');
 const pct = (x) => `${(100 * x).toFixed(1)}%`;
+// An op's share: its kernels' largest share of one phase.
+const shareOf = (t) => Math.max(...t.phases.map((ph) => (prof[ph] || [])
+  .filter((r) => t.kernels.test(String(r.base || ''))).reduce((s, r) => s + (Number(r.share) || 0), 0)));
 const shares = {};
-for (const t of TUNABLE) {
-  shares[t.op] = Math.max(...t.phases.map((ph) => (prof[ph] || [])
-    .filter((r) => t.kernels.test(String(r.base || ''))).reduce((s, r) => s + (Number(r.share) || 0), 0)));
-}
+for (const t of TUNABLE) shares[t.op] = shareOf(t);
 const tuneOps = TUNABLE.map((t) => t.op).filter((op) => shares[op] >= MIN_SHARE);
-log(`largest phase share per tunable op: ${TUNABLE.map((t) => `${t.op} ${pct(shares[t.op])}`).join(', ')}` +
-  ` (the tuning lane needs ${pct(MIN_SHARE)})`);
+const kernelShare = shareOf(KERNEL_OP);
+log(`largest phase share per tunable op: ${TUNABLE.map((t) => `${t.op} ${pct(shares[t.op])}`).join(', ')}; ` +
+  `kernel lane op ${KERNEL_OP.op} ${pct(kernelShare)} (a lane needs ${pct(MIN_SHARE)})`);
 
-// The candidate: the release, unless the tuning lane's package is accepted.
+// The current accepted state: each candidate is gated against it, and parity is always checked
+// against the release, so accepted changes cannot drift step by step.
 let cur = { pkg: BASE_PKG, overlay: '', label: 'release' };
 const history = [];
+
 if (tuneOps.length) {
   phase('Tuning');
   const laneDir = `${EVAL_DIR}/lanes/0_tuning`;
@@ -181,6 +198,78 @@ if (tuneOps.length) {
   history.push({ lane: 'tuning', ops: [], shares, result: { accepted: false,
     reason: `not run: no tunable op holds ${pct(MIN_SHARE)} of a phase` } });
 }
+
+async function kernelLane() {
+  const entry = (result, extra = {}) => ({ lane: 'kernel', op: KERNEL_OP.op, share: kernelShare, ...extra, result });
+  if (kernelShare < MIN_SHARE) {
+    return entry({ accepted: false,
+      reason: `not run: ${KERNEL_OP.op} is ${pct(kernelShare)} of its phase, under ${pct(MIN_SHARE)}` });
+  }
+  phase('HeadKernel');
+  const laneDir = `${EVAL_DIR}/lanes/1_kernel`;
+  // kernel_lane.js names the kernel after the task dir (minus `_task`); the name addresses the
+  // experience store.
+  const taskDir = `${laneDir}/${KERNEL_OP.op}_task`;
+  const ex = await agentT(roleAgent('extractor', 'extract',
+    'Generate the GEAK kernel task for this op and record its baseline.', {
+      EVAL_DIR, LANE_DIR: laneDir, TASK_DIR: taskDir, OP: KERNEL_OP.op, MODEL_PATH,
+      CUR_OVERLAY: cur.overlay, LENS, TOOLS_DIR, TOOL_ENV, ARCH: setup.device_gfx,
+    }), { label: 'extractor:extract', phase: 'HeadKernel', schema: S({
+    status: str, workload_json: str, steer: str,
+  }, ['status', 'workload_json']) }, 60 * MIN);
+  // The extractor's status reads "PASS ..." or "fail: <step>: <error>".
+  if (!ex || !/^pass\b/i.test(String(ex.status || '').trim())) {
+    return entry({ accepted: false, extract: ex,
+      reason: ex ? `the task failed at baseline: ${ex.status}` : 'the extractor returned no result' });
+  }
+  const clock = await agentT('Run `date +%s` with Bash and return {"epoch": <that integer>}.',
+    { label: 'clock', phase: 'HeadKernel', schema: S({ epoch: num }, ['epoch']) }, 5 * MIN);
+  const windowS = Math.round(KERNEL_HOURS * 3600);
+  // A cap, not a fixed window: no round starts after the deadline, and a no_stop_s past the window
+  // leaves the TechLead free to end early (e2e_workflow.js's laneDeadlineArgs does the same).
+  const deadlineEpoch = clock && clock.epoch ? Math.round(clock.epoch) + windowS : null;
+  if (deadlineEpoch === null) log('kernel lane: the clock is unreadable, so the lane runs without a deadline');
+  const deadline = deadlineEpoch ? { deadline_epoch: deadlineEpoch, no_stop_s: windowS + 86400 } : {};
+  let kr = null;
+  let kerr = '';
+  try {
+    kr = await workflow({ scriptPath: KERNEL_LANE_SCRIPT }, {
+      kernel_path: taskDir, workflow_dir: KERNEL_WF_DIR, mode: 'optimize', target_language: 'hip',
+      budget: KERNEL_BUDGET, exp_root: `${EVAL_DIR}/kernel`, workload_spec_path: ex.workload_json,
+      task: ex.steer || '', ...deadline,
+    });
+  } catch (e) {
+    kerr = String(e).slice(0, 500);
+    log(`kernel lane failed to run: ${kerr}`);
+  }
+  const ksp = kr ? Number(kr.final_speedup || kr.final_geomean || 0) : 0;
+  const kernel = kr && { eval_dir: kr.eval_dir, final_speedup: ksp, validation_status: kr.validation_status,
+    reason: kr.reason || '' };
+  log(`kernel lane ${KERNEL_OP.op}: isolated speedup ${ksp}x, ${kr ? kr.validation_status : 'no result'}`);
+  // Only a result the lane's own Director re-measured and accepted counts: the bar kernel_lane.js
+  // itself sets (the same compare) before it writes to the experience store.
+  const accepted = kr && String(kr.validation_status || '').toLowerCase() === 'accepted';
+  if (!kr || !(ksp > 1.0) || !kr.final_patch || !accepted) {
+    return entry({ accepted: false, reason: kerr ? `kernel lane did not run: ${kerr}`
+      : !kr ? 'kernel lane returned no result'
+        : `no verified isolated speedup (${ksp}x, ${kr.validation_status})` +
+          (kr.reason ? `: ${kr.reason}` : '') }, { kernel, deadline_epoch: deadlineEpoch });
+  }
+
+  phase('Integrate');
+  const ig = await agentT(roleAgent('integrator', 'integrate',
+    'Rebuild the kernel library with the kernel patch and re-tuned tables, then gate it.', {
+      EVAL_DIR, LANE_DIR: laneDir, MODEL_PATH, BASE_PKG, CUR_PKG: cur.pkg,
+      CUR_OVERLAY: cur.overlay, TASK_DIR: taskDir, FINAL_PATCH: kr.final_patch,
+      KERNEL_SPEEDUP: ksp, AA_JSON, TOOLS_DIR, LENS, GEN, REPS, ROUNDS, TOOL_ENV,
+      ARCH: setup.device_gfx, OPS: KERNEL_OP.retune.join(','),
+    }), { label: 'integrator:integrate', phase: 'Integrate', schema: GATE_SCHEMA }, 360 * MIN);
+  if (ig && ig.accepted) cur = { pkg: ig.pkg, overlay: ig.overlay, label: `kernel:${KERNEL_OP.op}` };
+  log(`integrate ${KERNEL_OP.op}: ${ig ? (ig.accepted ? 'ACCEPTED' : `rejected (${ig.reason})`) : 'no result'}`);
+  return entry(ig || { accepted: false, reason: 'the integrator returned no result' },
+    { kernel, deadline_epoch: deadlineEpoch });
+}
+history.push(await kernelLane());
 
 // ===========================================================================
 phase('Validate');

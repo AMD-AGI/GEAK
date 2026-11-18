@@ -6,8 +6,9 @@ provider for AMD GPUs: the model is an OGA export, measured with OGA's
 `sitecustomize` seams; hip-ep is a C++ runtime whose kernels live in one shared library,
 `libcustom_kernels_<arch>.so`, which the EP opens at session creation. So the
 runtime-facing steps have their own tools here (`hipep_env.py`, `bench.py`, `parity.py`,
-`kprof.py`, `build_kernels.sh`, `make_pkg.sh`), and `hip_ep_e2e_workflow.js` runs the loop
-over them: Setup, Profile, Strategize, Tuning, Validate. The validator re-measures the
+`kprof.py`, `build_kernels.sh`, `make_pkg.sh`, `lut_refresh.py`, `make_task.py`,
+`leaf_runner.py`, `integrate.py`), and `hip_ep_e2e_workflow.js` runs the loop over them:
+Setup, Profile, Strategize, Tuning, HeadKernel, Integrate, Validate. The validator re-measures the
 final package against the release; a candidate it cannot reproduce is reported, not
 returned as final.
 
@@ -54,6 +55,32 @@ on the device's own table, and rebuilds the library with every changed table:
 An op is tuned when its kernels hold at least 20% of the prefill or of a decode step:
 on Qwen3.8-27B that is matmul_nbits (82% of the prefill; gqa is under 1%), on Qwen3-0.6B
 both (gqa is 27% of a decode step).
+
+## Kernel lane
+
+`make_task.py` writes a GEAK kernel task for an op it describes (`OPS`; the 4-bit
+MatMulNBits prefill GEMM is the one described), and the lane runs on it under the same
+20% rule: `kernel_workflow` in optimize mode (`target_language: hip`), with a wall-clock
+cap (`kernel_hours`). Only a patch the lane's own Director re-measured and accepted
+(`validation_status: accepted`, the bar `kernel_lane.js` sets for the experience store)
+is integrated: `integrate.py` turns it into an overlay on top of the tuning lane's, the
+op's tables are re-swept on the changed kernel, and the candidate goes through the same
+gates against the tuning lane's package. The task dir is `<op>_task`, so the lane's
+experience-store entries are named after the op.
+
+The task uses the same `config.yaml` format as `tools/gen_ep_task.py` (#496), with a
+different cut of matmul_nbits:
+
+- **Oracles:** the release's own unit-test leaves (matmul_nbits, and qmoe_ragged_mm, which
+  compiles the same WMMA core), not the `gemm_fp16u2` example harness.
+- **Flags:** each source compiles with the release build's own command line (`ninja -t
+  commands`), not fixed flags.
+- **Shapes:** the model's, weighted by calls per forward times baseline time; timing runs
+  the kernel's online autotune, so a config choice alone does not count as a kernel win.
+
+`leaf_runner.py` is the task's runner: it adds a `leaf` oracle to `ep_task_runner.py`'s
+entry point and reports, which the task carries a copy of, so #496's tasks do not change.
+The task's README states what is checked and what is not timed.
 
 A failed Setup step stops the run. Long steps follow `e2e_workflow.js`'s LONG
 MEASUREMENTS rule.

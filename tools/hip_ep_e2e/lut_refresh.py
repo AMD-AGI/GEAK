@@ -3,11 +3,12 @@
 """Refresh hip-ep's autotune tables for one model and rebuild the kernel library with
 them (the tuning lane; DESIGN.md). hip-ep's own sweep drivers and update_lut.py pick the
 configs; nothing here judges which config is fastest. Each op sweeps on a private copy
-of the sources at the release tag, under the serving-GPU lock; one overlay holds every
-changed table, and lut_refresh.json records per op whether its table changed or why it
-was skipped.
+of the sources at the release tag plus --overlay (the kernel lane's edits, so tables are
+re-swept on the changed kernel), under the serving-GPU lock. The output overlay is
+--overlay plus every changed table, and lut_refresh.json records per op whether its
+table changed or why it was skipped.
 
-    python3 lut_refresh.py --model M --out DIR --arch gfx1151 [--ops matmul_nbits,gqa]
+    python3 lut_refresh.py --model M --out DIR --arch gfx1151 [--ops matmul_nbits,gqa] [--overlay IN]
 """
 import argparse
 import importlib.util
@@ -167,16 +168,21 @@ def clear_outputs(out):
         hipep_env.fresh(os.path.join(out, f))
 
 
-def private_tree(src, out_dir):
-    """lib/Runtime/Kernels/{hip,include} as committed at the release tag."""
+def private_tree(src, overlay, out_dir):
+    """lib/Runtime/Kernels/{hip,include} at the release tag, with the overlay applied."""
     root = os.path.join(out_dir, "src")
     shutil.rmtree(root, ignore_errors=True)
     hipep_env.export_tree(src, root, [f"{K}/hip", f"{K}/include"])
+    if overlay:
+        shutil.copytree(overlay, root, dirs_exist_ok=True)
     return root
 
 
-def write_overlay(root, luts, overlay_out):
-    """The overlay to build: each changed table, given as its path under root without the extension."""
+def write_overlay(overlay_in, root, luts, overlay_out):
+    """The overlay to build: the input overlay (a kernel lane's edits) plus each changed table,
+    given as its path under root without the extension."""
+    if overlay_in:
+        shutil.copytree(overlay_in, overlay_out)
     for lut in luts:
         dst = os.path.join(overlay_out, os.path.relpath(os.path.dirname(lut), root))
         os.makedirs(dst, exist_ok=True)
@@ -209,6 +215,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--arch", required=True, help="the device's gfx name; hip-ep loads that table")
     ap.add_argument("--ops", type=_ops, default="matmul_nbits,gqa")
+    ap.add_argument("--overlay", default=None, help="overlay the sweeps and the build start from")
     a = ap.parse_args()
     src, build = hipep_env.require("HIPEP_SRC"), hipep_env.require("HIPEP_BUILD")
     env = hipep_env.Env.from_environ()
@@ -216,7 +223,7 @@ def main():
     os.makedirs(out, exist_ok=True)
     clear_outputs(out)
     log = os.path.join(out, "lut_refresh.log")
-    root = private_tree(src, out)
+    root = private_tree(src, a.overlay, out)
 
     result, planned = {}, []
     for name in a.ops:
@@ -247,9 +254,9 @@ def main():
         if result[op.name]["changed"]:
             changed.append(lut)
 
-    if changed:
+    if a.overlay or changed:
         overlay = os.path.join(out, "overlay")
-        write_overlay(root, changed, overlay)
+        write_overlay(a.overlay, root, changed, overlay)
         _run(["bash", os.path.join(HERE, "build_kernels.sh"), overlay, os.path.join(out, "kbuild")], log)
     hipep_env.write_json(os.path.join(out, "lut_refresh.json"), {"arch": a.arch, "ops": result})
     for name, r in result.items():
