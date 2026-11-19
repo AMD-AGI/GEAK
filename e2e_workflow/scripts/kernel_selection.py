@@ -669,10 +669,13 @@ def main(argv=None):
     ]
     all_paths = [path for _, paths, _ in attempts for path in paths]
     verdict["best_process_meta_file"] = best_process_meta_file
-    # Only rank 0 saves the heavy I/O (capture_shapes._records_oracle): promote the process that has it.
-    oracle_meta_file = next((path for path in [best_process_meta_file, *metas]
-                             if metas[path].get("reference_io_sha256")), best_process_meta_file)
-    verdict["oracle_meta_file"] = oracle_meta_file
+    oracle_meta_file = best_process_meta_file
+    # A multinode capture (its metas name their host) saves the heavy I/O on rank 0 only
+    # (capture_shapes._records_oracle): promote the process that has it.
+    if any(meta.get("host") for meta in metas.values()):
+        oracle_meta_file = next((path for path in [best_process_meta_file, *metas]
+                                 if (metas.get(path) or {}).get("reference_io_sha256")), best_process_meta_file)
+        verdict["oracle_meta_file"] = oracle_meta_file
     verdict["trace_file"] = all_paths[0] if len(all_paths) == 1 else ""
     verdict["trace_files"] = all_paths
     verdict["trace_files_considered"] = trace_paths

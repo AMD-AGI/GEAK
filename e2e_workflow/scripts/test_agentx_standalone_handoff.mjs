@@ -218,8 +218,8 @@ test('a forged or degraded envelope is refused at intake, not taken on trust', a
   const cut = (from, to) => src.slice(src.indexOf(from), src.indexOf(to, src.indexOf(from)));
   const reader = cut('function preparedUtDefect(', '\n// Hand an optimization lane')
     + cut('function readAgentXPreparation(', '\nasync function prepareAgentXKernels(');
-  const read = new Function('SERVING_TOPOLOGY', 'PD_ROLES',
-    `${reader}\nreturn readAgentXPreparation;`)('', ['prefill', 'decode']);
+  const read = new Function('SERVING_TOPOLOGY', 'IS_PD', 'PD_ROLES',
+    `${reader}\nreturn readAgentXPreparation;`)('', false, ['prefill', 'decode']);
   const reply = {delivery_path: '/eval/delivery.json', prepared: good};
   assert.equal(read(structuredClone(reply)).kernel_candidates.length, 1, 'the real envelope passes');
   const mutate = (fn) => { const r = structuredClone(reply); fn(r.prepared.kernel_candidates[0]); return r; };
@@ -271,18 +271,18 @@ test('a PD task is one per kernel; its optional engine must be a PD engine', asy
   assert.match(bogus.failed_tasks.at(-1).reason, /engine names no PD engine/);
 });
 
-test('a PD ranking must carry the GPU-time mass mn.py pd-mass wrote', async t => {
+test('a PD ranking must carry the GPU-time mass mn_traces.py pd-mass wrote', async t => {
   const f = await delivered(t);
   const engines = ['prefill', 'decode'];
   await f.write('run/requested_kernel.json', {...f.kernel, engine: 'decode'});
   await f.pack();
   await weighed(f, {basis: 'agent busy rate', prefill_engine: {deployment_weight_pct: 93.4}});
   await assert.rejects(readPreparedKernels(f.evalDir, 'delivery.json', {engines}),
-    /not written by `mn.py pd-mass --apply`/);
+    /not written by `mn_traces.py pd-mass --apply`/);
   for (const rule of ['decode_only', 'latency_split']) {
     await weighed(f, {metric_basis: 'p90_intvty_inferencex', rule, weights: {prefill: 0, decode: 1}});
     await assert.rejects(readPreparedKernels(f.evalDir, 'delivery.json', {engines}),
-      /not written by `mn.py pd-mass --apply`/, `a metric-weighted ${rule} ranking is refused`);
+      /not written by `mn_traces.py pd-mass --apply`/, `a metric-weighted ${rule} ranking is refused`);
   }
   await weighed(f, GPU_TIME_MASS);
   assert.equal((await readPreparedKernels(f.evalDir, 'delivery.json', {engines})).kernel_candidates.length,

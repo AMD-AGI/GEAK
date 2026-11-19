@@ -37,6 +37,7 @@ Stdlib only.
 """
 import argparse
 import datetime as dt
+import functools
 import json
 import math
 import os
@@ -57,11 +58,13 @@ from collections import Counter
 #   rank, ts, running, token, accept_len, gen_tps, cuda_graph, queue
 # --------------------------------------------------------------------------- #
 
-# A TP1 engine without DP tags no rank: it is rank 0.
-_HEAD = r"^\[(?P<ts>[\d\-]+ [\d:]+(?:\.\d+)?)(?: (?:TP|DP)(?P<rank>\d+)[^\]]*)?\] "
+_HEAD = r"^\[(?P<ts>[\d\-]+ [\d:]+(?:\.\d+)?) (?:TP|DP)(?P<rank>\d+)[^\]]*\] "
+# --mode multinode: a TP1 engine without DP tags no rank (it is rank 0).
+_ANY_HEAD = r"^\[(?P<ts>[\d\-]+ [\d:]+(?:\.\d+)?)(?: (?:TP|DP)(?P<rank>\d+)[^\]]*)?\] "
 
-SGLANG_PREFILL_RE = re.compile(
-    _HEAD + r"Prefill batch[,.] "
+# The bootstrap/inflight/optimistic fields are a PD prefill engine's.
+_PREFILL = (
+    r"Prefill batch[,.] "
     r"#new-seq: (?P<new_seq>\d+), #new-token: (?P<new_token>\d+), "
     r"#cached-token: (?P<cached_token>\d+), "
     r"(?:token usage: (?P<usage>[\d.]+), )?"
@@ -72,10 +75,11 @@ SGLANG_PREFILL_RE = re.compile(
     r"(?:, #optimistic-req: \d+)?"
     r"(?:, cuda graph: (?P<graph>\w+))?"
 )
+SGLANG_PREFILL_RE = re.compile(_HEAD + _PREFILL)
 
 # The pre-allocated/prealloc/transfer/retracted fields are a PD decode engine's.
-SGLANG_DECODE_RE = re.compile(
-    _HEAD + r"Decode batch[,.] "
+_DECODE = (
+    r"Decode batch[,.] "
     r"#running-req: (?P<running>\d+), #token: (?P<token>\d+), "
     r"(?:token usage: (?P<usage>[\d.]+), )?"
     r"(?:accept len: (?P<accept_len>[\d.]+), )?"
@@ -87,6 +91,7 @@ SGLANG_DECODE_RE = re.compile(
     r"(?:cuda graph: (?P<graph>\w+), )?"
     r"gen throughput \(token/s\): (?P<gen_tps>[\d.]+), #queue-req: (?P<queue>\d+)"
 )
+SGLANG_DECODE_RE = re.compile(_HEAD + _DECODE)
 
 
 def _ts(s):
@@ -103,8 +108,8 @@ def _b(s):
     return str(s).lower() == "true" if s is not None else None
 
 
-def _sglang_prefill(line):
-    m = SGLANG_PREFILL_RE.match(line)
+def _sglang_prefill(line, rx=SGLANG_PREFILL_RE):
+    m = rx.match(line)
     if not m:
         return None
     return dict(kind="prefill", rank=int(m.group("rank") or 0), ts=_ts(m.group("ts")),
@@ -114,8 +119,8 @@ def _sglang_prefill(line):
                 cuda_graph=_b(m.group("graph")))
 
 
-def _sglang_decode(line):
-    m = SGLANG_DECODE_RE.match(line)
+def _sglang_decode(line, rx=SGLANG_DECODE_RE):
+    m = rx.match(line)
     if not m:
         return None
     acc = m.group("accept_len")
@@ -129,7 +134,7 @@ def _sglang_decode(line):
 # sglang hybrid-SWA scheduler (DeepSeek-V4, PD disaggregation): full/swa token pools,
 # and PD's bootstrap/prealloc/transfer queues between the fields above.
 SGLANG_SWA_PREFILL_RE = re.compile(
-    _HEAD + r"Prefill batch[,.] "
+    _ANY_HEAD + r"Prefill batch[,.] "
     r"#new-seq: (?P<new_seq>\d+), #new-token: (?P<new_token>\d+), "
     r"#cached-token: (?P<cached_token>\d+), "
     r"full token usage: (?P<usage>[\d.]+), swa token usage: (?P<swa_usage>[\d.]+), "
@@ -142,7 +147,7 @@ SGLANG_SWA_PREFILL_RE = re.compile(
 )
 
 SGLANG_SWA_DECODE_RE = re.compile(
-    _HEAD + r"Decode batch[,.] "
+    _ANY_HEAD + r"Decode batch[,.] "
     r"#running-req: (?P<running>\d+), #full token: (?P<token>\d+), "
     r"full token usage: (?P<usage>[\d.]+), "
     r"#swa token: (?P<swa_token>\d+), swa token usage: (?P<swa_usage>[\d.]+), "
@@ -157,33 +162,24 @@ SGLANG_SWA_DECODE_RE = re.compile(
 )
 
 
-def _sglang_swa_prefill(line):
-    m = SGLANG_SWA_PREFILL_RE.match(line)
-    if not m:
-        return None
-    return dict(kind="prefill", rank=int(m.group("rank") or 0), ts=_ts(m.group("ts")),
-                new_seq=int(m.group("new_seq")), new_token=int(m.group("new_token")),
-                cached_token=int(m.group("cached_token")),
-                running=int(m.group("running")), queue=int(m.group("queue")),
-                cuda_graph=_b(m.group("graph")))
-
-
-def _sglang_swa_decode(line):
-    m = SGLANG_SWA_DECODE_RE.match(line)
-    if not m:
-        return None
-    acc = m.group("accept_len")
-    return dict(kind="decode", rank=int(m.group("rank") or 0), ts=_ts(m.group("ts")),
-                running=int(m.group("running")), token=int(m.group("token")),
-                accept_len=float(acc) if acc else 1.0,
-                gen_tps=float(m.group("gen_tps")), queue=int(m.group("queue")),
-                cuda_graph=_b(m.group("graph")))
-
-
 LOG_DIALECTS = [
     ("sglang-scheduler", [_sglang_prefill, _sglang_decode]),
-    ("sglang-scheduler-swa", [_sglang_swa_prefill, _sglang_swa_decode]),
 ]
+
+# Engine logs of a multinode leg (--mode multinode): a TP1 engine's untagged lines and the
+# hybrid-SWA format. Not yet enabled for a single node, whose runs have not been checked on them.
+MULTINODE_DIALECTS = [
+    ("sglang-scheduler-untagged", [functools.partial(_sglang_prefill, rx=re.compile(_ANY_HEAD + _PREFILL)),
+                                   functools.partial(_sglang_decode, rx=re.compile(_ANY_HEAD + _DECODE))]),
+    ("sglang-scheduler-swa", [functools.partial(_sglang_prefill, rx=SGLANG_SWA_PREFILL_RE),
+                              functools.partial(_sglang_decode, rx=SGLANG_SWA_DECODE_RE)]),
+]
+
+
+def use_multinode_dialects():
+    for dialect in reversed(MULTINODE_DIALECTS):
+        if dialect not in LOG_DIALECTS:
+            LOG_DIALECTS.insert(0, dialect)
 
 # A line that is plausibly a scheduler batch line. Used only to tell "this log has
 # batch lines we failed to parse" (an error) from "this log has none" (a fact).
@@ -469,8 +465,12 @@ def main():
     ap.add_argument("--completed-output-tokens", type=int, default=None,
                     help="output tokens the client completed in the leg; cross-checks "
                          "the decode expansion")
+    ap.add_argument("--mode", choices=["single", "multinode"], default="single",
+                    help="multinode: also parse the engine-log formats of a multinode leg")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
+    if args.mode == "multinode":
+        use_multinode_dialects()
 
     info = {}
     if args.server_info and os.path.exists(args.server_info):

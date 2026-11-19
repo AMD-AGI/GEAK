@@ -243,6 +243,38 @@ def test_empty_per_engine_stack_adds_nothing() -> None:
     assert not any(k.endswith("_by_role") for k in args)
 
 
+_BY_ROLE = {"accepted_flags_by_role": {"prefill": "--chunked-prefill-size 8192"},
+            "accepted_env_by_role": {"decode": "SGLANG_CK_BLOCKSCALE_M_MAX=256"}}
+
+
+def test_a_per_engine_stack_seeds_nothing_on_one_host() -> None:
+    args = rx.map_args(_handoff(**_BY_ROLE), timeout_s=3600)
+    assert set(args) == set(rx.map_args(_handoff(), timeout_s=3600))
+    assert not any(k.endswith("_by_role") for k in args)
+
+
+def test_a_per_engine_stack_seeds_nothing_on_a_tp_span(node_state) -> None:
+    doc = _doc(pd_mode="none")
+    doc["pods"] = [{"podIP": ip, "sshPort": 2222, "launch_command": _engine_cmd("prefill").replace(
+        " --disaggregation-mode prefill --disaggregation-transfer-backend mooncake_tcp"
+        " --disaggregation-bootstrap-port 8998", "")} for ip in _PREFILL]
+    doc["service_url"] = f"http://{_PREFILL[0]}:8000"
+    node_state(doc)
+    args = rx.map_args(_handoff(**_BY_ROLE), timeout_s=3600)
+    assert args["multinode"]["topology"] == "tp_span"
+    assert not any(k.endswith("_by_role") for k in args)
+
+
+def test_result_names_the_client_host_on_multinode_only(tmp_path) -> None:
+    os.environ["BENCH_CLIENT"] = "native"
+    one_host = rx.normalize_result({}, {"eval_dir": str(tmp_path)})
+    assert "bench_client_host" not in one_host and "bench_client_host" not in one_host["baseline_basis"]
+    os.environ["BENCH_LAUNCHER"] = "multinode"
+    mn = rx.normalize_result({}, {"eval_dir": str(tmp_path)})
+    assert mn["bench_client_host"] == mn["baseline_basis"]["bench_client_host"] == "rank0"
+    assert set(mn) - set(one_host) == {"bench_client_host"}
+
+
 def test_explicit_gpu_ids_are_never_overridden(node_state) -> None:
     node_state()
     assert rx.map_args(_handoff(gpu_ids="2,3,4,5"), timeout_s=3600)["gpu_ids"] == "2,3,4,5"

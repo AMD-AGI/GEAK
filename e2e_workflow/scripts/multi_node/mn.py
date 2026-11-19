@@ -7,13 +7,12 @@ either shipped by content here or a run artifact on the shared mount.
     mn.py supervise    the local pid bench_e2e.sh watches and kills
     mn.py stop         reap a launch whose supervisor never came up
     mn.py leg-env      the pin's facts as shell assignments for multinode.sh
-    mn.py active-pin   the pin of the multinode run on this machine ('' = none)
+    mn.py active-pin   the pin GEAK_MN_STATE names ('' = none)
     mn.py exec         run a command on a pinned node
-    mn.py trace-gate   validate the per-rank trace set before parsing    (mn_traces.py)
-    mn.py topn-merge   fold a pd_disagg run's per-engine Top-Ns into one (mn_traces.py)
-    mn.py pd-mass      rewrite an AgentX pd_disagg ranking on both engines' GPU-time mass (mn_traces.py)
-    mn.py pd-points    plan a fixed-length pd_disagg run's sampling points from its engine logs (mn_traces.py)
     mn.py probe        (internal) this node's probe
+
+Checks on a finished leg's traces (trace-gate, topn-merge, pd-mass, pd-points) are the
+knowledge/multinode_skills/multinode-traces skill: they never touch the cluster.
 
 GEAK does not manage the cluster. A rank's script is either GENERATED here (each
 rank sources adapters/$BACKEND.sh on its node) or PROVIDED by the caller (nodes[i].
@@ -107,7 +106,7 @@ PD_ROLES = ("prefill", "decode")
 def state_path() -> str:
     path = active_pin()
     if not path:
-        raise SystemExit("!!! multinode: no pin: GEAK_MN_STATE is unset and no multinode run on this machine owns one.")
+        raise SystemExit("!!! multinode: no pin: GEAK_MN_STATE is unset.")
     return path
 
 
@@ -166,6 +165,11 @@ def split_command(command: str) -> tuple[list[str], str]:
         env.append(command[start:end].strip())
         start = end
     return env, command[start:].strip()
+
+
+# check records these as missing in the pin's "degraded" instead of refusing: without ps the
+# supervisor counts no zombies, without curl it never sees the LB fail.
+OPTIONAL_CMDS = ("ps", "curl")
 
 
 def plain_argv0(command: str) -> str:
@@ -1236,54 +1240,10 @@ def check_verdict(pin: str, problems: list, spec: dict | None = None) -> int:
     return 2 if problems else 0
 
 
-# The pin of the multinode run on this machine, with its owner: the process that ran the
-# check (run_e2e.py, which outlives the workflow), or for a prompt-started workflow the Claude Code
-# process its check agent ran under. The pin counts only while that very process lives, so a single-host
-# run after it, or after it was killed, is not taken for a multinode one. It also names this
-# mn.py, for bench_e2e.sh copies that have no multi_node/ beside them.
-ACTIVE_PIN = f"{PID_DIR}/state_path"
-
-
-def _proc_start(pid) -> str:
-    """The process's start time (as _START_TIME reads it); '' if there is no such process."""
-    try:
-        with open(f"/proc/{int(pid)}/stat", encoding="utf-8") as f:
-            return f.read().rsplit(")", 1)[1].split()[19]
-    except (OSError, ValueError, IndexError, TypeError):
-        return ""
-
-
-def claude_ancestor() -> int:
-    """The nearest ancestor that is the Claude Code process (0 if none). A Workflow's agents run in
-    that one process and their Bash commands are its children, so it outlives the workflow, while
-    the shell an agent ran check from is gone the moment the command returns."""
-    pid = os.getppid()
-    while pid > 1:
-        try:
-            with open(f"/proc/{pid}/stat", encoding="utf-8") as f:
-                stat = f.read()
-            with open(f"/proc/{pid}/cmdline", "rb") as f:
-                argv = f.read().decode(errors="replace").split("\0")[:2]
-        except OSError:
-            return 0
-        if stat[stat.index("(") + 1:stat.rindex(")")] == "claude" or any(
-                os.path.basename(a) == "claude" or "@anthropic-ai/claude-code" in a for a in argv):
-            return pid
-        pid = int(stat.rsplit(")", 1)[1].split()[1])
-    return 0
-
-
 def active_pin() -> str:
-    """GEAK_MN_STATE (the handoff entry sets it), else the pin a live run on this machine owns."""
-    if os.environ.get("GEAK_MN_STATE"):
-        return os.environ["GEAK_MN_STATE"]
-    try:
-        with open(ACTIVE_PIN, encoding="utf-8") as f:
-            doc = json.load(f)
-    except (OSError, ValueError):
-        return ""
-    alive = doc.get("start") and _proc_start(doc.get("pid")) == doc["start"]
-    return str(doc.get("state") or "") if alive else ""
+    """GEAK_MN_STATE, the one switch into multinode: nothing machine-wide makes a run multinode,
+    so another run sharing this machine's /tmp serves and locks its GPUs as if no pin existed."""
+    return os.environ.get("GEAK_MN_STATE") or ""
 
 
 def cmd_active_pin(argv: list) -> int:
@@ -1307,11 +1267,7 @@ def cmd_active_pin(argv: list) -> int:
 
 def cmd_check(argv: list) -> int:
     """GEAK_MN_SPEC is args.multinode plus "tp" (the engine TP), as JSON."""
-    ap = argparse.ArgumentParser(prog="mn.py check")
-    ap.add_argument("--owner", choices=("parent", "claude"), default="parent",
-                    help="whose lifetime the pin counts for: the calling process (run_e2e.py), or the "
-                         "Claude Code process above an agent's shell (a workflow started from a prompt)")
-    owner = os.getppid() if ap.parse_args(argv).owner == "parent" else claude_ancestor()
+    argparse.ArgumentParser(prog="mn.py check").parse_args(argv)
     raw = {}
     try:
         raw = json.loads(os.environ.get("GEAK_MN_SPEC") or "{}")
@@ -1333,9 +1289,6 @@ def cmd_check(argv: list) -> int:
         **({"backend": spec["backend"]} if provided else {}),
     }
     problems = []
-    if not owner:
-        problems.append("--owner claude: no Claude Code process above this shell to own the pin; run "
-                        "the check from the workflow's own agent, or pass its verdict as args.multinode_check")
     if not os.path.isdir(shared):
         problems.append(f"shared_fs {shared!r} is not a directory here")
     work_dir = spec["work_dir"]
@@ -1370,10 +1323,13 @@ def cmd_check(argv: list) -> int:
         targets.append({"node_id": "", "rank": "lb", "ip": router["host"], "role": "router",
                         **({"ssh": router["ssh"]} if router.get("ssh") else {})})
         launches.append(router["launch_command"])
-    cmds = [[c] if (c := plain_argv0(cmd)) else [] for cmd in launches]
-    for t, cmd, c in zip(targets, launches, cmds):
+    argv0 = [[c] if (c := plain_argv0(cmd)) else [] for cmd in launches]
+    for t, cmd, c in zip(targets, launches, argv0):
         if cmd and not c:
             print(f"    {t['ip']}: not checking that its launch_command resolves (a path or a compound line)")
+    # Every rank script runs under setsid; generated mode finds the NIC with ip.
+    cmds = [c + ["setsid", *([] if t["rank"] == "lb" else ["rocm-smi"]), *([] if provided else ["ip"]),
+                 *OPTIONAL_CMDS] for t, c in zip(targets, argv0)]
     try:
         if os.environ.get("GEAK_MN_TAKEOVER") == "1":
             script = takeover_script([*ports, *([router["port"]] if router else [])],
@@ -1390,6 +1346,9 @@ def cmd_check(argv: list) -> int:
         if p.get("lb_procs") and topology == "pd_disagg":
             p["busy_ports"] = [x for x in p["busy_ports"] if x != state["serve_port"]]
         for c in p.get("missing_cmds") or []:
+            if c in OPTIONAL_CMDS:
+                state.setdefault("degraded", {}).setdefault(_short(p["hostname"]), []).append(c)
+                continue
             who = "router" if t["rank"] == "lb" else f"{t.get('role') or 'node'} {t['ip']}"
             problems.append(f"{who} {_short(p['hostname'])}: {c!r} is not on PATH in the shell mn.py launches it from")
     if router:
@@ -1411,18 +1370,24 @@ def cmd_check(argv: list) -> int:
         n.update({k: spec["nodes"][n["rank"]][k] for k in NODE_OPT_KEYS if spec["nodes"][n["rank"]].get(k)})
         n["ngpu"] = p["ngpu"]
         name = f"rank{n['rank']} {_short(n['hostname'])}"
-        if p["ngpu"] < n["gpus"]:
-            problems.append(f"{name} has {p['ngpu']} GPUs, needs {n['gpus']}")
-        elif n.get("gpu_ids") and max(n["gpu_ids"]) >= p["ngpu"]:
-            problems.append(f"{name} has {p['ngpu']} GPUs, no card {max(n['gpu_ids'])}")
-        free, total = p.get("free_vram_mib"), p.get("total_vram_mib")
-        # A rank that names its cards serves only from those: another tenant elsewhere on the machine is not ours to fit around.
-        ids, cards = n.get("gpu_ids"), p.get("card_free_mib") or []
-        if ids and len(cards) > max(ids) and len(p.get("card_total_mib") or []) == len(cards):
-            free, total = min(cards[i] for i in ids), min(p["card_total_mib"][i] for i in ids)
-        if free is None or total is None or free < mem_fraction * total:
-            problems.append(f"{name}: its fullest card has {free} of {total} MiB free; the server takes "
-                            f"{mem_fraction:.0%} of a card (MEM_FRACTION)")
+        # A missing rocm-smi is already a problem; it counts 0 GPUs and no VRAM.
+        if "rocm-smi" in (p.get("missing_cmds") or []):
+            pass
+        elif p["ngpu"] == 0:
+            problems.append(f"{name}: rocm-smi --showuse printed no 'GPU use (%)' line; cannot count its GPUs")
+        else:
+            if p["ngpu"] < n["gpus"]:
+                problems.append(f"{name} has {p['ngpu']} GPUs, needs {n['gpus']}")
+            elif n.get("gpu_ids") and max(n["gpu_ids"]) >= p["ngpu"]:
+                problems.append(f"{name} has {p['ngpu']} GPUs, no card {max(n['gpu_ids'])}")
+            free, total = p.get("free_vram_mib"), p.get("total_vram_mib")
+            # A rank that names its cards serves only from those: another tenant elsewhere on the machine is not ours to fit around.
+            ids, cards = n.get("gpu_ids"), p.get("card_free_mib") or []
+            if ids and len(cards) > max(ids) and len(p.get("card_total_mib") or []) == len(cards):
+                free, total = min(cards[i] for i in ids), min(p["card_total_mib"][i] for i in ids)
+            if free is None or total is None or free < mem_fraction * total:
+                problems.append(f"{name}: its fullest card has {free} of {total} MiB free; the server takes "
+                                f"{mem_fraction:.0%} of a card (MEM_FRACTION)")
         if p["busy_ports"]:
             problems.append(f"{name}: port(s) {p['busy_ports']} already bound")
         busy = [f"{k}={p[k]}" for k in ("gpu_pids", "foreign_gpu_pids") if p.get(k)]
@@ -1461,8 +1426,6 @@ def cmd_check(argv: list) -> int:
 
     state["checked_at"] = _utc()
     print(f">>> multinode: {topology} on {len(ips)} node(s), master {state['master_ip']}, shared fs {shared} proven -> {_write_json(pin, state)}")
-    _write_json(ACTIVE_PIN, {"state": pin, "pid": owner, "start": _proc_start(owner),
-                             "mn_py": os.path.join(HERE, "mn.py")})
     return check_verdict(pin, [], spec)
 
 
@@ -1584,9 +1547,11 @@ def launch_script(head: list, env: dict, adapter: str, call: str, structural: st
 
 
 def rank_env_vars(*, model, tp, gpu, mem_fraction, port, base_url, log, profile_dir,
-                  overlay, pythonpath, extra_env, extra_args) -> dict:
-    """What bench_e2e.sh exports before adapter_launch. GPU is the PER-NODE list."""
+                  overlay, pythonpath, extra_env, extra_args, engine) -> dict:
+    """What bench_e2e.sh exports before adapter_launch. GPU is the PER-NODE list. GEAK_MN_ENGINE
+    (`tp`, or the PD role) tells the capture hooks they run on a multinode leg."""
     return {
+        "GEAK_MN_ENGINE": engine,
         "MODEL": model, "TP": tp, "GPU": gpu, "MEM_FRACTION": mem_fraction,
         "HOST": "0.0.0.0", "PORT": port, "BASE_URL": base_url,
         "LOG": log, "PROFILE_DIR": profile_dir,
@@ -1798,7 +1763,7 @@ def cmd_launch(argv: list) -> int:
                                   port=port, base_url=base_url, log=rank_log,
                                   profile_dir=rank_profile_dir, overlay=overlay,
                                   pythonpath=pythonpath, extra_env=" ".join(rank_env),
-                                  extra_args=rank_extra)
+                                  extra_args=rank_extra, engine="tp" if pd is None else role)
         rank_vars.update(PROFILE_PYTHONPATH=shims, GEAK_ITERATION_LOG_DIR=(
             os.path.join(iterations, role) if pd is not None and iterations else iterations))
         if provided:
@@ -2000,7 +1965,11 @@ def cmd_supervise(argv: list) -> int:
     signal.signal(signal.SIGINT, on_term)
     ranks = [f"rank{n['rank']}@{_short(n['hostname'])}" for n in _state["nodes"]]
     log(f"watching {', '.join(ranks)} every {SUP_POLL_S}s (dead after {MISSES} empty polls, {ERR_MISSES} failed probes)")
-    record("watching", {"ranks": ranks, "poll_s": SUP_POLL_S})
+    deg = _state.get("degraded") or {}
+    if deg:
+        log("degraded: " + "; ".join(f"{h} has no {', '.join(m)}" for h, m in deg.items())
+            + " (no ps: zombie detection off; no curl: LB health off)")
+    record("watching", {"ranks": ranks, "poll_s": SUP_POLL_S, **({"degraded": deg} if deg else {})})
 
     # A cold PD boot keeps the LB unhealthy for minutes, longer the bigger the model:
     # it counts only once it has answered 200.
@@ -2228,15 +2197,6 @@ def cmd_probe(argv: list) -> int:
     return 0
 
 
-def _offline(name: str):
-    """trace-gate / topn-merge / pd-mass live in mn_traces.py beside this file. Imported on use:
-    run_e2e loads mn.py by path, where this directory is not on sys.path."""
-    def run(argv: list) -> int:
-        import mn_traces
-        return getattr(mn_traces, name)(argv)
-    return run
-
-
 COMMANDS = {
     "check": cmd_check,
     "launch": cmd_launch,
@@ -2245,10 +2205,6 @@ COMMANDS = {
     "leg-env": cmd_leg_env,
     "active-pin": cmd_active_pin,
     "exec": cmd_exec,
-    "trace-gate": _offline("cmd_trace_gate"),
-    "topn-merge": _offline("cmd_topn_merge"),
-    "pd-mass": _offline("cmd_pd_mass"),
-    "pd-points": _offline("cmd_pd_points"),
     "probe": cmd_probe,
 }
 TAGS = {"supervise": "mn-sup"}

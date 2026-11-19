@@ -14,12 +14,13 @@ function between(start, end, from = 0) {
   assert(a >= 0 && b > a, `source block exists: ${start}`);
   return src.slice(a, b);
 }
+const pdConsts = between('const IS_PD =', 'const MN_PY');
 const schemas = between('const obj =', '// Result of the ensure_flydsl');
-const selectionSchema = new Function(`${schemas}\nreturn AGENTX_PREPARATION_SCHEMA;`)();
-const profileSchema = new Function(`${schemas}\nreturn PROFILE_SCHEMA;`)();
+const selectionSchema = new Function('SERVING_TOPOLOGY', `${pdConsts}${schemas}\nreturn AGENTX_PREPARATION_SCHEMA;`)('');
+const profileSchema = new Function('SERVING_TOPOLOGY', `${pdConsts}${schemas}\nreturn PROFILE_SCHEMA;`)('');
 const helper = between('async function prepareAgentXKernels(', "\nif (want('setup'))");
 assert(!/Date\.now\(|new Date\(/.test(helper), 'the Workflow runtime throws on wall-clock reads');
-const pdHelpers = between('const PD_ROLES =', 'function roleAgent(');
+const pdHelpers = between('// The one PD_KINDS x PD_ROLES walk', 'function roleAgent(');
 const initial = between("  if (searchClosed('Profile and Strategize')",
   '} else {\n  // Load carried state');
 const resume = between('  // Load carried state', '\n}\n\n// ===');
@@ -88,7 +89,7 @@ async function run(body, overrides = {}, reply = selection()) {
     ...overrides,
   };
   const result = await new AsyncFunction('env', `let { ${Object.keys(env).join(',')} } = env;
-    ${schemas}\n${phaseSelector}\n${pdHelpers}\n${helper}\n${body}
+    ${pdConsts}${schemas}\n${phaseSelector}\n${pdHelpers}\n${helper}\n${body}
     return {profile, strategy, headQueue, kernelQueue,
       plan: typeof plan === 'undefined' ? null : plan,
       scheduled: typeof cands === 'undefined' ? null : cands,
@@ -270,7 +271,7 @@ async function run(body, overrides = {}, reply = selection()) {
       },
       integAccepted: () => true, beatsCurTput: () => true, bankAccepted: () => {}, krOf: () => ({}), e2eFrom: () => ({}),
     };
-    await new AsyncFunction('env', `let {${Object.keys(env).join(',')}} = env; ${pdHelpers}\n${engineHelpers}\n${optimizeAndIntegrate}`)(env);
+    await new AsyncFunction('env', `let {${Object.keys(env).join(',')}} = env; ${pdConsts}${pdHelpers}\n${engineHelpers}\n${optimizeAndIntegrate}`)(env);
     return integrated;
   }
   assert.equal((await metricDispatch(true, 1.4, 0.8))[0].KERNEL_RESULT.verified_isolated_speedup, 1.4);

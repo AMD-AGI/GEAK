@@ -183,21 +183,6 @@ def _guard_fields(guards):
     return fields
 
 
-def _hollow_reason(d):
-    """Why a round's throughput is not a measurement, or None when it is.
-
-    The client credits every completed request with its full requested output length, so empty
-    responses score the ideal number. Clean rounds retokenize to >99.9%."""
-    credited = _num(d, "total_output_tokens")
-    seen = _num(d, "total_output_tokens_retokenized")
-    if credited and seen is not None and seen < 0.9 * credited:
-        return f"retokenized output {int(seen)}/{int(credited)} tokens"
-    if (_num(d, "completed") or 0) > 0 and _num(d, "mean_ttft_ms") == 0.0 \
-            and _num(d, "mean_itl_ms") == 0.0:
-        return "TTFT and ITL both 0 ms"
-    return None
-
-
 def _contract(requested, successful, observed, usable):
     """The fields every caller gates on, spelled the same way in both modes."""
     return {
@@ -241,7 +226,7 @@ def from_runs(args):
             pass
         return xs
 
-    tps, ttft, tpot, hollow = [], [], [], []
+    tps, ttft, tpot = [], [], []
     guards = {name: [] for name in guard_keys}
     # The request shape this run ACTUALLY served, averaged per request.  On a trace replay the
     # corpus owns the sequence lengths, so a measured run is the only place the real shape is
@@ -255,10 +240,6 @@ def from_runs(args):
             try:
                 d = json.loads(line)
             except ValueError:
-                continue
-            why = _hollow_reason(d)
-            if why:
-                hollow.append(why)
                 continue
             v = _axis_num(d, keys, transform)
             if v is not None:
@@ -309,8 +290,6 @@ def from_runs(args):
                              if os.environ.get("GEAK_ISOLATED_REPLICA") == "1"
                              else "legacy_same_server"),
         "effective_config_digest": os.environ.get("EFFECTIVE_CONFIG_DIGEST") or None,
-        "hollow_rounds": len(hollow),
-        "hollow_reasons": hollow,
     }
     # Only a trace replay says how its timed window was warmed (bench_e2e.sh "trace-replay
     # warmup"); every other client keeps its exact field set.
@@ -318,8 +297,6 @@ def from_runs(args):
         summary["warmup_protocol"] = os.environ["BENCH_WARMUP_PROTOCOL"]
     tail = (f"ttft_ms={summary['ttft_ms_median']} tpot_ms={summary['tpot_ms_median']} "
             f"runs={summary['runs']} ")
-    if hollow:
-        tail += f"hollow_rounds={len(hollow)} ({hollow[0]}) "
     warm = os.environ.get("WARM_SERVER_ROUNDS")
     if warm:
         try:

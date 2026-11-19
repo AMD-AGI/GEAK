@@ -17,18 +17,18 @@ Nothing under `scripts/multi_node/` knows how to start a server. The split is:
 
 | layer | owns | lives in |
 | --- | --- | --- |
-| **where** | the handoff's machines reached over ssh, their NICs, teardown, trace gate | `launchers/multinode.sh`, `multi_node/*` |
+| **where** | the handoff's machines reached over ssh, their NICs, teardown, trace gate | `launchers/multinode.sh`, `multi_node/*`, the `multinode-traces` skill |
 | **how** | the launch line, and how the framework says *"I am rank i of n"* | `adapters/sglang.sh` |
 | **what** | model flags and the flags GEAK sweeps | `EXTRA_SERVER_ARGS` / `EXTRA_ENV`, or the caller's `launch_command` |
 
 The seam between the launcher and `mn.py` is the only one the runtime forces;
-`mn_traces.py` is split off because it never touches the cluster:
+the trace checks are a skill because they never touch the cluster:
 
 | file | why it is separate |
 | --- | --- |
 | `adapters/launchers/multinode.sh` | `bench_e2e.sh` sources `adapters/launchers/$BENCH_LAUNCHER.sh` and calls the `adapter_*` functions it defines **in its own shell**. A launcher has to be a shell file at that path. |
-| `multi_node/mn.py` | the entry point: `check`, `launch`, `supervise`, `stop`, `leg-env`, `active-pin`, `exec`, `trace-gate`, `topn-merge`, `pd-mass`. They are separate *processes* (`supervise` is the pid `bench_e2e.sh` kills) but not separate files. Everything that reaches a node over ssh is here. |
-| `multi_node/mn_traces.py` | what `trace-gate`, `pd-points`, `topn-merge` and `pd-mass` run: reads a finished leg's traces, Top-Ns and logs and writes reports. A pd_disagg run weighs its two engines by GPU time, never by the graded metric and never by the GPU time of their profile windows: `pd-mass` (AgentX) and `topn-merge --coverage` (fixed-length, sglang: `pd-points` plans the points from each engine's baseline log) by each phase's mass from `coverage_ledger.py` × ranks (`--roles` once per probed engine); `topn-merge` without probed points by AgentX's no-log fallback — each window's mean GPU time per step × `parse_profile.py`'s `analytic_calls` × ranks. TTFT/TPOT only explain. No ssh, no pin. |
+| `multi_node/mn.py` | the entry point: `check`, `launch`, `supervise`, `stop`, `leg-env`, `active-pin`, `exec`. They are separate *processes* (`supervise` is the pid `bench_e2e.sh` kills) but not separate files. Everything that reaches a node over ssh is here. |
+| `knowledge/multinode_skills/multinode-traces/` (`scripts/mn_traces.py`, `SKILL.md`) | `trace-gate` (the launcher runs it after every profile window), `pd-points`, `topn-merge` and `pd-mass` (agents run them, per the multinode fragments): reads a finished leg's traces, Top-Ns and logs and writes reports. A pd_disagg run weighs its two engines by GPU time, never by the graded metric and never by the GPU time of their profile windows: `pd-mass` (AgentX) and `topn-merge --coverage` (fixed-length, sglang: `pd-points` plans the points from each engine's baseline log) by each phase's mass from `coverage_ledger.py` × ranks (`--roles` once per probed engine); `topn-merge` without probed points by AgentX's no-log fallback — each window's mean GPU time per step × `parse_profile.py`'s `analytic_calls` × ranks. TTFT/TPOT only explain. No ssh, no pin. |
 
 `mn.py launch` builds each rank's script itself: the same
 exports `bench_e2e.sh` does on one box, then `. adapters/$BACKEND.sh` and
@@ -114,16 +114,14 @@ service port has no record and is stopped only if that listener is a router.
 Every agent command, serving leg, `mn.py launch` and `mn.py supervise` runs on the
 driver, and so does `run_e2e.py`: there is no forwarding. The driver sees no GPU:
 `run_e2e.py` empties `ROCR/HIP/CUDA_VISIBLE_DEVICES` for a multinode handoff, and check
-refuses a driver whose `rocminfo` still lists a GPU (start Claude with the three masks
-empty on the prompt entry). What a node executes is either shipped by content over ssh
+refuses a driver whose `rocminfo` still lists a GPU. What a node executes is either shipped by content over ssh
 (check's probe, the GPU identity probe, each rank's script) or a run artifact under
 `shared_fs` (the eval dir's `bench_e2e.sh` and `adapters/`, the overlay, the task dirs,
 and `<work_dir>/.mn_tools`).
 
-`mn.py check` records the active pin in `/tmp/geak_mn/state_path` on the driver,
-owned by `run_e2e.py`, or (`check --owner claude`, a prompt-started workflow) by the
-Claude Code process the check agent ran under; the record counts only while that
-process lives. While it is active:
+A command is multinode only when `GEAK_MN_STATE` in its environment names the pin;
+nothing machine-wide marks a run multinode, so another run on the driver is unaffected.
+`run_e2e.py` exports it before starting Claude. With it set:
 
 - `bench_e2e.sh` with no launcher (or `auto`) serves on the pin; any other launcher is
   refused. An isolated one-card server goes through `mn.py exec --gpu` (below), where
@@ -180,6 +178,17 @@ the window on the engine of the point's phase, occupancy from the decode engine'
 `adapter_probe_after` runs `trace-gate --role` on that engine. The result line lands in
 `RESULT_JSONL` on the shared mount. The single-host memory-parity guard is skipped: the driver's `rocm-smi`
 cannot see the nodes' cards.
+
+Everything multinode-only switches on an explicit signal, so a single-host run behaves as on main:
+- `serving_probe.py --mode multinode` (and `observed_workload.py --mode multinode`, which
+  `mn_traces.py pd-points` passes) also parse an untagged TP1 row and a PD engine's SWA row. The
+  probe also draws a fresh prompt seed per SGLang run, so a recapture misses the prefix cache.
+- Every rank script exports `GEAK_MN_ENGINE` (`tp`, `prefill` or `decode`). Only under it does
+  shape capture name its directories after the host and record the oracle on TP rank 0 alone, and
+  the seam trace tag its pid with the host.
+- A role's multinode text lives in `roles/_fragments/<role>_mn.md` (`tuning_pd.md` for the
+  tuners). The prompt names the file only when `SERVING_TOPOLOGY` is set; the role files
+  themselves are main's.
 
 ## What the caller must hand over
 
@@ -267,18 +276,15 @@ independent non-PD engines) is not supported; PD replicas (xPyD) are.
 
 ### 1. The environment check (automatic, before Setup)
 
-Every workflow invocation with a `multinode` block has `mn.py check` run on the
-driver before anything else: `GEAK_MN_SPEC` is the block plus `tp` and `work_dir`, and
-`mn.normalize_spec` is the one parser of it. `run_e2e.py` runs it before starting the
-workflow and passes the verdict as `args.multinode_check` (a refusal never starts
-Claude). Both that verdict's `spec` and `args.multinode` then go into the prompt without
+Multinode starts only through `run_e2e.py`, which runs `mn.py check` on the driver
+before anything else: `GEAK_MN_SPEC` is the block plus `tp` and `work_dir`, and
+`mn.normalize_spec` is the one parser of it. It passes the verdict as
+`args.multinode_check` (a refusal never starts Claude). Both that verdict's `spec` and `args.multinode` then go into the prompt without
 their `launch_command`s, marked `commands_in_pin`: the main session's relay of the prompt
 has dropped the commands' shell quoting (and whole fields), and nothing in the workflow
-reads them, as every leg serves through the pin. If the verdict still arrives unusable,
-the workflow refuses instead of re-checking. A workflow started from a prompt gets no verdict, so before Setup it has one
-agent run the same command verbatim (`check --owner claude`; a Workflow script cannot
-spawn a process) and refuses a relayed verdict that names other machines than
-`args.multinode`. The check:
+reads them, as every leg serves through the pin. A workflow whose verdict is missing,
+arrives unusable or names other machines than `args.multinode` refuses before Setup;
+nothing in it re-runs the check. The check:
 
 - refuses a driver that sees a GPU, and a `work_dir` outside `shared_fs`;
 - from `run_e2e.py` (`GEAK_MN_TAKEOVER=1`; `0` turns it off), first stops the caller's
@@ -307,7 +313,7 @@ spawn a process) and refuses a relayed verdict that names other machines than
 
 Its verdict and every reason go to `mn_check.json` beside the pin, and its last
 stdout line is `MN_CHECK={verdict, problems, at, spec}`. On a refusal `run_e2e.py`
-(or, from a prompt, the workflow) returns at once with `multinode_check`, copied into
+returns at once with `multinode_check`, copied into
 `result.json` (`multinode_check`, and the `error` text), so the caller learns why the
 machines were rejected. As on a single node, the caller keeps the machines, the
 software stack and the overlay unchanged between legs; launch does not re-verify them.
@@ -354,8 +360,7 @@ GPU allow-list is checked against and what the serving lock is keyed on.
 ### 3. Or run it under the workflow
 
 Through `run_e2e.py`, set `MULTI_NODE_STATE` (a `multinode` field in the handoff is not
-read); from a prompt, pass the block as `args.multinode` to the Workflow tool.
-Per-rank TP and cards come from the pin;
+read). Per-rank TP and cards come from the pin;
 `run_e2e.py` imports the same `mn.rank_layout` to validate the block early and
 default `gpu_ids` to rank0's cards. Data-parallel width is an ordinary server flag: it
 rides the normal server-args channel and the launcher never learns its spelling.
@@ -369,7 +374,7 @@ Everything about the machines is in the handoff's `multinode` block, read once b
 | --- | --- | --- |
 | `GEAK_MN_SPEC` | — | `mn.py check` only: the `multinode` block plus `tp`, as JSON |
 | `GEAK_MN_TAKEOVER` | `1` from `run_e2e.py`, else unset | `mn.py check` only: `1` = first stop the sglang/vllm processes listening on the run's ports on every node (the caller's service, handed over still up) |
-| `GEAK_MN_STATE` | the active pin | the pin; on every SERVING leg's env line |
+| `GEAK_MN_STATE` | — (`run_e2e.py` exports it) | the pin; the only switch into multinode for `bench_e2e.sh`, `gpu_lock.sh`, `profile_kernel.sh` |
 | `GEAK_MN_PD_SWEEP_ARGS_PREFILL` / `GEAK_MN_PD_SWEEP_ARGS_DECODE` | — | pd_disagg only. Flags the sweep accepted for that engine alone. Appended after `EXTRA_SERVER_ARGS` on that engine; the other engine does not receive them |
 | `GEAK_MN_PD_SWEEP_ENV_PREFILL` / `GEAK_MN_PD_SWEEP_ENV_DECODE` | — | pd_disagg only. Same split for env. Appended after `EXTRA_ENV` on that engine |
 | `GEAK_MN_DRY_RUN` | — | `1` = render the per-rank scripts and stop, cluster untouched |
@@ -441,8 +446,11 @@ same runtime to be comparable.
 | symptom | cause | what to do |
 | --- | --- | --- |
 | `no pinned node set at …` | the leg ran outside the workflow, or without its `GEAK_MN_STATE` | run `mn.py check` with `GEAK_MN_SPEC` |
+| `args.multinode_check is unusable …` | the workflow was started without `run_e2e.py`'s verdict, or the relay lost its fields | start through `run_e2e.py` (`MULTI_NODE_STATE`) |
 | `<host> has no interface with this address` | the node answers ssh but the IP is not on its fabric NIC | fix the pod IPs (`MULTI_NODE_STATE`) / `multinode.nodes` |
 | `probe on <ip> returned nothing` | ssh failed, or no `python3` on that node | fix the ssh block / the node's image |
+| `'setsid'` / `'rocm-smi'` / `'ip'` `is not on PATH in the shell mn.py launches it from` | a slim node image; every rank runs under `setsid`, the GPUs are counted with `rocm-smi`, generated mode finds the NIC with `ip` | install it in the node image |
+| `degraded` in the pin and in `mn_supervisor.json`'s `watching` record | a node has no `ps` (no zombie detection) or no `curl` (no LB health) | install them; the run proceeds without that check |
 | `this machine's environment sees N GPU(s)` | the driver was started with its cards visible | start it with `ROCR_VISIBLE_DEVICES= HIP_VISIBLE_DEVICES= CUDA_VISIBLE_DEVICES=` |
 | `this machine (…) cannot reach the … port` | the driver's client could not dial the client / LB / engine port | open the port to the driver, or run the driver on the fabric |
 | `the run directory … is not under` | `work_dir` (`eval_dir` / `exp_root`) is off `shared_fs` | put the run directory on the shared mount |

@@ -934,15 +934,17 @@ class TestCaptureStorageReclaim(unittest.TestCase):
             "process_id": process_id, "target": target,
         }
 
-    def _write_capture(self, root, pid, payload=b"ORACLE", rank=0, sha=None):
-        cap = os.path.join(root, f"capture.pid-{pid}.rank-{rank}")
+    def _write_capture(self, root, pid, payload=b"ORACLE", rank=0, sha=None, host=None):
+        proc = f"{pid}.host-{host}" if host else f"{pid}"
+        cap = os.path.join(root, f"capture.pid-{proc}.rank-{rank}")
         os.makedirs(cap)
         meta_path = os.path.join(cap, "meta.json")
         with open(meta_path, "w") as fh:
-            json.dump(dict(self.meta(process_id=pid), **({"reference_io_sha256": sha} if sha else {})), fh)
+            json.dump(dict(self.meta(process_id=pid), **({"reference_io_sha256": sha} if sha else {}),
+                           **({"host": host} if host else {})), fh)
         with open(os.path.join(cap, "reference_io.pt"), "wb") as fh:
             fh.write(payload)
-        trace_path = os.path.join(root, f"selection.pid-{pid}.rank-{rank}.call-1.json")
+        trace_path = os.path.join(root, f"selection.pid-{proc}.rank-{rank}.call-1.json")
         with open(trace_path, "w") as fh:
             json.dump({"traceEvents": trace()}, fh)
         return meta_path, trace_path
@@ -1024,19 +1026,29 @@ class TestCaptureStorageReclaim(unittest.TestCase):
             self.assertIn("capture_process_trace_missing", run(traces["b"])["failed"])
             self.assertEqual(run(traces["a"], traces["b"])["process_verdicts"][0]["trace_files"], [traces["a"]])
 
-    def test_the_promoted_oracle_is_the_rank_that_saved_one(self):
+    def _select(self, root, metas, traces):
+        out_path = os.path.join(root, "selection.json")
+        rc = ks.main(["--target", TARGET, "--device-kernel", KERNEL, "--capture-meta", *metas,
+                      "--torch-trace", *traces, "--task-dir", root, "--out", out_path])
+        self.assertEqual(rc, 0)
+        with open(out_path) as fh, open(os.path.join(root, "reference_io.pt"), "rb") as oracle:
+            return json.load(fh), oracle.read()
+
+    def test_a_multinode_capture_promotes_the_rank_that_saved_an_oracle(self):
         with tempfile.TemporaryDirectory() as root:
-            meta_a, trace_a = self._write_capture(root, 111, b"", rank=1)
-            meta_b, trace_b = self._write_capture(root, 222, b"RANK0-ORACLE", rank=0, sha="ab" * 32)
-            out_path = os.path.join(root, "selection.json")
-            rc = ks.main(["--target", TARGET, "--device-kernel", KERNEL,
-                          "--capture-meta", meta_a, meta_b, "--torch-trace", trace_a, trace_b,
-                          "--task-dir", root, "--out", out_path])
-            self.assertEqual(rc, 0)
-            with open(out_path) as fh:
-                self.assertEqual(json.load(fh)["oracle_meta_file"], meta_b)
-            with open(os.path.join(root, "reference_io.pt"), "rb") as fh:
-                self.assertEqual(fh.read(), b"RANK0-ORACLE")
+            meta_a, trace_a = self._write_capture(root, 111, b"", rank=1, host="n1")
+            meta_b, trace_b = self._write_capture(root, 222, b"RANK0-ORACLE", rank=0, sha="ab" * 32, host="n0")
+            verdict, oracle = self._select(root, [meta_a, meta_b], [trace_a, trace_b])
+            self.assertEqual((verdict["oracle_meta_file"], oracle), (meta_b, b"RANK0-ORACLE"))
+
+    def test_a_single_node_capture_promotes_the_best_process_as_on_main(self):
+        with tempfile.TemporaryDirectory() as root:
+            meta_a, trace_a = self._write_capture(root, 111, b"BEST", rank=1)
+            meta_b, trace_b = self._write_capture(root, 222, b"OTHER", rank=0, sha="ab" * 32)
+            verdict, oracle = self._select(root, [meta_a, meta_b], [trace_a, trace_b])
+            self.assertNotIn("oracle_meta_file", verdict)
+            best = verdict["best_process_meta_file"]
+            self.assertEqual(oracle, b"BEST" if best == meta_a else b"OTHER")
 
     def test_failed_selection_still_reclaims_heavy_captures(self):
         with tempfile.TemporaryDirectory() as root:

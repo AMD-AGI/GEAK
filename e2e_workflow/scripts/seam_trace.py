@@ -59,8 +59,8 @@ def _trace_path(trace_index):
     template = os.environ.get("GEAK_SELECTION_TRACE", "").strip()
     if not template:
         return ""
-    # Host after pid: ranks on two machines can share a pid, and both write to the shared mount.
-    pid = f"{os.getpid()}.host-{_host()}"
+    # Multinode: host after pid, as ranks on two machines can share a pid on the shared mount.
+    pid = f"{os.getpid()}.host-{_host()}" if os.environ.get("GEAK_MN_ENGINE") else os.getpid()
     if "{pid}" in template or "{rank}" in template:
         path = template.format(pid=pid, rank=_rank())
     else:

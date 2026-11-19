@@ -115,8 +115,7 @@ const DEEP_COST = (() => {
   const v = parseInt(A.deep_cost != null ? A.deep_cost : 2, 10);
   return Number.isFinite(v) && v >= 1 ? v : 2;
 })();
-// A multinode PD lane gets `<engine>:<ids>` (e.g. decode:3): the ids are validated and leased bare,
-// and every GPU_ID handed to gpu_lock.sh carries the engine again so it runs on that machine.
+// PD gpu_ids `decode:3`: every GPU_ID passed on names the engine again.
 const GPU_IDS_ARG = String(A.gpu_ids != null ? A.gpu_ids : '0').trim();
 const GPU_ENGINE = (/^([\w.-]+):(?=\d)/.exec(GPU_IDS_ARG) || [])[1] || '';
 const onEngine = spec => (GPU_ENGINE && spec ? `${GPU_ENGINE}:${spec}` : spec);

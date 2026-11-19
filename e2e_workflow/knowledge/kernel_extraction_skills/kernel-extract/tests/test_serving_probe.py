@@ -147,7 +147,9 @@ class ProbeOverLogTest(unittest.TestCase):
         proc, result = self.probe(dep)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertEqual(result['status'], 'ok', result['verify_reason'])
-        self.assertIsInstance(self.events(result, 'begin')[0]['seed'], int)
+        begin = self.events(result, 'begin')[0]
+        self.assertIsInstance(begin['request_seed'], int)
+        self.assertEqual(begin['profile_url'], dep.url(dep.engine))
         self.assertEqual(self.events(result, 'steady_state_confirmed')[0]['observed_bs'], 2)
         self.assertEqual(self.events(result, 'window_closed')[-1]['files'], 2)
         paths = {(who, path) for who, path, _ in dep.calls}
@@ -167,6 +169,10 @@ class ProbeOverLogTest(unittest.TestCase):
         self.assertEqual([len(b['input_ids']) for b in sent], [8, 8])
         self.assertFalse([e for e in result['journal']
                           if e.get('label') == 'decode_prefix'])
+        begin = self.events(result, 'begin')[0]
+        self.assertEqual(begin['request_seed'], 1234)
+        self.assertNotIn('profile_url', begin)
+        self.assertNotIn('occupancy', begin)
 
     def test_a_batch_the_scheduler_never_reaches_is_not_armed(self):
         dep = FakeDeployment(self.log, ranks=2, request_s=12, bs_cap=1)
@@ -399,13 +405,22 @@ class LogOccupancyTest(unittest.TestCase):
         rec = observed_workload.parse_line(prefill)
         self.assertEqual((rec['kind'], rec['new_token'], rec['cuda_graph']), ('prefill', 4, False))
 
+    def multinode_dialects(self):
+        saved = list(observed_workload.LOG_DIALECTS)
+        self.addCleanup(observed_workload.LOG_DIALECTS.__setitem__, slice(None), saved)
+        observed_workload.use_multinode_dialects()
+
     def test_a_tp1_engine_logs_without_a_rank_tag_and_is_rank_0(self):
-        rec = observed_workload.parse_line(
-            '[2026-10-30 04:22:19] Decode batch, #running-req: 4, #token: 851, token usage: 0.00, '
-            'cuda graph: True, gen throughput (token/s): 30.40, #queue-req: 0')
+        line = ('[2026-10-30 04:22:19] Decode batch, #running-req: 4, #token: 851, '
+                'token usage: 0.00, cuda graph: True, gen throughput (token/s): 30.40, #queue-req: 0')
+        self.assertIsNone(observed_workload.parse_line(line))
+        self.multinode_dialects()
+        rec = observed_workload.parse_line(line)
         self.assertEqual((rec['rank'], rec['running']), (0, 4))
 
     def test_the_pd_swa_dialect_parses_for_arming_and_for_the_weights(self):
+        self.assertIsNone(observed_workload.parse_line(SWA_DECODE))
+        self.multinode_dialects()
         rec = observed_workload.parse_line(SWA_DECODE)
         self.assertEqual((rec['kind'], rec['running'], rec['gen_tps'], rec['token']),
                          ('decode', 3, 11.54, 210944))
@@ -429,26 +444,6 @@ class MetricsOccupancyTest(unittest.TestCase):
 
 
 class RandIdsTest(unittest.TestCase):
-    def test_ids_stay_inside_the_model_vocab(self):
-        with tempfile.TemporaryDirectory() as d:
-            Path(d, 'config.json').write_text(json.dumps({'vocab_size': 129280}))
-            vocab = serving_probe.vocab_size(d)
-        self.assertEqual(vocab, 129280)
-        self.assertLess(max(serving_probe.rand_ids(20000, 0, vocab)), 129280)
-
-    def test_a_nested_text_config_is_read(self):
-        with tempfile.TemporaryDirectory() as d:
-            Path(d, 'config.json').write_text(json.dumps({'text_config': {'vocab_size': 32000}}))
-            self.assertEqual(serving_probe.vocab_size(d), 32000)
-
-    def test_no_readable_model_keeps_the_original_bound(self):
-        for model in (None, '', '/no/such/model'):
-            self.assertIsNone(serving_probe.vocab_size(model))
-        ids = serving_probe.rand_ids(20000, 0, None)
-        self.assertGreaterEqual(min(ids), 1000)
-        self.assertGreater(max(ids), 129280)
-        self.assertLessEqual(max(ids), 150000)
-
     def test_each_run_gets_its_own_prompts_unless_a_seed_is_given(self):
         a, b = serving_probe.fresh_seed(), serving_probe.fresh_seed()
         self.assertNotEqual(a, b)

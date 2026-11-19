@@ -50,7 +50,7 @@ class TestSeamTrace(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         # UNIQUE=0 drops only the per-call suffix, so an explicit {pid} keeps the path predictable.
         os.environ["GEAK_SELECTION_TRACE"] = os.path.join(self.tmp.name, "selection.{pid}.json")
-        self.trace = os.path.join(self.tmp.name, f"selection.{os.getpid()}.host-{st._host()}.json")
+        self.trace = os.path.join(self.tmp.name, f"selection.{os.getpid()}.json")
         os.environ["GEAK_SELECTION_TRACE_UNIQUE"] = "0"
         os.environ["GEAK_SELECTION_PROFILE_CALLS"] = "1"
         self.addCleanup(os.environ.pop, "GEAK_SELECTION_TRACE", None)
@@ -141,7 +141,7 @@ class TestSeamTrace(unittest.TestCase):
         self.module.outer(2)
         traces = sorted(
             name for name in os.listdir(self.tmp.name)
-            if name.startswith(f"selection.{os.getpid()}.host-{st._host()}.call-") and name.endswith(".json"))
+            if name.startswith(f"selection.{os.getpid()}.call-") and name.endswith(".json"))
         self.assertEqual(len(traces), 2)
         self.assertIn(".call-1.json", traces[0])
         self.assertIn(".call-2.json", traces[1])
@@ -180,7 +180,7 @@ class TestSeamTrace(unittest.TestCase):
 
 class TestTracePathIsProcessLocal(unittest.TestCase):
     def setUp(self):
-        for key in ("GEAK_SELECTION_TRACE", "GEAK_SELECTION_TRACE_UNIQUE", "RANK"):
+        for key in ("GEAK_SELECTION_TRACE", "GEAK_SELECTION_TRACE_UNIQUE", "RANK", "GEAK_MN_ENGINE"):
             self.addCleanup(os.environ.pop, key, None)
             os.environ.pop(key, None)
 
@@ -195,13 +195,12 @@ class TestTracePathIsProcessLocal(unittest.TestCase):
         by hand or leaves it to the default suffix, two ranks must never be handed one filename."""
         os.environ["GEAK_SELECTION_TRACE"] = "/tmp/sel-{pid}-{rank}.json"
         os.environ["RANK"] = "3"
-        self.assertEqual(st._trace_path(7), f"/tmp/sel-{os.getpid()}.host-{st._host()}-3.call-7.json")
+        self.assertEqual(st._trace_path(7), f"/tmp/sel-{os.getpid()}-3.call-7.json")
 
     def test_a_path_with_no_placeholders_gets_the_pid_and_rank_appended(self):
-        """The host follows the pid: ranks on two machines can share a pid on the shared mount."""
         os.environ["GEAK_SELECTION_TRACE"] = "/tmp/sel.json"
         os.environ["RANK"] = "3"
-        self.assertEqual(st._trace_path(7), f"/tmp/sel.pid-{os.getpid()}.host-{st._host()}.rank-3.call-7.json")
+        self.assertEqual(st._trace_path(7), f"/tmp/sel.pid-{os.getpid()}.rank-3.call-7.json")
 
     def test_the_unique_opt_out_drops_the_call_suffix_but_not_the_process(self):
         """The opt-out is for operators who want one file per process instead of one per call. It
@@ -210,13 +209,22 @@ class TestTracePathIsProcessLocal(unittest.TestCase):
         os.environ["GEAK_SELECTION_TRACE"] = "/tmp/sel.json"
         os.environ["GEAK_SELECTION_TRACE_UNIQUE"] = "0"
         os.environ["RANK"] = "3"
-        self.assertEqual(st._trace_path(7), f"/tmp/sel.pid-{os.getpid()}.host-{st._host()}.rank-3.json")
+        self.assertEqual(st._trace_path(7), f"/tmp/sel.pid-{os.getpid()}.rank-3.json")
 
     def test_the_unique_opt_out_still_substitutes_an_explicit_placeholder(self):
         """Returning the raw template here used to leave a literal '{pid}' in the filename."""
         os.environ["GEAK_SELECTION_TRACE"] = "/tmp/sel-{pid}.json"
         os.environ["GEAK_SELECTION_TRACE_UNIQUE"] = "0"
-        self.assertEqual(st._trace_path(7), f"/tmp/sel-{os.getpid()}.host-{st._host()}.json")
+        self.assertEqual(st._trace_path(7), f"/tmp/sel-{os.getpid()}.json")
+
+    def test_a_multinode_rank_names_its_host_after_the_pid(self):
+        """Ranks on two machines can share a pid, and both write to the shared mount."""
+        os.environ["GEAK_MN_ENGINE"] = "tp"
+        os.environ["RANK"] = "3"
+        os.environ["GEAK_SELECTION_TRACE"] = "/tmp/sel.json"
+        self.assertEqual(st._trace_path(7), f"/tmp/sel.pid-{os.getpid()}.host-{st._host()}.rank-3.call-7.json")
+        os.environ["GEAK_SELECTION_TRACE"] = "/tmp/sel-{pid}.json"
+        self.assertEqual(st._trace_path(7), f"/tmp/sel-{os.getpid()}.host-{st._host()}.call-7.json")
 
     def test_the_rank_comes_from_the_launcher_env_when_it_declares_one(self):
         os.environ["RANK"] = "2"

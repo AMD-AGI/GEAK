@@ -386,16 +386,10 @@ fi
 # back. The authored-kernel OVERLAY (OVERLAY_PYTHONPATH) is applied BY the launcher, since
 # an external harness usually cannot, so overlay and recipe-parity coexist. FRESH launches
 # only (REUSE_SERVER=0); nothing else in the measurement changes.
-# A multinode run (`mn.py active-pin`: GEAK_MN_STATE, else the pin a live workflow on this
-# machine owns) serves on its pinned nodes, launched from here: this machine serves nothing
-# itself. On a node (GEAK_MN_HOP: `mn.py exec` brought this bench there) only an isolated
-# one-card server (TP=1, one GPU) starts.
+# A multinode run (GEAK_MN_STATE, the pin) serves on its pinned nodes, launched from here:
+# this machine serves nothing itself. On a node (GEAK_MN_HOP: `mn.py exec` brought this bench
+# there) only an isolated one-card server (TP=1, one GPU) starts.
 _MN_PIN="${GEAK_MN_STATE:-}"
-if [ -z "$_MN_PIN" ] && [ -f /tmp/geak_mn/state_path ]; then
-  _mn_py="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("mn_py") or "")' \
-             /tmp/geak_mn/state_path 2>/dev/null || true)"
-  [ -f "$_mn_py" ] && _MN_PIN="$(python3 "$_mn_py" active-pin 2>/dev/null || true)"
-fi
 if [ -n "$_MN_PIN" ] && [ "${REUSE_SERVER:-0}" != "1" ]; then
   if [ -n "${GEAK_MN_HOP:-}" ]; then
     BENCH_LAUNCHER=${BENCH_LAUNCHER:-native}
@@ -419,7 +413,6 @@ if [ -n "$_MN_PIN" ] && [ "${REUSE_SERVER:-0}" != "1" ]; then
     esac
   fi
 fi
-unset _mn_py
 BENCH_LAUNCHER=${BENCH_LAUNCHER:-native}
 if [ "$BENCH_LAUNCHER" != "native" ]; then
   LAUNCHER_ADAPTER="${LAUNCHER_ADAPTER:-$HERE/adapters/launchers/${BENCH_LAUNCHER}.sh}"
@@ -983,13 +976,13 @@ run_probes() {
     fi
     echo ">>> probe: $_pid ($_phase) ${_probe_args[*]}"
     # The skill's rule: keep a failed point's evidence and recapture it once.
-    if ! python3 "$_PROBE" --points "$PROFILE_PROBE_POINTS" --point-id "$_pid" --model "$MODEL" \
+    if ! python3 "$_PROBE" --points "$PROFILE_PROBE_POINTS" --point-id "$_pid" \
            --out "$PROFILE_DIR/$_pid.journal.json" "${_probe_args[@]}"; then
       echo "!!! probe: $_pid did not verify; kept as $_pid.try1, recapturing once" >&2
       mv "$PROFILE_DIR/$_pid.journal.json" "$PROFILE_DIR/$_pid.try1.journal.json" 2>/dev/null
       mv "$PROFILE_DIR/$_pid" "$PROFILE_DIR/$_pid.try1"
       mkdir -p "$PROFILE_DIR/$_pid"
-      python3 "$_PROBE" --points "$PROFILE_PROBE_POINTS" --point-id "$_pid" --model "$MODEL" \
+      python3 "$_PROBE" --points "$PROFILE_PROBE_POINTS" --point-id "$_pid" \
         --out "$PROFILE_DIR/$_pid.journal.json" "${_probe_args[@]}" \
         || echo "!!! probe: $_pid did not verify twice; its journals are the evidence" >&2
     fi

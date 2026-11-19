@@ -15,6 +15,8 @@ Read this only when `SERVING_TOPOLOGY` is in your inputs.
   (the first try is `<id>.try1.journal.json`), so report the gap and go on, as on one node — give
   coverage_ledger.py only the `ok` points' censuses. Never start a server yourself and never run serving_probe.py
   directly: the driver has no GPU and no route to a server it did not boot.
+- Run observed_workload.py on this run's engine logs with `--mode multinode`: a TP1 engine's
+  untagged rows and a PD engine's SWA rows parse only then.
 - `BACKEND=atom`: `bench_e2e.sh` refuses `PROFILE_PROBE_POINTS` (exit 3, "defines no
   adapter_probe_args"); run the leg with `PROFILE=1` and no `PROFILE_PROBE_*`, and say in `notes`
   that the points were not driven.
@@ -25,7 +27,7 @@ Read this only when `SERVING_TOPOLOGY` is in your inputs.
 - `SERVING_TOPOLOGY=pd_disagg`: do NOT weigh the two engines yourself. After writing `kernel_ranking.json`
   (`share_of_phase_pct` keyed `PREFILL` = the prefill engine's trace, `DECODE` = the decode engine's,
   each taken verbatim from the ledger's `phase_mass_share_pct`, variants of one kernel summed — never
-  over another denominator), run `python3 "$SKILL_DIR/scripts/multi_node/mn.py" pd-mass
+  over another denominator), run `python3 "$SKILL_DIR/knowledge/multinode_skills/multinode-traces/scripts/mn_traces.py" pd-mass
   --coverage <coverage.json> [--coverage ...] --roles <mn_trace_roles.json> [--roles ...] --apply
   <kernel_ranking.json>` (one `--roles` per engine: `$PROFILE_DIR/<id>/ranks/mn_trace_roles.json` of a
   DECODE point and of a PREFILL point),

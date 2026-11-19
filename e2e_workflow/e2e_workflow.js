@@ -269,7 +269,8 @@ const TRACELENS_INPUTS = {
   TRACELENS_KERNEL_CANDIDATES_JSON: String(TL.kernel_candidates_json || ''),
   TRACELENS_REPORT_JSON: String(TL.tracelens_report_json || ''),
   TRACELENS_TRACE_FILE: String(TL.trace_file || ''),
-  TRACELENS_TRACE_FILES: Array.isArray(TL.trace_files) ? TL.trace_files.join(' ') : '',
+  ...(Array.isArray(TL.trace_files) && TL.trace_files.length
+    ? { TRACELENS_TRACE_FILES: TL.trace_files.join(' ') } : {}),
 };
 if (TL && Object.keys(TL).length) log(`TraceLens prior present: ${Object.keys(TL).filter(k => TL[k]).join(', ') || '(none non-null)'}.`);
 
@@ -317,13 +318,14 @@ const GPU_LIST = GPU_IDS.split(',').map(s => s.trim()).filter(Boolean);
 // profile) and kept fixed so deltas stay comparable. Distinct from GPU_LIST, the pool for isolated
 // benchmarks and kernel lanes. Default TP=1; SERVING_GPU defaults to the first TP ids of GPU_LIST.
 const SERVING_TP = parseInt(A.tp != null ? A.tp : (A.serving_tp != null ? A.serving_tp : 1), 10);
-const shq = (s) => "'" + String(s == null ? '' : s).replace(/'/g, "'\\''") + "'";
-// ---- MULTI-NODE (opt-in): args.multinode is run_e2e.py's MULTI_NODE_STATE block, see docs/multi_node.md. mn.py check
-// parses it and writes the pin before Setup: run_e2e.py passes args.multinode_check, else an agent runs it.
+// MULTI-NODE (opt-in): docs/multi_node.md.
 const MN_ARG = A.multinode || (A.state && A.state.multinode) || null;
 const MN = (MN_ARG && typeof MN_ARG === 'object' && Array.isArray(MN_ARG.nodes)
   && MN_ARG.nodes.length > 0) ? MN_ARG : null;
 const SERVING_TOPOLOGY = MN ? String(MN.topology || 'tp_span').trim() : '';
+const IS_PD = SERVING_TOPOLOGY === 'pd_disagg';
+const MN_DONE = new Set();
+const PD_ROLES = ['prefill', 'decode'], PD_KINDS = ['flags', 'env'];
 const MN_PY = `${WORKFLOW_DIR}/scripts/multi_node/mn.py`;
 let MN_SPEC = null, MN_STATE = '';
 let MN_SERVING_ENV = '', MN_GPU_EXEC = '';
@@ -333,7 +335,6 @@ function useMnSpec(spec) {
   MN_SERVING_ENV = `BENCH_LAUNCHER=multinode GEAK_MN_STATE=${MN_STATE}`;
   MN_GPU_EXEC = `GEAK_MN_STATE=${MN_STATE} python3 ${MN_PY} exec`;
 }
-// Multi-node: each rank's cards come from the pin; GPU names rank0's local ids only.
 const SERVING_GPU = String(A.serving_gpu != null ? A.serving_gpu
   : MN ? GPU_IDS
     : GPU_LIST.slice(0, Math.max(1, SERVING_TP)).join(',') || '0');
@@ -1179,7 +1180,8 @@ if (FAST_MODE) log(`[fast-mode] ON: skipping ConfigSweep + Milestone; HeadKernel
 const obj = (props, required) => ({ type: 'object', properties: props, required: required || [], additionalProperties: true });
 const arrObj = { type: 'array', items: { type: 'object', additionalProperties: true } };
 const arrStr = { type: 'array', items: { type: 'string' } };
-const roleStrs = { type: 'object', additionalProperties: { type: 'string' } };   // {prefill, decode}
+const roleStrs = { type: 'object', properties: { prefill: { type: 'string' }, decode: { type: 'string' } }, additionalProperties: false };
+const pdRows = IS_PD ? { type: 'array', items: obj({ engine: { type: 'string', enum: ['', ...PD_ROLES] } }) } : arrObj;
 
 const SETUP_SCHEMA = obj({
   eval_dir: { type: 'string' }, model_name: { type: 'string' },
@@ -1206,18 +1208,19 @@ const PROFILE_ROW_SCHEMA = obj({
 const PROFILE_SCHEMA = obj({
   round: { type: 'number' }, profile_topN_json: { type: 'string' }, profile_topN_md: { type: 'string' },
   profile_workload_json: { type: 'string' }, // per-(shape,dtype) weighted workload model (optional)
-  profile_topN_by_role: { type: 'object' }, profile_workload_by_role: { type: 'object' },
+  ...(IS_PD ? { profile_topN_by_role: { type: 'object' }, profile_workload_by_role: { type: 'object' } } : {}),
   source: { type: 'string' }, total_gpu_time_ms: { type: 'number' },
   top_kernels: { type: 'array', items: PROFILE_ROW_SCHEMA },
   shift_note: { type: 'string' }, notes: { type: 'string' },
 }, ['profile_topN_json', 'top_kernels']);
 
 const STRATEGY_SCHEMA = obj({
-  regime_summary: { type: 'string' }, config_directions: arrObj,
+  regime_summary: { type: 'string' }, config_directions: pdRows,
   head_candidates: { type: 'array', items: obj({
     short_name: { type: 'string' }, entity_kind: { type: 'string' }, device_kernel: { type: 'string' },
+    ...pdRows.items.properties,
   }, ['short_name', 'entity_kind', 'device_kernel']) },
-  kernel_candidates: arrObj,
+  kernel_candidates: pdRows,
   drop_list: arrObj, order_of_work: arrStr, strategy_path: { type: 'string' },
 }, ['kernel_candidates']);
 
@@ -1244,7 +1247,7 @@ const FLYDSL_GATE_SCHEMA = obj({
 
 const SWEEP_SCHEMA = obj({
   trials: arrObj, accepted_flags: { type: 'string' }, accepted_env: { type: 'string' },
-  accepted_flags_by_role: roleStrs, accepted_env_by_role: roleStrs,
+  ...(IS_PD ? { accepted_flags_by_role: roleStrs, accepted_env_by_role: roleStrs } : {}),
   best_throughput_tok_s: { type: 'number' }, throughput_speedup_vs_baseline: { type: 'number' },
   summary: { type: 'string' },
   // Filled only by the warm-start repair pass (so not `required`): the structured "why did this not
@@ -1291,7 +1294,7 @@ const TUNING_SCHEMA = obj({
   // overlay like a head env-winner's routing patch, never as a live-tree .py edit.
   apply_overlay: { type: 'string' },
   apply_env: { type: 'string' }, apply_flags: { type: 'string' },
-  apply_env_by_role: roleStrs, apply_flags_by_role: roleStrs,
+  ...(IS_PD ? { apply_env_by_role: roleStrs, apply_flags_by_role: roleStrs } : {}),
   correctness_gate: { type: 'string' }, accuracy_note: { type: 'string' },
   engagement_verified: { type: 'boolean' }, engagement_evidence: { type: 'string' },
   pre_tune_throughput_tok_s: { type: 'number' }, post_tune_throughput_tok_s: { type: 'number' },
@@ -1304,7 +1307,7 @@ const TUNING_SCHEMA = obj({
 
 const PLAN_SCHEMA = obj({
   stop: { type: 'boolean' }, reasoning: { type: 'string' },
-  config_directions: arrObj, head_candidates: arrObj, kernel_candidates: arrObj,
+  config_directions: pdRows, head_candidates: pdRows, kernel_candidates: pdRows,
 }, ['stop']);
 
 // Extraction smoke gate: exactly lowercase "pass" or "fail" (every gate tests `=== 'pass'`); the
@@ -1554,6 +1557,8 @@ function noteKernelKB(r, label) {
   return r;
 }
 
+const shq = (s) => "'" + String(s == null ? '' : s).replace(/'/g, "'\\''") + "'";
+
 // The ONE place e2e KB identity argv is formatted, for both reader (Module A) and writer (Module B):
 // a one-segment disagreement silently addresses a different page (see kb/identity.py).
 function kbIdentityFlags() {
@@ -1713,8 +1718,15 @@ function beatsCurTput(integ, curTput) {
 }
 
 function pdFragmentBlock(role) {
-  if (SERVING_TOPOLOGY !== 'pd_disagg' || role !== 'tuning_specialist') return '';
-  return `\n\nThis run is PD-disaggregated: also Read ${WORKFLOW_DIR}/roles/_fragments/tuning_pd.md and follow it.`;
+  if (SERVING_TOPOLOGY !== 'pd_disagg' || !['config_tuner', 'tuning_specialist'].includes(role)) return '';
+  return `\n\nThis run is PD-disaggregated: also Read ${WORKFLOW_DIR}/roles/_fragments/tuning_pd.md and follow its shared part and its \`${role}\` section.`;
+}
+
+// AgentX's kernel_extractor reads agentx_multinode.md instead.
+const MN_ROLE_FRAGMENTS = ['director', 'profiler', 'system_architect', 'kernel_extractor', 'op_benchmarker', 'e2e_integrator'];
+function mnRoleBlock(role) {
+  if (!SERVING_TOPOLOGY || !MN_ROLE_FRAGMENTS.includes(role) || (KERNEL_EXTRACT_ON && role === 'kernel_extractor')) return '';
+  return `\n\nThis run is multi-node: also Read ${WORKFLOW_DIR}/roles/_fragments/${role}_mn.md and follow it.`;
 }
 
 function correctnessEnvBlock(role) {
@@ -1754,48 +1766,23 @@ function kernelExtractBlock(role) {
     `Declared workload kind: ${WORKLOAD_KIND}; specification: ${JSON.stringify(WORKLOAD_SPEC)}`;
 }
 
-const PD_ROLES = ['prefill', 'decode'];
-// Code (the overlay) is one tree on both engines; only config has an engine layer.
-const PD_KINDS = ['flags', 'env'];
-const pdValue = (byRole, r) => String((byRole && typeof byRole === 'object' && byRole[r]) || '').trim();
-function pdLayers(byKind = {}) {
-  return Object.fromEntries(PD_ROLES.map((r) => [r, Object.fromEntries(PD_KINDS.map((k) => [k, pdValue(byKind[k], r)]))]));
+// The one PD_KINDS x PD_ROLES walk: pd <-> {kind: {engine: v}}; a no-op off PD.
+function pdSet(pd, byKind = {}) {
+  for (const k of IS_PD ? PD_KINDS : []) for (const r of PD_ROLES)
+    if (byKind[k] && typeof byKind[k] === 'object' && r in byKind[k]) pd[r][k] = String(byKind[k][r] || '').trim();
+  return pd;
 }
-// A reply's per-engine layer: an engine it leaves out keeps its layer, `""` clears it. A whole-map
-// overwrite would drop the layer of an engine the tuner did not touch.
-function setPd(kind, byRole) {
-  if (!byRole || typeof byRole !== 'object') return;
-  const odd = [];
-  for (const [key, val] of Object.entries(byRole)) {
-    const r = String(key).trim().toLowerCase();
-    if (PD_ROLES.includes(r)) curPd[r][kind] = String(val == null ? '' : val).trim();
-    else odd.push(key);
-  }
-  if (odd.length) log(`[pd] accepted_${kind}_by_role names no engine: ${odd.join(', ')} (prefill|decode); ignored`);
-}
-
-const pdVar = (kind, role) =>
-  `GEAK_MN_PD_${{ flags: 'SWEEP_ARGS', env: 'SWEEP_ENV' }[kind]}_${role.toUpperCase()}`;
-function pdVars(pd = curPd) {
+const pdNew = (byKind) => pdSet({ prefill: { flags: '', env: '' }, decode: { flags: '', env: '' } }, byKind);
+const pdVar = (k, r) => `GEAK_MN_PD_${k === 'flags' ? 'SWEEP_ARGS' : 'SWEEP_ENV'}_${r.toUpperCase()}`;
+function pdOut(asVars, pd = curPd) {
   const out = {};
-  for (const r of PD_ROLES) for (const k of PD_KINDS) if (pd[r][k]) out[pdVar(k, r)] = pd[r][k];
+  for (const k of IS_PD ? PD_KINDS : []) for (const r of PD_ROLES) if (pd[r][k])
+    out[asVars ? pdVar(k, r) : `${k}_by_role`] = asVars ? pd[r][k] : { prefill: pd.prefill[k], decode: pd.decode[k] };
   return out;
 }
-
-// PD: a head belongs to the engine its `engine` names; '' = shared.
-const pdOddEngines = new Set();
-function pdRole(h) {
-  const role = SERVING_TOPOLOGY === 'pd_disagg' ? String((h && h.engine) || '').trim().toLowerCase() : '';
-  if (role && !PD_ROLES.includes(role) && !pdOddEngines.has(role)) {
-    pdOddEngines.add(role);
-    log(`[pd] engine ${JSON.stringify(h.engine)} is no engine (prefill|decode); its head is treated as shared`);
-  }
-  return PD_ROLES.includes(role) ? role : '';
-}
-// gpu_lock.sh / mn.py exec send `<engine>:<id>` to that engine's machine.
+const pdRole = (h) => (IS_PD && h && PD_ROLES.includes(h.engine) ? h.engine : '');
 function engineGpu(h, id) { const role = pdRole(h); return role ? `${role}:${id}` : id; }
 
-// Returns the engine an env/flag win was folded onto; '' when everything landed shared.
 function foldAccept(h, { overlay, env, flags } = {}) {
   const role = pdRole(h);
   if (overlay) curOverlay = overlay;
@@ -1805,50 +1792,31 @@ function foldAccept(h, { overlay, env, flags } = {}) {
   return env || flags ? role : '';
 }
 
-// The candidate overlay goes to BOTH engines; only an env/flag winner is the head engine's.
 function engineIntegrateInputs(h) {
   const role = pdRole(h);
-  if (!role) return {};
-  return {
-    SERVING_ENGINE: role,
-    ENGINE_ENV_VAR: pdVar('env', role), ENGINE_ARGS_VAR: pdVar('flags', role),
-    ENGINE_LOG: `the ${role} engine's "log" in mn_launch.json pd.engines`,
-  };
+  return role ? { SERVING_ENGINE: role, ENGINE_ENV_VAR: pdVar('env', role), ENGINE_ARGS_VAR: pdVar('flags', role),
+    ENGINE_LOG: `the ${role} engine's "log" in mn_launch.json pd.engines` } : {};
 }
 
-// The merged table ranks by DEPLOYMENT share, so the smaller engine can fall out of it entirely.
+// The merged table ranks by deployment share: the smaller engine can fall out of it.
 function profileByRoleInputs() {
-  const byRole = profile && profile.profile_topN_by_role;
-  return byRole && typeof byRole === 'object' && Object.keys(byRole).length ? { PROFILE_TOPN_BY_ROLE: byRole } : {};
+  const byRole = IS_PD && profile && profile.profile_topN_by_role;
+  return byRole && Object.keys(byRole).length ? { PROFILE_TOPN_BY_ROLE: byRole } : {};
 }
 
 function applyPdDirectionGuard(strat, stage) {
-  if (SERVING_TOPOLOGY !== 'pd_disagg' || !strat) return [];
-  const dirs = strat.config_directions || [];
-  for (const d of dirs) {
-    if (!d || typeof d !== 'object') continue;
-    const e = String(d.engine || '').trim().toLowerCase();
-    d.engine = PD_ROLES.includes(e) ? e : '';
-  }
-  const byRole = (profile && profile.profile_topN_by_role) || {};
+  if (!IS_PD || !strat) return [];
+  const dirs = strat.config_directions || [], byRole = (profile && profile.profile_topN_by_role) || {};
   const uncovered = PD_ROLES.filter((r) => byRole[r] && !dirs.some((d) => d && d.engine === r));
-  if (uncovered.length)
-    log(`[pd-directions] ${stage}: profiled but no config direction: ${uncovered.join(' + ')}`);
+  if (uncovered.length) log(`[pd-directions] ${stage}: profiled but no config direction: ${uncovered.join(' + ')}`);
   return uncovered;
-}
-
-function pdConfigFields() {
-  const out = {};
-  for (const k of PD_KINDS)
-    if (curPd.prefill[k] || curPd.decode[k]) out[`${k}_by_role`] = { prefill: curPd.prefill[k], decode: curPd.decode[k] };
-  return out;
 }
 
 function roleAgent(role, phase, intro, inputs) {
   // BACKEND is injected for every role: any role that calls bench_e2e.sh must forward it
   // (BACKEND=<backend>) so the right serving adapter (scripts/adapters/<backend>.sh) is used.
   const standaloneExtraction = KERNEL_EXTRACT_ON && role === 'kernel_extractor';
-  // pdVars before the caller's inputs: a trial overrides one engine and keeps the other.
+  // pdOut(true) before the caller's inputs: a trial overrides one engine and keeps the other.
   const inall = {
     BACKEND, SERVING_TP, SERVING_GPU,
     ...(SERVING_TOPOLOGY ? { SERVING_TOPOLOGY } : {}),
@@ -1864,7 +1832,7 @@ function roleAgent(role, phase, intro, inputs) {
       ...(CORRECTNESS_UNSET_ENV.length ? { CORRECTNESS_UNSET_ENV: CORRECTNESS_UNSET_ENV.join(' ') } : {}),
       ...(CORRECTNESS_SPEC_CONFIG ? { CORRECTNESS_SPECULATIVE_CONFIG: CORRECTNESS_SPEC_CONFIG } : {}),
     } : {}),
-    ...pdVars(),
+    ...pdOut(true),
     ...inputs,
     ...(standaloneExtraction ? {
       SKILL_ROOT: KERNEL_EXTRACT_DIR, SHARED_TOOLS: `${WORKFLOW_DIR}/scripts`, WORKFLOW_DIR,
@@ -1891,7 +1859,7 @@ exactly these in its env:
     BACKEND=${BACKEND} TP=${SERVING_TP} GPU=${SERVING_GPU}${MN ? ` ${MN_SERVING_ENV}` : ''}
 NEVER change TP or the GPU set between the baseline, a candidate, and validation — a TP/GPU mismatch
 makes every delta meaningless. (If SERVING_TP=1, GPU=${SERVING_GPU} is a single id; if SERVING_TP>1 it
-is a comma-separated set. Use it VERBATIM, never re-derived from TP: multi-node, it names ONE host's ids.)
+is a comma-separated set${MN ? '' : ' spanning exactly TP GPUs'}.)
 ${MN ? `MULTINODE: also Read ${WORKFLOW_DIR}/roles/_fragments/multinode_driver.md and follow it.\n` : ''}GPU_IDS=${GPU_IDS} is a SEPARATE OPTIMIZATION-PARALLELISM pool: it is used ONLY for single-GPU isolated
 work (op_bench bake-offs, shape-capture, the recursive kernel layer), where each task pins ONE id from
 the pool via GPU_ID. Do NOT use the serving TP/GPU set for that isolated work, and do NOT use a single
@@ -1901,7 +1869,7 @@ ${workloadIdentityBlock()}
 ${cfg(inall)}
 
 Return ONLY the structured JSON the ${standaloneExtraction ? 'workflow handoff reference' : 'role file'} specifies (a StructuredOutput tool is forced).`;
-  return base + expertSkillsBlock(role) + warmStartBlock(role) + kernelExtractBlock(role) + pdFragmentBlock(role) + correctnessEnvBlock(role);
+  return base + expertSkillsBlock(role) + warmStartBlock(role) + kernelExtractBlock(role) + pdFragmentBlock(role) + mnRoleBlock(role) + correctnessEnvBlock(role);
 }
 
 // Resilient agent wrapper: retry a failed agent a few times, then degrade to null for the callers'
@@ -2712,13 +2680,6 @@ const hasFrozenBaseline = (ext) =>
 // ("pass"/"fail"), so the prose lives in smoke_detail; notes may be unrelated, so read both.
 const extractFailWhy = (e) => !e ? 'none'
   : [e.smoke_detail, e.notes].filter(Boolean).join(' | ') || e.smoke || e.unittest_smoke || 'none';
-
-async function agentRun(cmd, phase, label, note = '') {
-  const read = await safeAgent(`You run one command. Run exactly this, change nothing, run nothing else${note}:\n\n` +
-    '```bash\n' + cmd + '\n```\n\nReturn its standard output verbatim (stderr appended if it failed) as stdout.',
-    { phase, label, schema: obj({ stdout: { type: 'string' } }, ['stdout']) }, 2);
-  return String((read && read.stdout) || '').trim();
-}
 
 // Re-asserts in pure JS what the shipped envelope must still prove. agentx_kernel_preparation.mjs
 // gated the on-disk RETURN.json while packing, but its output reaches us through an agent (see
@@ -3612,24 +3573,10 @@ let KB_REF_INPUTS = {};
 let EVAL_DIR, MODEL_NAME, BASELINE_TPUT, NOISE_BAND, curFlags, curEnv, curOverlay, profile, strategy, kernelQueue, headQueue;
 let SETUP_CONFIG = null;   // what BASELINE_TPUT was measured on, if Setup ran here
 
-let curPd = pdLayers({ flags: A.initial_extra_server_args_by_role, env: A.initial_extra_env_by_role });
-// Prompt entry: no caller ran the check, so an agent does; the pin lives while this process does.
-async function agentMnCheck() {
-  const spec = { ...MN, tp: SERVING_TP, work_dir: ST.eval_dir || EVAL_DIR_OVERRIDE || EXP_ROOT };
-  const out = await agentRun(`GEAK_MN_SPEC=${shq(JSON.stringify(spec))} python3 ${MN_PY} check --owner claude ` +
-    `| grep '^MN_CHECK=' | tail -n 1`, 'Setup', 'mn-check',
-    ', with a 600000 ms Bash timeout (it probes every machine)');
-  try {
-    return JSON.parse(out.slice(out.indexOf('MN_CHECK=') + 'MN_CHECK='.length));
-  } catch (e) {
-    return { verdict: 'refused', problems: [
-      `mn.py check printed no verdict line: ${out.slice(0, 500) || 'the agent returned nothing'}`] };
-  }
-}
+let curPd = pdNew({ flags: A.initial_extra_server_args_by_role, env: A.initial_extra_env_by_role });
 const mnHosts = (ns) => (Array.isArray(ns) ? ns : []).map((n) =>
   String((n && typeof n === 'object') ? (n.host || n.ip || '') : n).trim()).sort().join(', ');
-// The verdict reaches this script through the main session's relay, which has dropped or rewritten
-// fields (#42). '' when every field used downstream is there, else why not.
+// '' unless the relay dropped or rewrote a verdict field this run uses (#42).
 function mnVerdictDefect(v) {
   if (!v || typeof v !== 'object') return 'no verdict';
   if (v.verdict !== 'ok') return `verdict is ${JSON.stringify(v.verdict)}`;
@@ -3637,29 +3584,18 @@ function mnVerdictDefect(v) {
   if (!s || typeof s !== 'object') return 'no spec';
   for (const k of ['state', 'shared_fs']) if (typeof s[k] !== 'string' || !s[k].trim()) return `no spec.${k}`;
   if (mnHosts(s.nodes) !== mnHosts(MN.nodes)) return `spec.nodes (${mnHosts(s.nodes)}) are not args.multinode's (${mnHosts(MN.nodes)})`;
-  if (SERVING_TOPOLOGY === 'pd_disagg') {
+  if (IS_PD) {
     const t = s.tp_by_role || {};
     if (!PD_ROLES.every((r) => Number.isInteger(t[r]) && t[r] > 0)) return `spec.tp_by_role ${JSON.stringify(s.tp_by_role)} is not a TP per engine`;
   }
   return '';
 }
 if (MN) {
-  let verdict = A.multinode_check;
-  // A relayed refusal stands: mn.py already ran and said no.
-  const relayed = !verdict ? 'absent' : verdict.verdict === 'refused' ? '' : mnVerdictDefect(verdict);
-  if (relayed && MN.commands_in_pin) {
-    // run_e2e.py sends the block without its launch commands (they stay in its pin): nothing to re-check.
-    verdict = { verdict: 'refused', problems: [`the relayed mn.py check verdict is unusable (${relayed}) and ` +
-      'args.multinode carries no launch commands to re-check (run_e2e.py keeps them in its pin); re-run run_e2e.py'] };
-  } else if (relayed) {
-    if (verdict) log(`[multinode] relayed verdict unusable (${relayed}); re-running mn.py check`);
-    verdict = await agentMnCheck();
-  }
-  const defect = verdict && verdict.verdict === 'ok' ? mnVerdictDefect(verdict) : '';
-  if (defect) verdict = { verdict: 'refused', problems: [`mn.py check's verdict is unusable: ${defect}`] };
-  if (!verdict || verdict.verdict !== 'ok' || !verdict.spec) {
-    const problems = (verdict && verdict.problems && verdict.problems.length) ? verdict.problems
-      : ['mn.py check returned no verdict'];
+  const verdict = A.multinode_check;
+  const defect = verdict && verdict.verdict === 'refused' ? '' : mnVerdictDefect(verdict);
+  if (defect || verdict.verdict !== 'ok') {
+    const problems = defect ? [`args.multinode_check is unusable (${defect}): start through run_e2e.py, which runs mn.py check`]
+      : (verdict.problems || []).length ? verdict.problems : ['mn.py check refused'];
     log(`[multinode] check refused: ${problems.join('; ')}`);
     return { status: 'error', error: `mn.py check rejected args.multinode: ${problems.join('; ')}`,
       multinode_check: { verdict: 'refused', problems } };
@@ -3680,11 +3616,10 @@ function readAgentXPreparation(reply) {
   // Re-assert each candidate's invariants (preparedUtDefect); a bad one THROWS rather than being
   // silently dropped.
   const defects = [];
-  const pdEngine = SERVING_TOPOLOGY === 'pd_disagg';
   for (const c of [...prepared.head_candidates, ...prepared.kernel_candidates]) {
     const why = !c || !c.prepared_ut ? 'carries no prepared_ut'
       : preparedUtDefect(c, c.prepared_ut.result, c.prepared_ut.phase) ||
-        (pdEngine && !PD_ROLES.includes(c.engine)
+        (IS_PD && !PD_ROLES.includes(c.engine)
           ? `engine must name the engine it was traced on (${PD_ROLES.join(' | ')}), got ${JSON.stringify(c.engine)}`
           : '');
     if (why) defects.push(`${(c && c.short_name) || '(unnamed)'}: ${why}`);
@@ -3701,9 +3636,8 @@ function readAgentXPreparation(reply) {
 
 async function prepareAgentXKernels(round, throughput) {
   phase('KernelExtract');
-  const pd = SERVING_TOPOLOGY === 'pd_disagg';
   const mnRules = MN ? ` MULTINODE: also Read ${WORKFLOW_DIR}/roles/_fragments/agentx_multinode.md and follow it.` : '';
-  const packEngines = pd ? ` --engines ${PD_ROLES.join(',')}` : '';
+  const packEngines = IS_PD ? ` --engines ${PD_ROLES.join(',')}` : '';
   const inputs = {
     ...captureShard(),
     EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], WORKLOAD, TASK, ROUND: round,
@@ -4043,9 +3977,8 @@ print(json.dumps(res))
         const stored = (c.accepted_config && typeof c.accepted_config === 'object') ? c.accepted_config : {};
         const storedFlags = String(stored.flags || '');
         const storedEnv = String(stored.env || '');
-        const storedPdVars = pdVars(pdLayers({ flags: stored.flags_by_role, env: stored.env_by_role }));
-        const replayPd = Object.keys(storedPdVars).length > 0 && SERVING_TOPOLOGY === 'pd_disagg';
-        const pdReplayInputs = replayPd ? storedPdVars : {};
+        const storedPdVars = pdOut(true, pdNew({ flags: stored.flags_by_role, env: stored.env_by_role }));
+        const replayPd = Object.keys(storedPdVars).length > 0;
         if (!storedFlags && !storedEnv && !replayPd) {
           verdicts.push({ ...c, measured_tok_s: null, delta_pct: null, parity: 'n/a',
             outcome: 'skipped', why: 'the record carries no config to apply' });
@@ -4097,7 +4030,7 @@ print(json.dumps(res))
               CURRENT_FLAGS: curFlags, CURRENT_ENV: curEnv, CURRENT_OVERLAY: curOverlay,
               MEASUREMENT_PURPOSE: 'search', REPLICAS: SEARCH_REPLICAS,
               SKILL_DIR: WORKFLOW_DIR,
-              ...pdReplayInputs,
+              ...storedPdVars,
             }),
           { phase: 'WarmStart', label, schema: SWEEP_SCHEMA });
 
@@ -4177,17 +4110,15 @@ print(json.dumps(res))
         if (accept) {
           curFlags = sweep.accepted_flags || mf.merged || curFlags;
           curEnv = sweep.accepted_env || me.merged || curEnv;
-          // What the bench ran on each engine: the record's layers less what the repair dropped; a
-          // layer the tuner names replaces it, one it leaves out stays.
           const ran = (byRole, parse, render) => (byRole && typeof byRole === 'object')
             ? Object.fromEntries(Object.entries(byRole).map(([r, v]) =>
               [r, render(parse(v).filter((it) => !dropped.includes(it.name)))]))
             : byRole;
           if (replayPd) {
-            setPd('flags', ran(stored.flags_by_role, parseFlagString, renderFlagItems));
-            setPd('env', ran(stored.env_by_role, parseEnvString, renderEnvItems));
+            pdSet(curPd, { flags: ran(stored.flags_by_role, parseFlagString, renderFlagItems),
+              env: ran(stored.env_by_role, parseEnvString, renderEnvItems) });
           }
-          setPd('flags', sweep.accepted_flags_by_role); setPd('env', sweep.accepted_env_by_role);
+          pdSet(curPd, { flags: sweep.accepted_flags_by_role, env: sweep.accepted_env_by_role });
           kbSeedTput = measured;
           await requireE2EValidationCheckpoint('config/e2e_validation.json', {
             phase: 'WarmStart', validation_level: 'config_sweep', gate: 'accepted',
@@ -4195,7 +4126,7 @@ print(json.dumps(res))
             baseline_throughput_tok_s: BASELINE_TPUT, final_throughput_tok_s: measured,
             throughput_speedup: BASELINE_TPUT ? measured / BASELINE_TPUT : 1,
             baseline_config: { flags: INIT_FLAGS, env: INIT_ENV },
-            accepted_config: { flags: curFlags, env: curEnv, ...pdConfigFields(), effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
+            accepted_config: { flags: curFlags, env: curEnv, ...pdOut(false), effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
             accepted_kernels: [], accepted_heads: [], final_patch: [],
             final_overlay: { path: curOverlay },
             final_launch_script: { path: `${EVAL_DIR}/bench_e2e.sh` },
@@ -4686,7 +4617,7 @@ print(json.dumps(res))
   NOISE_BAND = gateNoiseBand(ST.noise_band_pct);
   curFlags = ST.flags || '';
   curEnv = ST.env || '';
-  curPd = pdLayers({ flags: ST.flags_by_role, env: ST.env_by_role });
+  curPd = pdNew({ flags: ST.flags_by_role, env: ST.env_by_role });
   curOverlay = ST.overlay || INIT_BASE_OVERLAY;
   profile = {
     profile_topN_json: ST.profile_topn_json || '',
@@ -4741,7 +4672,7 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
   if (sweep && sweep.best_throughput_tok_s > curTput) {
     curFlags = sweep.accepted_flags || curFlags;
     curEnv = sweep.accepted_env || curEnv;
-    setPd('flags', sweep.accepted_flags_by_role); setPd('env', sweep.accepted_env_by_role);
+    pdSet(curPd, { flags: sweep.accepted_flags_by_role, env: sweep.accepted_env_by_role });
     curTput = sweep.best_throughput_tok_s;
     await requireE2EValidationCheckpoint('config/e2e_validation.json', {
       phase: 'ConfigSweep', validation_level: 'config_sweep', gate: 'accepted',
@@ -4749,7 +4680,7 @@ if (want('config') && CONFIG_TUNE_ENABLED && strategy && (strategy.config_direct
       baseline_throughput_tok_s: BASELINE_TPUT, final_throughput_tok_s: curTput,
       throughput_speedup: BASELINE_TPUT ? curTput / BASELINE_TPUT : 1,
       baseline_config: { flags: INIT_FLAGS, env: INIT_ENV },
-      accepted_config: { flags: curFlags, env: curEnv, ...pdConfigFields(), effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
+      accepted_config: { flags: curFlags, env: curEnv, ...pdOut(false), effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
       accepted_kernels: [], accepted_heads: [], final_patch: [], final_overlay: { path: curOverlay },
       final_launch_script: { path: `${EVAL_DIR}/bench_e2e.sh` },
       bench_script: { path: `${EVAL_DIR}/bench_e2e.sh` },
@@ -4809,25 +4740,21 @@ const history = ST.history || { insights: [], ledger: [], milestones: [], bottle
 // never decomposed into a standalone dense GEMM — so dense-GEMM synth is off for it.
 function gemmSynthFor(h) { return (h && h.op_kind === 'moe') ? 'false' : GEMM_SYNTH; }
 
-// One patch runs on both PD engines, so its cases come from both: the merged workload.
 function engineWorkload() {
   const path = (profile && profile.profile_workload_json) || '';
   return { ...(path ? { PROFILE_WORKLOAD_JSON: path } : {}), ...captureShard() };
 }
 
-// Capture is a SERVING leg on the pinned machines: a one-card server has unsharded N/K and may not
-// fit the model. The hook rides the shared overlay, so under PD both engines record.
+// Multinode capture serves on the pin: one card may not fit the model unsharded.
 function captureShard() {
-  const pd = SERVING_TOPOLOGY === 'pd_disagg';
-  if (!pd && SERVING_TOPOLOGY !== 'tp_span') return {};
+  if (!SERVING_TOPOLOGY) return {};
   return {
     CAPTURE_ON_ENGINE: SERVING_TOPOLOGY, CAPTURE_ENGINE_BASE_OVERLAY: curOverlay,
-    CAPTURE_ENGINE_LOG: pd ? 'every engine\'s "log" in mn_launch.json pd.engines' : 'server.log',
+    CAPTURE_ENGINE_LOG: IS_PD ? 'every engine\'s "log" in mn_launch.json pd.engines' : 'server.log',
     CAPTURE_TP: SERVING_TP, CAPTURE_GPU: SERVING_GPU,
   };
 }
 
-// One kernel serves both regimes, colocated or split across PD engines.
 function engineRegimes() {
   return { REQUIRE_DECODE_BUCKET: true, DECODE_M_BUCKETS: [1, CONC],
     PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)' };
@@ -4956,8 +4883,8 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset') &
     // Carry the routing/enabling overlay forward as an accepted head patch does; otherwise the code
     // half of a tuning win is dropped and its tuned data binds to nothing.
     if (tuning.apply_overlay) curOverlay = tuning.apply_overlay;
-    const tuned = pdLayers({ env: tuning.apply_env_by_role, flags: tuning.apply_flags_by_role });
-    const tunedOn = PD_ROLES.filter((r) => foldAccept({ engine: r }, tuned[r]));
+    const tuned = pdNew({ env: tuning.apply_env_by_role, flags: tuning.apply_flags_by_role });
+    const tunedOn = IS_PD ? PD_ROLES.filter((r) => foldAccept({ engine: r }, tuned[r])) : [];
     if (tunedOn.length) log(`Tuning skillset: per-engine deploy on ${tunedOn.join(' + ')} only.`);
     curTput = tuning.post_tune_throughput_tok_s;
     log(`Tuning skillset ACCEPTED: ${tuning.pre_tune_throughput_tok_s} -> ${curTput} tok/s ` +
@@ -5084,7 +5011,7 @@ if (want('tune') && TUNING_SKILLSET_ENABLED && !searchClosed('TuningSkillset') &
       throughput_speedup: tuning.tuning_speedup ||
         (tuning.post_tune_throughput_tok_s / tuning.pre_tune_throughput_tok_s),
       baseline_config: tuningBaselineConfig,
-      accepted_config: { flags: curFlags, env: curEnv, ...pdConfigFields(), effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
+      accepted_config: { flags: curFlags, env: curEnv, ...pdOut(false), effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
       accepted_kernels: tunedOps.map((o) => ({
         kernel_id: o.kernel_id || o.op || o.short_name || '',
         kernel_slot: o.kernel_slot || o.target_callable || o.target_file || o.op || o.short_name || '',
@@ -6001,6 +5928,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       // A/B completion: gate:'incomplete' / ab_complete:false means a leg is still missing (NOT a rejection).
       const abc = !!(integ && integ.gate !== 'incomplete' && integ.ab_complete !== false);
       if (sharedRefMed == null && abc && integ.ref_med) sharedRefMed = integ.ref_med;   // lock the shared ref
+      if (MN && abc) MN_DONE.add(integ.accepted_overlay);
       if (ci === 0) top = { cand, inputs, integ, abc };
       const passed = abc && integAccepted(integ, h.pct_gpu_time, cand.isolated) && beatsCurTput(integ, curTput);
       // One ledger row per candidate (short_name:backend), so the report sees every backend's e2e.
@@ -6386,7 +6314,7 @@ if (want('final')) {
     { phase: FINALIZE_GATE_PHASE, label: 'scan-incomplete-ab', schema: RECON_SCHEMA });
   const known = new Set(pendingIntegrations.map((p) => p.short_name));
   for (const it of ((scan && scan.incomplete) || [])) {
-    if (!it || !it.short_name || known.has(it.short_name)) continue;
+    if (!it || !it.short_name || known.has(it.short_name) || MN_DONE.has(it.overlay_dir)) continue;
     known.add(it.short_name);
     pendingIntegrations.push({
       short_name: it.short_name, track: 'head', winner_kind: it.winner_kind || '',
@@ -6473,7 +6401,7 @@ if (allAccepted.length) {
     baseline_throughput_tok_s: BASELINE_TPUT, final_throughput_tok_s: curTput,
     throughput_speedup: BASELINE_TPUT ? curTput / BASELINE_TPUT : 1,
     baseline_config: { flags: INIT_FLAGS, env: INIT_ENV },
-    accepted_config: { flags: curFlags, env: curEnv, ...pdConfigFields(), effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
+    accepted_config: { flags: curFlags, env: curEnv, ...pdOut(false), effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
     accepted_kernels: acceptedKernels, accepted_heads: acceptedHeads, final_patch: [],
     final_overlay: { path: curOverlay },
     final_launch_script: { path: `${EVAL_DIR}/bench_e2e.sh` },
@@ -6529,7 +6457,7 @@ if (want('final')) {
   finalize = await safeAgent(
     roleAgent('e2e_integrator', 'finalize', 'Assemble the final overlay + patch + launch script bundle.' + agentxFinalizeNote(), {
       EVAL_DIR, FINAL_OVERLAY: curOverlay, ACCEPTED_FLAGS: curFlags, ACCEPTED_ENV: curEnv,
-      ...pdConfigFields(),
+      ...pdOut(false),
       ACCEPTED_KERNELS: allAccepted, BASELINE_THROUGHPUT: BASELINE_TPUT, SKILL_DIR: WORKFLOW_DIR,
       ...TUNING_FINALIZE_INPUTS,
     }),
@@ -6546,7 +6474,7 @@ if (want('final')) {
       baseline_throughput_tok_s: BASELINE_TPUT, final_throughput_tok_s: finalTput,
       throughput_speedup: BASELINE_TPUT ? finalTput / BASELINE_TPUT : 1,
       baseline_config: { flags: INIT_FLAGS, env: INIT_ENV },
-      accepted_config: { flags: curFlags, env: curEnv, ...pdConfigFields(), effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
+      accepted_config: { flags: curFlags, env: curEnv, ...pdOut(false), effective_config_digest: EFFECTIVE_CONFIG_DIGEST },
       accepted_kernels: acceptedKernels, accepted_heads: acceptedHeads,
       final_patch: [finalize.final_patch].filter(Boolean),
       final_overlay: { path: finalize.final_overlay || curOverlay },
@@ -6578,7 +6506,7 @@ if (want('final')) {
       'same_direction_collapsed/below_min_speedup, and its own read_plane) with both floors.', {
       EVAL_DIR, HISTORY: history, BASELINE_THROUGHPUT: BASELINE_TPUT, FINAL_THROUGHPUT: finalTput,
       KB_RECALL,
-      ACCEPTED_CONFIG: { flags: curFlags, env: curEnv, ...pdConfigFields() }, ACCEPTED_KERNELS: allAccepted,
+      ACCEPTED_CONFIG: { flags: curFlags, env: curEnv, ...pdOut(false) }, ACCEPTED_KERNELS: allAccepted,
       ACCEPTED_HEADS: acceptedHeads, FLAGGED_HEADS: flaggedHeads, MILESTONES: milestone, BUDGET_USED: dispatched, BUDGET, MIN_KERNEL_TASKS,
       PROFILE_TOPN: profile ? profile.profile_topN_json : '', WORKLOAD, MODEL_NAME, SKILL_DIR: WORKFLOW_DIR,
       ...ANALYSIS_SKILL_INPUTS, ...TUNING_REPORT_INPUTS,
@@ -6603,7 +6531,7 @@ if (want('final')) {
       EVAL_DIR, MODEL_PATH, GPU_ID: GPU_LIST[0], BASELINE_THROUGHPUT: BASELINE_TPUT, NOISE_BAND_PCT: NOISE_BAND,
       BASELINE_OVERLAY: INIT_BASE_OVERLAY,
       FINAL_OVERLAY: (finalize && finalize.final_overlay) || curOverlay,
-      FINAL_FLAGS: { flags: curFlags, env: curEnv, ...pdConfigFields() },
+      FINAL_FLAGS: { flags: curFlags, env: curEnv, ...pdOut(false) },
       CLAIMED_THROUGHPUT: finalTput, WORKLOAD, APPLY_TO_ORIGINAL,
       MEASUREMENT_MODE: VALIDATION_MEASUREMENT_MODE,
       MEASUREMENT_PURPOSE: 'validation', REPLICAS: VALIDATION_SAMPLES,
@@ -6673,11 +6601,13 @@ const carryState = {
         } } : {}),
   eval_dir: EVAL_DIR, model_name: MODEL_NAME, baseline_throughput_tok_s: BASELINE_TPUT,
   noise_band_pct: NOISE_BAND, flags: curFlags, env: curEnv,
-  ...pdConfigFields(),
+  ...pdOut(false),
   overlay: curOverlay, throughput: curTput,
   profile_topn_json: profile ? profile.profile_topN_json : '',
-  profile_topn_by_role: (profile && profile.profile_topN_by_role) || null,
-  profile_workload_by_role: (profile && profile.profile_workload_by_role) || null,
+  ...(IS_PD ? {
+    profile_topn_by_role: (profile && profile.profile_topN_by_role) || null,
+    profile_workload_by_role: (profile && profile.profile_workload_by_role) || null,
+  } : {}),
   config_directions: (strategy && strategy.config_directions) || [],
   // AgentX candidates carry prepared_ut.result (dispatch cannot re-read it from disk), so an
   // undispatched task survives a resume (references/workflow-handoff.md).
@@ -6780,7 +6710,7 @@ const wfReturn = {
   throughput_speedup: finalFromAb ? 0 : finalSpeedup,
   validation_status: validationStatusOf(),
   output_parity: validation ? validation.output_parity : 'unknown',
-  accepted_config: { flags: curFlags, env: curEnv, ...pdConfigFields() },
+  accepted_config: { flags: curFlags, env: curEnv, ...pdOut(false) },
   accepted_kernels: acceptedKernels,
   accepted_heads: acceptedHeads,
   // Tuning phase attribution, reported apart from accepted_heads/accepted_kernels.

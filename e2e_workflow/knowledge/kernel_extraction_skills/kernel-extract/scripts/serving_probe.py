@@ -62,7 +62,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from observed_workload import parse_line  # noqa: E402
+from observed_workload import parse_line, use_multinode_dialects  # noqa: E402
 
 
 def post(base, path, obj=None, timeout=1800):
@@ -170,18 +170,6 @@ class LogOccupancy:
         return self.last[0], self.last[1], None
 
 
-def vocab_size(model):
-    """vocab_size from the model's config.json; None when the path is not a readable model dir."""
-    if not model:
-        return None
-    try:
-        with open(os.path.join(model, "config.json")) as f:
-            cfg = json.load(f)
-        return int(cfg.get("vocab_size") or cfg.get("text_config", {})["vocab_size"])
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
-
-
 def fresh_seed(seed=None):
     """`seed`, or a new one per invocation. Prompts from one seed are prefixes of each
     other, so a repeated or retried probe is answered from the prefix cache and its
@@ -189,12 +177,9 @@ def fresh_seed(seed=None):
     return seed if seed is not None else random.SystemRandom().randrange(1 << 31)
 
 
-def rand_ids(n, seed, vocab=None):
-    # Ids past the model's vocab make the embedding gather read out of bounds and fault the
-    # engine (DeepSeek-V4 has 129280).
+def rand_ids(n, seed):
     rnd = random.Random(seed)
-    hi = min(vocab - 1, 150000) if vocab and vocab > 1001 else ID_HI
-    return [rnd.randint(1000 if hi > 1000 else 0, hi) for _ in range(n)]
+    return [rnd.randint(0, ID_HI) for _ in range(n)]
 
 
 def generate(base, ids, max_new_tokens, journal, label, timeout=1800, rid=None):
@@ -603,7 +588,7 @@ def drive_prefill(base, point, args, journal):
     # forward, and a long generation would mix decode into the window.
     with ThreadPoolExecutor(max_workers=nseq) as ex:
         for i in range(nseq):
-            ex.submit(generate, base, rand_ids(toks, args.seed + i, getattr(args, "vocab", None)),
+            ex.submit(generate, base, rand_ids(toks, args.seed + i),
                       1, journal, "prefill_seq%d" % i, args.request_timeout)
 
 
@@ -623,7 +608,7 @@ def drive_prefill_batched(base, point, args, journal, engine=None):
         try:
             for i in range(nseq):
                 n = max(1, toks + (i < extra))
-                ex.submit(generate, base, rand_ids(n, args.seed + i, getattr(args, "vocab", None)), 1, journal,
+                ex.submit(generate, base, rand_ids(n, args.seed + i), 1, journal,
                           "prefill_seq%d" % i, args.request_timeout)
             if resume:
                 time.sleep(GATHER_S)
@@ -641,7 +626,7 @@ def drive_decode(base, point, args, journal):
     ctx = int(point.get("context_tokens") or 1024)
     ex = ThreadPoolExecutor(max_workers=bs)
     for i in range(bs):
-        ex.submit(generate, base, rand_ids(ctx, args.seed + 100 + i, getattr(args, "vocab", None)),
+        ex.submit(generate, base, rand_ids(ctx, args.seed + 100 + i),
                   args.decode_tokens, journal, "decode_req%d" % i, args.request_timeout)
     return ex
 
@@ -660,16 +645,15 @@ def drive_decode_closed_loop(base, point, args, journal, stop):
     The decode shape is unchanged: each request still attends over its whole context."""
     bs = int(point["batch_size"])
     ctx = int(point.get("context_tokens") or 1024)
-    vocab = getattr(args, "vocab", None)
     tail = min(DECODE_TAIL_TOKENS, max(1, ctx // 4))
-    prefix = rand_ids(ctx - tail, args.seed + 100, vocab)
+    prefix = rand_ids(ctx - tail, args.seed + 100)
     if not generate(base, prefix, 1, journal, "decode_prefix", args.request_timeout):
         raise RuntimeError("the shared decode prefix could not be prefilled")
 
     def worker(i):
         n = 0
         while not stop.is_set():
-            ids = prefix + rand_ids(tail, args.seed + 1000 * (i + 1) + n, vocab)
+            ids = prefix + rand_ids(tail, args.seed + 1000 * (i + 1) + n)
             if not generate(base, ids, args.decode_tokens, journal, "decode_req%d" % i,
                             args.request_timeout):
                 return
@@ -732,12 +716,9 @@ def build_parser():
                          "prefix-cache hits and stray steps")
     ap.add_argument("--request-timeout", type=float, default=1800)
     ap.add_argument("--seed", type=int, default=None,
-                    help="prompt seed; default is a new one per run, recorded in the "
-                         "journal. A seed already sent to this server is answered from "
-                         "its prefix cache. vLLM defaults to 1234: its cache_salt "
-                         "isolates every run instead")
-    ap.add_argument("--model", default=os.environ.get("MODEL"),
-                    help="model dir whose config.json bounds the random prompt ids")
+                    help="prompt seed, default 1234. Under --mode multinode an SGLang probe "
+                         "defaults to a new one per run, recorded in the journal: a seed "
+                         "already sent to that server is answered from its prefix cache")
     ap.add_argument("--out", required=True, help="journal JSON for this point")
     ap.add_argument("--framework", choices=["sglang", "vllm"], default="sglang")
     ap.add_argument("--served-model")
@@ -762,9 +743,11 @@ def main():
         ap.error("--served-model is required for vLLM")
     if args.vocab_size is not None and args.vocab_size < 1:
         ap.error("--vocab-size must be positive")
-    args.vocab = args.vocab_size or vocab_size(args.model)
-    ID_HI = min(150000, args.vocab - 1) if args.vocab else 31999
-    if FRAMEWORK == "vllm" and args.seed is None:
+    ID_HI = min(150000, args.vocab_size - 1) if args.vocab_size else 31999
+    multinode = args.mode == "multinode"
+    if multinode:
+        use_multinode_dialects()
+    if args.seed is None and (FRAMEWORK == "vllm" or not multinode):
         args.seed = 1234
     args.seed = fresh_seed(args.seed)
     os.makedirs(args.trace_dir, exist_ok=True)
@@ -781,8 +764,9 @@ def main():
     phase = point["phase"]
 
     journal = [{"event": "begin", "point": point, "base_url": args.base_url,
-                "profile_url": profile_url, "occupancy": args.occupancy_log or "/metrics",
-                "seed": args.seed, "cache_salt": CACHE_SALT,
+                **({"profile_url": profile_url, "occupancy": args.occupancy_log or "/metrics"}
+                   if multinode else {}),
+                "request_seed": args.seed, "cache_salt": CACHE_SALT,
                 "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}]
     t_start = time.time()
     before = trace_files(args.trace_dir)
@@ -794,7 +778,6 @@ def main():
     capture_scope = None
     stop_decode = threading.Event()
 
-    multinode = args.mode == "multinode"
     try:
         # /metrics of the engine the window opens on: a PD router serves no engine counters.
         occupancy = LogOccupancy(args.occupancy_log) if args.occupancy_log else profile_url

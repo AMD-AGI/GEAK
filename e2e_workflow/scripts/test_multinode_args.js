@@ -76,7 +76,7 @@ console.log('phase-by-phase resume');
 }
 
 console.log('check + Setup wiring');
-const checkAt = src.indexOf('let verdict = A.multinode_check;');
+const checkAt = src.indexOf('const verdict = A.multinode_check;');
 const setupAt = src.indexOf("if (want('setup')) {");
 eq(checkAt > 0 && checkAt < setupAt, true, 'every invocation has a check verdict before Setup');
 eq(src.slice(checkAt, setupAt).includes('useMnSpec(verdict.spec)'), true, 'a passed check hands its spec to useMnSpec');
@@ -84,70 +84,45 @@ eq(/multinode_check: \{ verdict: 'refused', problems/.test(src.slice(checkAt, se
   'a refusal returns before Setup, with the problems');
 
 const verdictTests = (async () => {
-  console.log('the verdict: the caller\'s, else one agent runs mn.py check');
-  const cStart = src.indexOf('async function agentMnCheck()');
+  console.log('the verdict: run_e2e.py\'s mn.py check, relayed');
+  const cStart = src.indexOf('const mnHosts =');
   const cEnd = src.indexOf('// The envelope arrives in the reply', cStart);
-  const aStart = src.indexOf('async function agentRun(');
-  const agentRun = src.slice(aStart, src.indexOf('\n}\n', aStart) + 3);
-  const run = async (A, reply, over = {}) => {
-    const calls = [], used = [], logs = [];
-    const safeAgent = async (prompt, opts) => { calls.push({ prompt, opts }); return { stdout: reply }; };
-    const topology = String(A.multinode.topology || 'tp_span');
-    const ret = await new Function('A', 'MN', 'SERVING_TP', 'ST', 'EVAL_DIR_OVERRIDE', 'EXP_ROOT', 'MN_PY', 'shq',
-      'safeAgent', 'obj', 'useMnSpec', 'log', 'MN_SPEC', 'MN_STATE', 'MN_SERVING_ENV', 'SERVING_TOPOLOGY', 'PD_ROLES',
-      `${agentRun}\nreturn (async () => { ${src.slice(cStart, cEnd)}\nreturn 'passed'; })();`)(
-      A, A.multinode, 8, over.ST || {}, over.EVAL_DIR_OVERRIDE || '', '/shared/geak/exp', '/w/mn.py',
-      (s) => `'${s}'`, safeAgent, () => ({}), (s) => used.push(s), (m) => logs.push(m), SPEC, '', '',
-      topology, ['prefill', 'decode']);
-    return { ret, calls, used, logs };
+  const run = (A) => {
+    const used = [], logs = [];
+    const ret = new Function('A', 'MN', 'useMnSpec', 'log', 'MN_SPEC', 'MN_STATE', 'IS_PD', 'PD_ROLES',
+      `return (() => { ${src.slice(cStart, cEnd)}\nreturn 'passed'; })();`)(
+      A, A.multinode, (s) => used.push(s), (m) => logs.push(m), SPEC, '',
+      A.multinode.topology === 'pd_disagg', ['prefill', 'decode']);
+    return { ret, used, logs };
   };
   const A = { tp: 8, multinode: mn({ topology: 'pd_disagg' }) };
   const at = (hosts) => ({ ...SPEC, nodes: hosts.map((host) => ({ host })) });
-  const ok = (hosts, spec = at(hosts)) => 'MN_CHECK=' + JSON.stringify({ verdict: 'ok', spec });
 
-  let r = await run({ ...A, multinode_check: { verdict: 'ok', spec: at(IPS) } }, '');
-  eq([r.ret, r.calls.length, r.used.length], ['passed', 0, 1], 'a complete relayed verdict is used as is, no agent');
-
+  let r = run({ ...A, multinode_check: { verdict: 'ok', spec: at(IPS) } });
+  eq([r.ret, r.used.length], ['passed', 1], 'a complete relayed verdict is used as is');
   const pinned = { tp: 8, multinode: mn({ topology: 'pd_disagg', commands_in_pin: true }) };
-  r = await run({ ...pinned, multinode_check: { verdict: 'ok', spec: { ...at(IPS), commands_in_pin: true } } }, '');
-  eq([r.ret, r.calls.length, r.used.length], ['passed', 0, 1], "run_e2e.py's command-less verdict is used as is, no agent");
-  r = await run({ ...pinned, multinode_check: { verdict: 'ok' } }, ok(IPS));
-  eq([r.ret.multinode_check.verdict, r.calls.length, /re-run run_e2e\.py/.test(r.ret.error)], ['refused', 0, true],
-    'a command-less block whose verdict lost its spec is refused, not re-checked from nothing');
+  r = run({ ...pinned, multinode_check: { verdict: 'ok', spec: { ...at(IPS), commands_in_pin: true } } });
+  eq([r.ret, r.used.length], ['passed', 1], "run_e2e.py's command-less verdict is used as is");
 
   const drop = (k) => { const s = at(IPS); delete s[k]; return s; };
-  for (const [why, bad] of [
-    ['no spec', { verdict: 'ok' }],
-    ['no spec.state', { verdict: 'ok', spec: drop('state') }],
-    ['PD without tp_by_role', { verdict: 'ok', spec: drop('tp_by_role') }],
-    ['other machines', { verdict: 'ok', spec: at(['10.9.9.9', IPS[1]]) }],
+  for (const [why, bad, shown] of [
+    ['no verdict', undefined, 'no verdict'],
+    ['no spec', { verdict: 'ok' }, 'no spec'],
+    ['no spec.state', { verdict: 'ok', spec: drop('state') }, 'no spec.state'],
+    ['PD without tp_by_role', { verdict: 'ok', spec: drop('tp_by_role') }, 'spec.tp_by_role'],
+    ['other machines', { verdict: 'ok', spec: at(['10.9.9.9', IPS[1]]) }, 'are not args.multinode'],
   ]) {
-    r = await run({ ...A, multinode_check: bad }, ok(IPS));
-    eq([r.ret, r.calls.length, r.logs.some((m) => m.includes('relayed verdict unusable'))], ['passed', 1, true],
-      `a relayed verdict with ${why} is re-checked by one agent`);
+    r = run({ ...A, multinode_check: bad });
+    eq([r.ret.multinode_check.verdict, r.used.length, r.ret.error.includes(shown), /through run_e2e\.py/.test(r.ret.error)],
+      ['refused', 0, true, true], `${why}: refused before Setup, nothing re-runs the check`);
   }
-  r = await run({ ...A, multinode_check: { verdict: 'refused', problems: ['rank1: GPUs busy'] } }, ok(IPS));
-  eq([r.ret.multinode_check.verdict, r.ret.multinode_check.problems, r.calls.length],
-    ['refused', ['rank1: GPUs busy'], 0], 'a relayed refusal stands, no agent re-runs the check');
-  r = await run({ ...A, multinode_check: { verdict: 'ok' } }, ok(IPS, drop('tp_by_role')));
-  eq([r.ret.multinode_check.verdict, /unusable: spec\.tp_by_role/.test(r.ret.error), r.used.length],
-    ['refused', true, 0], 'a re-check whose own verdict is unusable is refused');
-
-  r = await run(A, ok(IPS.slice().reverse()), { EVAL_DIR_OVERRIDE: '/shared/geak/exp/e1' });
-  eq([r.ret, r.calls.length, r.used.length], ['passed', 1, 1], 'no verdict passed: one agent runs the check');
-  eq(r.calls[0].prompt.includes("python3 /w/mn.py check --owner claude | grep '^MN_CHECK=' | tail -n 1"), true,
-    'the agent runs mn.py check with the Claude Code process as the pin owner');
-  eq(r.calls[0].prompt.includes('"work_dir":"/shared/geak/exp/e1"') && r.calls[0].prompt.includes('"tp":8'), true,
-    'the spec carries the run directory and the engine TP, as run_e2e.py\'s does');
-  eq((await run(A, ok(IPS))).calls[0].prompt.includes('"work_dir":"/shared/geak/exp"'), true,
-    'before Setup names an eval dir, the tools go under exp_root');
-
-  r = await run(A, ok(['10.9.9.9', IPS[1]]));
-  eq([r.ret.multinode_check.verdict, r.used.length], ['refused', 0], 'a relayed verdict about other machines is refused');
-  r = await run(A, 'MN_CHECK={"verdict":"ok"');
-  eq(/printed no verdict line/.test(r.ret.error), true, 'a garbled line is refused');
-  r = await run(A, 'MN_CHECK=' + JSON.stringify({ verdict: 'refused', problems: ['shared_fs /x is not a directory here'] }));
-  eq(r.ret.multinode_check.problems, ['shared_fs /x is not a directory here'], 'the check\'s own refusal is passed on');
+  r = run({ ...A, multinode_check: { verdict: 'refused', problems: ['rank1: GPUs busy'] } });
+  eq([r.ret.multinode_check.verdict, r.ret.multinode_check.problems, r.used.length],
+    ['refused', ['rank1: GPUs busy'], 0], 'a relayed refusal stands with its own problems');
+  r = run({ ...A, multinode_check: { verdict: 'refused' } });
+  eq(r.ret.multinode_check.problems, ['mn.py check refused'], 'a refusal without problems still says so');
+  eq(run({ tp: 16, multinode: mn(), multinode_check: { verdict: 'ok', spec: drop('tp_by_role') } }).ret, 'passed',
+    'tp_span needs no per-engine TP');
 })();
 eq(/runMn|\[MN_PY, \.\.\.args\]/.test(src), false, 'the workflow spawns no mn.py itself');
 eq(/BACKEND=\$\{BACKEND\} TP=\$\{SERVING_TP\} GPU=\$\{SERVING_GPU\}\$\{MN \? ` \$\{MN_SERVING_ENV\}` : ''\}/.test(src), true,
@@ -162,7 +137,8 @@ const driverMd = fs.readFileSync(path.join(ROOT, 'e2e_workflow', 'roles', '_frag
 eq(['<MN_GPU_EXEC> --target <master|rank<N>|prefill|decode|host> [--gpu <id>] -- <command>', 'sees NO GPU',
   'never copy a `GEAK_MN_PD_*` value into them'].every((s) => driverMd.includes(s)), true,
   'the fragment tells every role how to reach a node and keeps the PD env rule');
-eq(/MN_CHECK_CMD|MN_CHECK_SCHEMA|GEAK_REMOTE_GPU|GEAK_MN_EXT_SHARED_FS/.test(src), false, 'no trace of the old check agent');
+eq(/MN_CHECK_CMD|MN_CHECK_SCHEMA|GEAK_REMOTE_GPU|GEAK_MN_EXT_SHARED_FS|agentMnCheck|agentRun|--env-pin/.test(src), false,
+  'no check agent: only run_e2e.py runs mn.py check');
 
 verdictTests.then(() => {
   if (failures) { console.error(`\n${failures} FAILED`); process.exit(1); }

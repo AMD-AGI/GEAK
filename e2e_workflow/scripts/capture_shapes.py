@@ -102,25 +102,36 @@ _STATE = {
 }
 
 
+def _multinode():
+    """A rank of a multinode serving leg: mn.py exports GEAK_MN_ENGINE to every rank it launches."""
+    return bool(os.environ.get("GEAK_MN_ENGINE"))
+
+
 def _rank():
-    """The env's rank, else torch.distributed's once initialised (sglang sets no rank env).
-    Not cached: a worker installs the hook before it joins its process group."""
+    """The env's rank; on a multinode leg, else torch.distributed's once initialised (sglang sets
+    no rank env). Not cached: a worker installs the hook before it joins its process group."""
     for key in ("RANK", "LOCAL_RANK", "TP_RANK", "SLURM_PROCID"):
         if key in os.environ:
             return str(os.environ[key])
-    try:
-        import torch.distributed as dist
-        if dist.is_available() and dist.is_initialized():
-            return str(dist.get_rank())
-    except Exception:
-        pass
+    if _multinode():
+        try:
+            import torch.distributed as dist
+            if dist.is_available() and dist.is_initialized():
+                return str(dist.get_rank())
+        except Exception:
+            pass
     return "unknown"
 
 
 def _records_oracle():
-    """Only rank 0 (or a process with no rank) saves the heavy I/O: every rank of a TP group
-    runs the same shapes, and per-rank copies multiply the oracle by the world size."""
-    return _rank() in ("0", "unknown")
+    """On a multinode leg only rank 0 (or a process with no rank) saves the heavy I/O: per-rank
+    copies on the shared mount multiply the oracle by the world size. Assumes every rank of the
+    engine runs the same shapes, which holds for pure TP, not for DP-attention / EP."""
+    return not _multinode() or _rank() in ("0", "unknown")
+
+
+def _host_meta():
+    return {"host": _host()} if _multinode() else {}
 
 
 def _process_out_dir(out_dir):
@@ -129,9 +140,10 @@ def _process_out_dir(out_dir):
               or bool(os.environ.get("GEAK_SELECTION_TRACE")))
     if not unique:
         return out_dir
-    # Host after pid: ranks on two machines can share a pid, and both write to the shared mount.
+    # Multinode: host after pid, as ranks on two machines can share a pid on the shared mount.
+    host = f".host-{_host()}" if _multinode() else ""
     return os.path.join(
-        out_dir, f"capture.pid-{os.getpid()}.host-{_host()}.rank-{_rank()}")
+        out_dir, f"capture.pid-{os.getpid()}{host}.rank-{_rank()}")
 
 
 def _host():
@@ -428,7 +440,7 @@ def _write_capture_manifest(out_dir, extra=None):
     payload = {
         "target": s.get("target"),
         "process_id": os.getpid(),
-        "host": _host(),
+        **_host_meta(),
         "rank": _rank(),
         "byte_budget": s.get("byte_budget", 0),
         "oracle_bytes_est": s.get("oracle_bytes_est", 0),
@@ -980,7 +992,7 @@ def _flush(write_oracle=True):
     meta = {
         "target": s["target"],
         "process_id": os.getpid(),
-        "host": _host(),
+        **_host_meta(),
         "rank": _rank(),
         "module": s["mod"].__name__ if s["mod"] else None,
         "attr": s["attr"],
