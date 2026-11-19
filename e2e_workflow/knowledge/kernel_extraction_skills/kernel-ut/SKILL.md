@@ -98,6 +98,13 @@ not a successful numerical negative control. It does not measure timing: record
 report performance as unmeasured. Report missing cases and mass; do not renormalize
 survivors into full coverage.
 
+The UT is also the optimizer's oracle: optimization runs it on every candidate
+edit of `kernel_src/`. Leaf invocation and the per-leaf controls prove the
+pristine snapshot. On a candidate, bind and control the kernels it launches, so a
+candidate that fuses or re-dispatches leaves is judged on its own code rather
+than failed for leaving the extracted leaf list. Follow
+[candidate gates](references/candidate-gates.md) and declare `meta.candidate_gates`.
+
 Before reporting a verdict, verify deterministic input construction, baseline
 self-noise (repeated baseline outputs on one fixed set of inputs) and that numerical
 bad-source controls actually fail by a wide margin. See

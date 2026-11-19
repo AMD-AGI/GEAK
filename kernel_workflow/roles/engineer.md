@@ -73,6 +73,17 @@ Read, as reference (focused — start with the paths handed to you, don't crawl 
    the live serving stack you are being timed against, so editing it does not make you faster: it makes
    the number meaningless and the win is discarded at the e2e gate. Your patch is diffed with a
    `-- kernel_src` pathspec, so anything you change elsewhere is dropped anyway.
+1a. **When `meta.json` declares `candidate_gates`, the UT judges the kernels your candidate launches.**
+   You may fuse, add or re-dispatch kernels inside `kernel_src/`; every kernel must come from
+   `kernel_src/` or be one the baseline already launched from the same place. Declare a reversible
+   mutation for each kernel you add or rewrite in `kernel_src/negative_controls.json`, e.g.
+   `{"controls": [{"id": "fused_epilogue", "file": "fused.py", "find": "acc * scale", "replace":
+   "acc * (scale * 0.5)", "kernels": ["<launched kernel name prefix>"], "what": "halve the output scale"}]}`
+   with `file` relative to `kernel_src/`. The UT fails a launched kernel with no passing control in its
+   own file, and a declared control that does not break the outputs of a kernel it names: remove a
+   control with its kernel. Extracted leaves you stop launching are only reported. A UT without
+   `candidate_gates` that lists `meta.leaves` re-checks each of them on every run: keep each leaf
+   launching and its mutation anchor (`find`) intact.
 2. Only edit files within your `DIRECTION.focus_files` (plus the wrapper/binding if `host_runtime`).
    Staying in your lane keeps your patch orthogonal and mergeable.
 3. NEVER set `HIP_VISIBLE_DEVICES` directly — run correctness AND benchmark via
