@@ -8,7 +8,8 @@ provider for AMD GPUs: the model is an OGA export, measured with OGA's
 seams, a serving client and launch scripts. hip-ep is a C++ runtime; its kernels live
 in one shared library, `libcustom_kernels_<arch>.so`, which the EP opens at session
 creation. So the runtime-facing steps need their own tools, and this workflow runs
-the loop over them.
+the loop over them. Its lane is the tuning lane: hip-ep's own autotune tables,
+refreshed for the model.
 
 ## Runtime
 
@@ -33,6 +34,7 @@ models in the temp dir, keyed by the model alone, and kernel changes can leave t
 | `kprof.py` | `heads.json`: rocprofv3 kernel shares of the prefill pass and the decode passes, with each kernel's source file |
 | `build_kernels.sh` | the kernel library from the release tag plus an overlay of files under `lib/`, under the lock `tools/ep_task_runner.py` takes for EP builds |
 | `make_pkg.sh` | a candidate package: the base package with its kernel library swapped |
+| `lut_refresh.py` | the kernel library rebuilt with hip-ep's autotune tables (matmul_nbits, gqa) refreshed for this model |
 
 A tool deletes its verdict file before it starts and writes it only on success, so a
 failed rerun never leaves an earlier verdict in place.
@@ -47,21 +49,51 @@ intermittently on Qwen3.8-27B ("Not enough image_grid_thw data for image tokens"
 A candidate package passes when all of these hold:
 
 - **Timing:** one metric, TTFT or decode ms/token, improves by more than its noise
-  band at every timed length, and the other is no worse than its band (1% for each
-  metric). Each value is the median
+  band at every timed length, and the other is no worse than its band. A lane's gate
+  takes each metric's band from Setup's A/A (`--noise-from`): its largest delta over
+  the lengths, at least 1%. Each value is the median
   over two interleaved rounds; a round is one `model_benchmark` process of three
   repetitions and contributes its p50.
 - **Parity:** top-1 agreement at least 99% and relative L2 at most 3e-2. hip-ep's own
   lookup-vs-online-autotune switch moves the logits by relL2 7.99e-3 on Qwen3.8-27B,
   so a 1e-2 bound would reject hip-ep's own autotune.
 
+A failed gate rejects the candidate. A candidate the validator cannot reproduce
+against the release is reported, not returned as the final package.
+
+## Tuning lane
+
+hip-ep picks a matmul_nbits config per shape from a lookup table built into the
+kernel library, and the shipped table does not hold every shape a model runs
+(Qwen3.8-27B's gate_up shape, N=34816, has no row). Switching the same package to
+hip-ep's online autotune (`HIPDNN_MATMUL_AUTOTUNE_MODE=online`, one run) picks extended
+WMMA configs, 1.14–1.26x per prefill shape. A runtime switch is not shippable, so the
+lane refreshes the table: `lut_refresh.py` runs hip-ep's own sweep and `update_lut.py`
+on the model's prefill shapes (from hip-ep's `extract_shapes.py`), keeps rows that win
+by at least 3%, and rebuilds the library with the new table.
+
+The same holds for every op hip-ep ships an autotune table for, so the lane is per op:
+
+| Op | Table picks configs for | Swept on |
+|---|---|---|
+| matmul_nbits | the prefill GEMM (`MatMulNBitsWMMA*`) | the model's 4-bit shapes, from `extract_shapes.py` |
+| gqa | flash prefill and decode attention (`gqa_flash*`) | the model's (heads, KV heads, head size), from `genai_config.json`, when hip-ep's sweep grid has it |
+
+The lane refreshes the ops whose kernels hold at least 20% of the prefill or of a
+decode step, on the device's own table (hip-ep loads the one for the arch it runs
+on): on Qwen3.8-27B that is matmul_nbits (82% of the prefill; gqa is under 1%), on
+Qwen3-0.6B both (gqa is 27% of a decode step). One overlay carries every changed
+table, so one library, A/B and parity cover them together.
+
 ## Phases
 
 | Phase | What happens |
 |---|---|
-| Setup | Check the export, package and device; rebuild the release library; record the baseline; A/A of the shipped library against the rebuild, for the rebuild's offset and a logits check |
+| Setup | Check the export, package and device; rebuild the release library; record the baseline; A/A of the shipped library against the rebuild, for the lanes' noise band and a logits check |
 | Profile | `kprof.py` → `heads.json` |
-| Validate | The report: setup, baseline, profile |
+| Strategize | The tuning lane runs for the ops whose kernels hold at least 20% of the prefill or of a decode step |
+| Tuning | `lut_refresh.py` → `make_pkg.sh` → A/B and parity against the release |
+| Validate | Re-measure the final package against the release independently; the report |
 
 A failed Setup step stops the run. Long steps (10–30 minutes) follow
 `e2e_workflow.js`'s LONG MEASUREMENTS rule: started orphaned to init with `setsid
@@ -72,9 +104,10 @@ report as text, and the workflow saves it as `report.md`.
 ## Testing
 
 - `node tools/hip_ep_e2e/tests/test_workflow.js`: the workflow on stub agents (phase
-  order, refusals, what reaches the tools and the report), and the long-command
+  order, when the lane runs, how its verdict moves the final package, refusals, what
+  reaches the tools and the report), and the long-command
   template run through bash with job control on, as the agents' shell has it.
 - pytest (no GPU), `tools/hip_ep_e2e/tests/`: the `model_benchmark` parser and the
   gate, the parity comparison, the trace split, `build_kernels.sh` on a fake checkout,
-  `make_pkg.sh`, `hipep_env.py`.
+  `make_pkg.sh`, `hipep_env.py`, `lut_refresh.py`'s shape view and private tree.
 - On the GPU, every run starts with the A/A.

@@ -12,9 +12,10 @@ number for a length is the median of its runs. Packages alternate ABBA across
 rounds so slow drift (thermals) lands on both sides.
 
     python3 bench.py baseline --model M --pkg P --out DIR [--lens 1024,2048]
-    python3 bench.py ab --model M --base A --cand B --out DIR
+    python3 bench.py ab --model M --base A --cand B --out DIR [--noise-from AA.json]
 """
 import argparse
+import json
 import os
 import re
 import statistics
@@ -117,6 +118,13 @@ def gate(base, cand, noise, lens=(1024, 2048)):
     return {"accepted": bool(won), "won": won, "per_len": per_len, "noise": noise}
 
 
+def noise_band(aa_gate, floor=0.01):
+    """Per-metric noise band from an A/A gate: the largest |delta| over lengths, at least `floor`."""
+    rows = aa_gate["per_len"].values()
+    return {"ttft": max([floor] + [abs(r["ttft_gain"]) for r in rows]),
+            "decode": max([floor] + [abs(r["decode_delta"]) for r in rows])}
+
+
 def collect(env_by_side, model, lens, gen, reps, rounds, out_dir):
     """Run every side at every length, ABBA across rounds. Returns {side: {L: {...}}}."""
     os.makedirs(out_dir, exist_ok=True)
@@ -171,6 +179,8 @@ def main():
         else:
             p.add_argument("--base", required=True)
             p.add_argument("--cand", required=True)
+            p.add_argument("--noise-from", default=None,
+                           help="an A/A ab.json; each metric's band is its spread, at least 1%%")
     a = ap.parse_args()
     lens = a.lens
     os.makedirs(a.out, exist_ok=True)
@@ -187,6 +197,9 @@ def main():
     else:
         envs = {"a": hipep_env.Env.from_environ(a.base), "b": hipep_env.Env.from_environ(a.cand)}
         noise = {"ttft": 0.01, "decode": 0.01}
+        if a.noise_from:
+            with open(a.noise_from) as f:
+                noise = noise_band(json.load(f)["gate"])
         s = collect(envs, a.model, lens, a.gen, a.reps, a.rounds, a.out)
         g = gate(s["a"], s["b"], noise, lens=lens)
         res = {"model": a.model, "base": _pkg_info(envs["a"]), "cand": _pkg_info(envs["b"]),

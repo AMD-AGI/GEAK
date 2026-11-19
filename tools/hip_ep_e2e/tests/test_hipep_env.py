@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """tools/hip_ep_e2e/hipep_env.py: machine paths come from the environment, each
-package run gets its own HOME and temp dir, and a verdict file is written whole.
+package run gets its own HOME and temp dir, and a release compile command is
+reduced to its code-generation flags.
 
     python3 -m pytest tools/hip_ep_e2e/tests/test_hipep_env.py
 """
@@ -12,6 +13,19 @@ import pytest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 import hipep_env  # noqa: E402
+
+CMD = ("/opt/tr/bin/amdclang++  -DUSE_PROF_API=1 -D__HIP_PLATFORM_AMD__=1 -I/s/lib/Runtime/Kernels/include "
+       "-I/b/schemas -isystem /b/_deps/llvm/include -isystem /opt/tr/include -O3 -DNDEBUG -std=c++17 "
+       "--offload-arch=gfx11-generic -fPIC -Wno-ignored-attributes --offload-compress -MD -MT x.o "
+       "-MF x.o.d -o x.o -x hip -c /s/lib/Runtime/Kernels/hip/matmul_nbits_kernel.hip")
+
+
+def test_compile_flags_keep_codegen_drop_io():
+    cc, flags = hipep_env.compile_flags(CMD)
+    assert cc == "/opt/tr/bin/amdclang++"
+    assert flags == ["-DUSE_PROF_API=1", "-D__HIP_PLATFORM_AMD__=1", "-O3", "-DNDEBUG",
+                     "-std=c++17", "--offload-arch=gfx11-generic", "-fPIC",
+                     "-Wno-ignored-attributes", "--offload-compress"]
 
 
 def test_unset_path_is_named(monkeypatch):
@@ -78,3 +92,11 @@ def test_the_kernel_library_is_the_one_the_package_ships(tmp_path):
         hipep_env.kernel_lib(str(tmp_path))
     (tmp_path / "lib" / "libcustom_kernels_gfx1201.so").write_bytes(b"k")
     assert hipep_env.kernel_lib(str(tmp_path)).endswith("lib/libcustom_kernels_gfx1201.so")
+
+
+def test_compile_commands_come_from_the_builds_one_kernel_target(tmp_path):
+    objs = tmp_path / "lib" / "Runtime" / "Kernels" / "CMakeFiles"
+    (objs / "custom_kernels_gfx1201.dir").mkdir(parents=True)
+    (objs / "custom_kernels_gfx1151.dir").mkdir()
+    with pytest.raises(RuntimeError, match="2 custom_kernels_<arch> targets"):
+        hipep_env.product_command(str(tmp_path), "hip/k.hip.o")

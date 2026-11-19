@@ -129,6 +129,15 @@ def test_gate_without_lengths_raises():
         bench.gate(BASE, BASE, N, lens=())
 
 
+def test_noise_band_is_per_metric_with_a_one_percent_floor():
+    aa = {"per_len": {1024: {"ttft_gain": 0.002, "decode_delta": 0.001},
+                      2048: {"ttft_gain": -0.004, "decode_delta": -0.003}}}
+    assert bench.noise_band(aa) == pytest.approx({"ttft": 0.01, "decode": 0.01})
+    aa["per_len"][2048]["ttft_gain"] = -0.017
+    aa["per_len"][1024]["decode_delta"] = 0.012
+    assert bench.noise_band(aa) == pytest.approx({"ttft": 0.017, "decode": 0.012})
+
+
 # -- run order ------------------------------------------------------------------
 
 def test_abba_order():

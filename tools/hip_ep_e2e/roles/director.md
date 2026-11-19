@@ -48,7 +48,7 @@ Steps marked **LONG** follow "Long commands" in your prompt.
           --out EVAL_DIR/runs/aa --lens LENS --gen GEN --reps REPS --rounds ROUNDS
       ```
    3. Return `EVAL_DIR/runs/aa/ab.json` as `noise_from`: how far a rebuild of the release
-      moves TTFT and decode. If the A/A fails, return `ok: false` with the end of its log.
+      moves TTFT and decode. The lanes' gates take their noise band from it. If the A/A fails, return `ok: false` with the end of its log.
 
    When `AA` is `false`, `noise_from` is `""`.
 7. **A/A parity** (only with `AA`; LONG; DIR `EVAL_DIR/runs`, NAME `aa_parity`):
