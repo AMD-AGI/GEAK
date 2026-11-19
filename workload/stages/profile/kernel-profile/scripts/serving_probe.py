@@ -290,7 +290,7 @@ def start_profile(base, out_dir, num_steps, journal, timeout, record_shapes=True
     if record_shapes:
         body.update(record_shapes=True, with_stack=True)
     if FRAMEWORK == "vllm":
-        body = {"profile_prefix": os.path.basename(out_dir), "max_iterations": int(num_steps)}
+        body = {"profile_prefix": vllm_prefix(out_dir), "max_iterations": int(num_steps)}
     t0 = time.time()
     try:
         txt = post(base, "/start_profile", body, timeout=timeout)
@@ -389,14 +389,22 @@ def wait_traces_settled(trace_dir, since_ts, journal, timeout, expect_files=0, p
     journal.append({"event": "window_close_TIMEOUT", "waited_s": round(time.time() - t0, 1)})
     return False
 
+def vllm_prefix(trace_dir):
+    """vLLM accepts a profile_prefix of [A-Za-z0-9._-] only (0.33 answers HTTP 400 for the
+    eager evidence window's `<point>@eager`)."""
+    return re.sub(r"[^A-Za-z0-9._-]", "-", os.path.basename(trace_dir))
+
+
 def traces_written(trace_dir, since_ts):
     if FRAMEWORK == "vllm":
         # vLLM's per-session prefix changes names, not its configured output directory.
-        tag = os.path.basename(trace_dir)
+        # Worker files are named `<prefix>_<worker>`; `<prefix>-eager_...` belongs to
+        # another window.
+        tag = vllm_prefix(trace_dir)
         for src in glob.glob(os.path.join(os.path.dirname(trace_dir), tag + "*.trace.json*")):
             dst = os.path.join(trace_dir, os.path.basename(src))
             suffix = os.path.basename(src)[len(tag):]
-            if suffix and suffix[0].isdigit():
+            if not suffix.startswith("_"):
                 continue
             if ".async_llm." in suffix:
                 # API-server trace (builds without profiler ignore_frontend): CPU events

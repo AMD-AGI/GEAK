@@ -190,6 +190,22 @@ class VllmProfileTest(unittest.TestCase):
         got = probe.traces_written(str(target), 0)
         self.assertEqual([Path(r["path"]).name for r in got], [rank])
 
+    def test_eager_window_prefix_is_valid_and_kept_apart(self):
+        # vLLM 0.33 rejects "pt_a@eager" (HTTP 400): the eager evidence window never armed.
+        body = {}
+        with patch.object(probe, "post", lambda base, path, b, timeout: body.update(b) or ""):
+            probe.start_profile("http://x", str(self.root / "pt_a@eager"), 8, [], 5)
+        self.assertEqual(body["profile_prefix"], "pt_a-eager")
+        graph, eager = self.root / "pt_a", self.root / "pt_a@eager"
+        graph.mkdir()
+        eager.mkdir()
+        (self.root / "pt_a_rank0.1.pt.trace.json.gz").write_text("{}")
+        (self.root / "pt_a-eager_rank0.2.pt.trace.json.gz").write_text("{}")
+        self.assertEqual([Path(r["path"]).name for r in probe.traces_written(str(graph), 0)],
+                         ["pt_a_rank0.1.pt.trace.json.gz"])
+        self.assertEqual([Path(r["path"]).name for r in probe.traces_written(str(eager), 0)],
+                         ["pt_a-eager_rank0.2.pt.trace.json.gz"])
+
     @unittest.skipUnless((ROOT / "scripts/probe_server.py").exists(), "main uses its existing serving adapter")
     def test_vllm_server_info_from_engine_log(self):
         import probe_server
