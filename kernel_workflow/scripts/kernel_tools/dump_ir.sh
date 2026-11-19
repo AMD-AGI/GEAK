@@ -30,7 +30,9 @@
 # Writes: <ir_dir>/<variant>/<variant>.{ttgir,llir,amdgcn,s} + meta_*.json (LDS bytes/workgroup).
 # Exit: 0 dumped | 1 no compile command / bare --kernel | 2 unknown option before the compile
 #       command | 3 --emit-gluon requested without recover_gluon.py present
-#       | 4 --emit-gluon with no arch given or detectable.
+#       | 4 --emit-gluon with no arch given or detectable. 3 also covers no single compilation to
+#       collect: E_IR_NOTHING_COMPILED (the command never launched the kernel, or overrode
+#       TRITON_CACHE_DIR) or E_IR_SELECTION (several kernels/configurations).
 
 set -euo pipefail
 
@@ -85,6 +87,10 @@ selftest() {
          bash "$SELF" true --emit-gluon layouts --variant z --out "$T/ir" 2>&1)"; rc=$?
   if [ $rc -eq 4 ]; then echo "  ok   --emit-gluon without an arch refused (4)"
   else echo "  FAIL --emit-gluon without arch rc=$rc: $out"; f=1; fi
+  # a command that never launches the kernel compiles nothing: named, not an empty selection
+  out="$(TILE_HW_CACHE="$T/cache" bash "$SELF" true --variant n --out "$T/ir" 2>&1)"; rc=$?
+  if [ $rc -eq 3 ] && grep -q "E_IR_NOTHING_COMPILED" <<<"$out"; then echo "  ok   nothing compiled -> named (3)"
+  else echo "  FAIL nothing-compiled rc=$rc: $out"; f=1; fi
   if grep -nE '(^|[;&|]|then|do)[[:space:]]*rm[[:space:]]+-' "$SELF" >/dev/null; then
     echo "  FAIL an rm call is present (GEAK roles run this; move aside instead)"; f=1
   fi
@@ -214,6 +220,16 @@ else
   "${CMD[@]}"
 fi
 
+# A JIT kernel compiles at its first launch: a command that only imports or parses the source
+# (a "compile" step that never launches) leaves this cache empty. Say that, instead of an
+# empty selection that reads like a cache-location problem.
+if [ -z "$(find "$CACHE" -type f \( -name '*.ttgir' -o -name '*.amdgcn' \) -print -quit 2>/dev/null)" ]; then
+  echo "E_IR_NOTHING_COMPILED: the command wrote no IR into $CACHE." >&2
+  echo "  Triton/Gluon compile a kernel at its FIRST LAUNCH; give dump_ir.sh a command that launches it" >&2
+  echo "  once (a correctness run or a one-launch benchmark), not one that only imports/parses the source." >&2
+  echo "  If it did launch, the command (or a script it runs) overrides TRITON_CACHE_DIR: drop that override." >&2
+  exit 3
+fi
 # Select ONE compilation group (cache directory + kernel stem), then copy its IR and
 # matching metadata together. Multiple kernels/configurations require an explicit selection;
 # missing outputs are failures, never a reason to reuse a previous dump.
