@@ -37,6 +37,11 @@ It exists to close two systematic "isolated win / e2e loss" holes that a naive p
       so the isolated bake-off already reports the MAX plausible e2e win. `amdahl_check` is the verdict
       form (observed-vs-ceiling) available to any downstream e2e comparison; an observed delta far above
       the ceiling is box drift / measurement error, not the kernel.
+
+(c) CANDIDATE-TIME GATES — the task's UT is also the optimizer's oracle. `candidate_binding` and
+    `negative_control_verdict` judge a candidate by the kernels it actually launches, so a candidate that
+    fuses or re-dispatches the extracted leaves must still run its own code and be caught when broken,
+    but is not failed for no longer launching the extraction's leaf list.
 """
 import json
 import math
@@ -1600,6 +1605,194 @@ def assert_legs_differ(task_dir, base, cand, meta, timeout=600):
         if index == 0:
             primary = (bi, ci)
     return primary
+
+
+# --------------------------------------------------------------------------- candidate-time gates
+# The UT is also the optimizer's oracle, so on a candidate its binding and negative-control gates follow
+# the kernels the candidate launches, not the extraction's leaf list (kernel-extract
+# references/candidate-gates.md). A census is one process's record of the target op's launches on
+# each positive-mass signature: `{"sigs": {sig: {device_kernel: {"launches": n, "source_file": path}}}}`,
+# where source_file is the file that defined the launched kernel, or None when the recorder could not
+# attribute it.
+CONTROL_CATALOG = "negative_controls.json"
+
+
+def kernel_matches(name, prefixes):
+    return any(p and name.startswith(p) for p in prefixes)
+
+
+def _inside(path, root):
+    return path == root or path.startswith(root + os.sep)
+
+
+def _census_sigs(census):
+    """{sig: {kernel: realpath of its source file or None}}, launched kernels only."""
+    return {str(sig): {k: os.path.realpath(v["source_file"]) if v.get("source_file") else None
+                       for k, v in (kernels or {}).items() if (v or {}).get("launches", 0) > 0}
+            for sig, kernels in ((census or {}).get("sigs") or {}).items()}
+
+
+def _launched(census):
+    out = {}
+    for kernels in _census_sigs(census).values():
+        for k, f in kernels.items():
+            out.setdefault(k, f)
+    return out
+
+
+def candidate_binding(baseline, candidate, kernel_src, leaf_prefixes, aliases=None):
+    """Binding gate on a candidate: on every signature it launches a kernel of its own, and every other
+    kernel it launches there is one the baseline launched from the same place on that signature.
+
+    An extracted leaf's kernel (`leaf_prefixes`, from meta.leaves) launched from anywhere but kernel_src
+    is the installed copy; any other kernel the baseline did not launch on that signature is foreign.
+    `aliases` maps copies of kernel_src files (the candidate overlay's copy of the bound module) to their
+    kernel_src-relative names. Leaves the candidate no longer launches and kernels it adds are reported,
+    not failed."""
+    root = os.path.realpath(kernel_src)
+    alias = {os.path.realpath(k): v for k, v in (aliases or {}).items()}
+    base_sigs, cand_sigs = _census_sigs(baseline), _census_sigs(candidate)
+    if not any(leaf_prefixes):
+        return {"ok": False, "why": "no extracted leaf kernel prefixes: the installed copy of a leaf "
+                "cannot be told from a dependency", "own": {}}
+    base = _launched(baseline)
+    originals = {f for k, f in base.items() if f and kernel_matches(k, leaf_prefixes)}
+    own, shared, installed, foreign, without_own = {}, set(), set(), set(), []
+    for sig in sorted(set(base_sigs) | set(cand_sigs)):
+        mine = False
+        for k, f in sorted(cand_sigs.get(sig, {}).items()):
+            if f and _inside(f, root):
+                own[k], mine = os.path.relpath(f, root), True
+            elif f in alias:
+                own[k], mine = alias[f], True
+            elif kernel_matches(k, leaf_prefixes) or (f and f in originals):
+                installed.add(k)
+            elif k in base_sigs.get(sig, {}) and base_sigs[sig][k] == f:
+                shared.add(k)
+            else:
+                foreign.add(k)
+        if not mine:
+            without_own.append(sig)
+    installed, foreign = sorted(installed), sorted(foreign)
+    why = ("the candidate launches no kernel of its own" if not own else
+           f"leaf kernels from the installed copy: {installed}" if installed else
+           f"kernels neither in kernel_src nor launched by the baseline on that signature: {foreign}"
+           if foreign else
+           f"signatures where the candidate launches none of its own kernels: {without_own}" if without_own else "")
+    cand = _launched(candidate)
+    return {"ok": not why, "why": why, "own": own, "shared_dependency": sorted(shared),
+            "installed_copy": installed, "foreign": foreign, "signatures_without_own": without_own,
+            "retired_leaves": sorted(k for k in base if kernel_matches(k, leaf_prefixes) and k not in cand),
+            "added": sorted(k for k in own if k not in base)}
+
+
+def _relative_to_src(name):
+    name = str(name or "")
+    return name[len("kernel_src/"):] if name.startswith("kernel_src/") else name
+
+
+def extraction_controls(meta):
+    """The extraction's per-leaf mutations, `meta.leaves[]` = {module, file, kernel_prefix,
+    mutation: {find, replace, what}}, as controls in the form load_declared_controls() returns."""
+    out = []
+    for leaf in meta.get("leaves") or []:
+        m = leaf.get("mutation") or {}
+        out.append({"id": f"extraction:{leaf.get('module') or leaf.get('file')}", "origin": "extraction",
+                    "file": _relative_to_src(leaf.get("file")), "find": m.get("find") or "",
+                    "replace": m.get("replace") or "", "what": m.get("what") or "",
+                    "prefixes": [leaf["kernel_prefix"]] if leaf.get("kernel_prefix") else []})
+    return out
+
+
+def load_declared_controls(kernel_src):
+    """The candidate's own negative controls, `kernel_src/negative_controls.json`:
+    `{"controls": [{"id", "file", "find", "replace", "kernels": [name prefix, ...], "what"}]}`, with
+    `file` relative to kernel_src. Returns (controls, errors); no catalog is ([], [])."""
+    root = os.path.realpath(kernel_src)
+    path = os.path.join(root, CONTROL_CATALOG)
+    if not os.path.exists(path):
+        return [], []
+    try:
+        with open(path) as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError) as e:
+        return [], [f"{CONTROL_CATALOG}: {e}"]
+    rows = doc.get("controls") if isinstance(doc, dict) else None
+    if not isinstance(rows, list):
+        return [], [f'{CONTROL_CATALOG}: expected {{"controls": [...]}}']
+    controls, errors, seen = [], [], set()
+    for i, row in enumerate(rows):
+        row = row if isinstance(row, dict) else {}
+        cid = str(row.get("id") or f"control_{i}")
+        rel = _relative_to_src(row.get("file"))
+        f = os.path.realpath(os.path.join(root, rel)) if rel else ""
+        find, repl, kernels = row.get("find"), row.get("replace"), row.get("kernels")
+        why = ("duplicate id" if cid in seen else
+               "file must be an existing file inside kernel_src" if (
+                   not f or not _inside(f, root) or f in (root, path) or not os.path.isfile(f)) else
+               "find must be a non-empty string" if not (isinstance(find, str) and find) else
+               "replace must be a string that differs from find" if not isinstance(repl, str) or repl == find else
+               "kernels must name the launched kernel prefixes it breaks" if not (
+                   isinstance(kernels, list) and kernels and all(isinstance(k, str) and k for k in kernels)) else "")
+        seen.add(cid)
+        if why:
+            errors.append(f"{cid}: {why}")
+            continue
+        controls.append({"id": cid, "origin": "declared", "file": os.path.relpath(f, root), "find": find,
+                         "replace": repl, "prefixes": list(kernels), "what": str(row.get("what") or "")})
+    return controls, errors
+
+
+def controls_to_run(own, extraction, declared):
+    """Every declared control, and the extraction controls of leaves the candidate still launches."""
+    return [c for c in extraction if any(kernel_matches(k, c["prefixes"]) for k in own)] + list(declared)
+
+
+def apply_control(kernel_src, control, dest):
+    """Copy kernel_src into `dest` and apply one control there, replacing every occurrence of `find`;
+    the task's own kernel_src is never edited. Returns (mutated_kernel_src, mutated_file, anchor_found)."""
+    ks = os.path.join(dest, "kernel_src")
+    shutil.copytree(kernel_src, ks)
+    path = os.path.join(ks, control["file"])
+    with open(path) as fh:
+        src = fh.read()
+    found = bool(control.get("find")) and control["find"] in src
+    if found:
+        with open(path, "w") as fh:
+            fh.write(src.replace(control["find"], control["replace"]))
+    return ks, path, found
+
+
+def negative_control_verdict(own, results, tol, *, margin=10.0, errors=()):
+    """Negative-control gate on a candidate. `own` is candidate_binding()["own"] ({kernel: file relative
+    to kernel_src}). Each result is a control plus its mutated run: `anchor_found` and `mutated_root`
+    (from apply_control), that run's `census`, its `numerical_mismatches` and `worst_rel_err`, and
+    `identity_changed` when the launcher exposes a compile identity.
+
+    A control passes when its mutation applied, a kernel it names launched from the mutated copy, and
+    the outputs moved past margin x tol. Every kernel the candidate launches from kernel_src needs a
+    passing control in that kernel's own file, and every declared control must pass. A failing
+    extraction control is only stale: the candidate may have rewritten what it mutated."""
+    def from_copy(r):
+        root = os.path.realpath(r.get("mutated_root") or "")
+        return {k for k, f in _launched(r.get("census")).items()
+                if r.get("mutated_root") and f and _inside(f, root) and kernel_matches(k, r.get("prefixes") or [])}
+
+    def passed(r):
+        return bool(r.get("anchor_found") and from_copy(r) and (r.get("numerical_mismatches") or 0) > 0
+                    and (r.get("worst_rel_err") or 0.0) > margin * tol and r.get("identity_changed") is not False)
+
+    good = [(r, from_copy(r)) for r in results if passed(r)]
+    coverage = {k: [r["id"] for r, hit in good if k in hit and _relative_to_src(r.get("file")) == f]
+                for k, f in sorted(own.items())}
+    uncovered = sorted(k for k, ids in coverage.items() if not ids)
+    declared_failed = sorted(r["id"] for r in results if r.get("origin") == "declared" and not passed(r))
+    why = ("; ".join(errors) if errors else
+           f"declared controls that do not reject: {declared_failed}" if declared_failed else
+           f"launched kernels with no passing control: {uncovered}" if uncovered else "")
+    return {"ok": not why, "why": why, "coverage": coverage, "uncovered": uncovered,
+            "declared_failed": declared_failed, "catalog_errors": list(errors), "margin": margin,
+            "stale_extraction": sorted(r["id"] for r in results if r.get("origin") != "declared" and not passed(r))}
 
 
 def _median(xs):

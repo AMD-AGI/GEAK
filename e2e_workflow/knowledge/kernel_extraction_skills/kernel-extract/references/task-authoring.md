@@ -172,7 +172,9 @@ The shared leg runner already performs this isolation.
 1. Run the frozen seeded/structural inputs through the baseline; verify output structure and full
    numerical/semantic contract. Reconstruct implicit state and all required glue.
 2. Build candidate overlay; prove distinct baseline/candidate entries in every
-   phase and actual execution of every claimed editable leaf.
+   phase and actual execution of every claimed editable leaf. Record each
+   leaf's launch census so the same check binds a candidate by what it
+   launches ([candidate gates](candidate-gates.md)).
 3. Obtain independent baseline random outputs with
    `h.baseline_random_outputs(task, meta, draws=...)`.
 4. In the candidate process, use `h.run_correctness(regime, eager_cases=...,
@@ -194,7 +196,10 @@ The shared leg runner already performs this isolation.
    <observed>`. A control that "passed" without its deviation ever being measured
    is not evidence of anything; see the zero-oracle case in step 0 below.
    Preserve the mutation and logs, restore pristine source, then rerun final
-   normal checks before recording completion.
+   normal checks before recording completion. Record each mutation in
+   `meta.leaves[]` and apply it to a copy of `kernel_src/`, so on a candidate the
+   UT runs it only for leaves still launched, alongside the controls the
+   candidate declares ([candidate gates](candidate-gates.md)).
 7. `h.measure_legs(task, meta)` measures interleaved baseline/candidate subprocess
    legs with the same mode and shared timer. Use
    `h.serving_weighted_speedup(per_case, meta)` for the observed-call aggregate.

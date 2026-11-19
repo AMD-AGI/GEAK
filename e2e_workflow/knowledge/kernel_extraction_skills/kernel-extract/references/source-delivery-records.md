@@ -40,6 +40,9 @@ positive `invocations` at the actual editable leaf. Negative controls include
 do not count. Record the clean snapshot the reversible mutation tested; retain
 the actual mutation and mutated-source identity in the log, restore it, and
 run the normal final UT. For a joint task, record each requested leaf separately.
+These records describe the pristine snapshot. On a candidate, the UT reports its
+own binding and control verdicts instead ([candidate gates](candidate-gates.md));
+they never rewrite these records.
 
 Generate records from actual test outcomes. Hashing a file or copying these
 field names does not prove GPU execution. The checker enforces consistency,
