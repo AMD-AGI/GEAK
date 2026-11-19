@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 import uuid
 from pathlib import Path
 
@@ -18,6 +19,26 @@ SLOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SLOT / 'kernel-ut/scripts'))
 import ut_wave as W
 import ut_gpu_queue as Q
+
+
+class DockerCommandTest(unittest.TestCase):
+    def test_lane_runs_python_even_when_the_image_has_an_entrypoint(self):
+        # vLLM's serving image has ENTRYPOINT `vllm serve`: `IMAGE python3 ...` ran
+        # `vllm serve python3 ...` and every lane exited within seconds (PR #619 vLLM test).
+        runs = []
+
+        def fake_run(cmd, **kw):
+            runs.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, '', '')
+        with tempfile.TemporaryDirectory() as wave:
+            os.makedirs(os.path.join(wave, 'logs'))
+            backend = W.Docker(wave, 'serving@sha256:x')
+            with unittest.mock.patch.object(W.subprocess, 'run', fake_run):
+                self.assertTrue(backend.start('t', [], ['ut_wave.py', 'lane'], {}))
+        cmd = runs[-1]
+        at = cmd.index('serving@sha256:x')
+        self.assertEqual(cmd[at - 2:at], ['--entrypoint', 'python3'])
+        self.assertEqual(cmd[at + 1:], ['ut_wave.py', 'lane'])
 
 
 @unittest.skipUnless(os.environ.get('GEAK_TEST_DOCKER_IMAGE'), 'opt-in Docker integration')

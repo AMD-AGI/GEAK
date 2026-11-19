@@ -382,7 +382,9 @@ class Docker(object):
             env['ROCR_VISIBLE_DEVICES'] = ''
         for k, v in env.items():
             cmd += ["-e", "%s=%s" % (k, v)]
-        cmd += [self.image, "python3"] + argv
+        # Serving images may set an ENTRYPOINT (vLLM's is `vllm serve`): `IMAGE python3 ...`
+        # then ran `vllm serve python3 ...` and every lane exited at once.
+        cmd += ["--entrypoint", "python3", self.image] + argv
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if p.returncode:
             log(self.wave, "container for %s did not start: %s" % (name, (p.stderr or p.stdout)[-300:]))
