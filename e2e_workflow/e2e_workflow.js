@@ -3552,18 +3552,30 @@ if (!MODEL_PATH && KERNEL_PATH) {
 // dispatcher seam (a dense GEMM candidate has no live call site), so tag it op_kind='moe' (keeps
 // gemmSynthFor's dense synth off); it is never skipped. Detected from is_fused_kernel or the
 // profile class/name. Shared by every strategize call site, and it also admits the queue.
+// Only an unset or GEMM kind is re-tagged: is_fused_kernel also marks fused non-GEMM chains (an
+// attention scorer + select, a collective + norm), and a prepared UT's validated kind must equal its
+// declaration (preparedUtDefect), so a kind the extraction settled is never rewritten.
 const _isFusedOp = (c) => (c && c.is_fused_kernel === true) ||
   /(?:^|[^a-z])moe(?:[^a-z]|$)|group(?:ed)?[_ ]?gemm|ck_moe|expert|fused[_ ]?moe|fmoe|asm_moe|fused_custom/i
     .test(`${(c && c.op_kind) || ''} ${(c && c.short_name) || ''} ${(c && c.name) || ''} ${(c && c.classification) || ''} ${(c && c.class) || ''} ${(c && c.backend) || ''}`);
+const _RETAGGABLE_OP_KINDS = new Set(['', 'gemm', 'grouped_gemm', 'moe']);
 function applyOpIdentityGuard(queue, stage) {
   let tagged = 0;
+  const kept = [];
   for (const c of (queue || [])) {
     if (!_isFusedOp(c)) continue;
+    const kind = String(c.op_kind || '').toLowerCase();
+    const prepared = c.prepared_ut && c.prepared_ut.result ? String(c.prepared_ut.result.op_kind || '') : '';
+    if (!_RETAGGABLE_OP_KINDS.has(kind) || (prepared && prepared !== 'moe')) {
+      kept.push(`${c.short_name || c.name || '?'}=${kind || prepared}`);
+      continue;
+    }
     c.op_kind = 'moe';
     tagged++;
   }
   const admitted = admitHeads(queue, stage);
   if (tagged) log(`[op-identity] ${tagged} fused/grouped head(s): op_kind=moe (never dense-GEMM), bound at live seam — optimized as the fused op, never skipped.`);
+  if (kept.length) log(`[op-identity] ${kept.length} fused head(s) keep their declared op_kind: ${kept.join(', ')}.`);
   return admitted;
 }
 
@@ -5248,7 +5260,7 @@ function tuningIntegrateInputs() {
 // ===========================================================================
 // PHASE: HeadKernel — the highest-pct_gpu_time ops (GEMM / attention), optimized regardless of the
 // edit flag, via the bake-off ladder. Runs BEFORE the editable-kernel loop. The op-identity guard has
-// already forced fused/monolithic heads to op_kind=moe (dense-GEMM synth off, live seam kept), so
+// already tagged fused MoE/GEMM heads op_kind=moe (dense-GEMM synth off, live seam kept), so
 // each head is optimized AS the op the live kernel dispatches, never as an un-integrable dense GEMM.
 // ===========================================================================
 if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
