@@ -1683,9 +1683,14 @@ function agentxValidateSkip(adoptedNothing, leftMs) {
   return leftMs < AGENTX_VALIDATE_WINDOWS_MS ? 'no_time' : '';
 }
 // A trace replay benches its A/Bs on the search window but curTput starts at Setup's canonical number,
-// and the two are not comparable: an accepted same-window win is kept for Validate's canonical A/B to
-// judge. A sub-threshold `stack` result still has to beat curTput.
+// and the two are not comparable. Its results are judged by their own A/B, whose reference leg already
+// carries everything banked: an accepted win, or a sub-threshold `stack` result that did not lose to
+// that reference. Validate's canonical A/B judges what was kept.
 function beatsCurTput(integ, curTput) {
+  if (IS_AGENTX && integ.gate === 'stack') {
+    const ref = Number(integ.ref_med);
+    return ref > 0 && Number(integ.cand_med) >= ref;
+  }
   return (IS_AGENTX && integ.gate === 'accepted') || integ.e2e_throughput_tok_s > curTput;
 }
 
