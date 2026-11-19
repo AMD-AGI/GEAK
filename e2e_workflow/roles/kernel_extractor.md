@@ -390,7 +390,7 @@ freeze an out-of-regime oracle nobody should trust.
      > A decisive bucket costs ONE pair; only a bucket whose running median lands in the undecided band
      > (default 0.95–1.10x, where cross-process noise can flip the verdict) spends up to `max_reps=3`.
      > Do NOT pass a flat `max_reps` to "be safe" — it buys resolution the decisive buckets do not need.
-     > Report `speedup_spread` when a bucket looks noisy. Each leg's receipt carries `diagnostics`
+     > Report `speedup_spread` when a bucket looks noisy. Each row carries `diagnostics` per leg
      > (process wall/import/init, per-bucket input build, warmup, graph capture, cleanup) — setup cost
      > that sits OUTSIDE the device-event window, for when a UT is slow rather than its kernel.
      > `h.time_op` is the CUDA-EVENT DEVICE-time timer (`inner=1`; device time already EXCLUDES host

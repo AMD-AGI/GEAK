@@ -711,11 +711,6 @@ def iter_eager_cases_from_oracle(path, device="cpu"):
         }
 
 
-def eager_cases_from_oracle(path, device="cpu"):
-    """Materialize all eager cases; prefer ``iter_eager_cases_from_oracle`` for large oracles."""
-    return list(iter_eager_cases_from_oracle(path, device=device))
-
-
 def check_correct_multi_lazy(call, case_iter, tol, max_keep_live=2):
     """Like ``check_correct_multi`` but only keeps ``max_keep_live`` outputs resident."""
     per_case = []
@@ -1657,118 +1652,117 @@ def _median(xs):
 
 
 def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1.10), gpus=None,
-                 done=None, on_bucket=None, process_mode="batched"):
-    """`per_case` for `serving_weighted_speedup`: baseline and candidate always in SEPARATE processes.
+                 process_mode="batched"):
+    """`per_case` for `serving_weighted_speedup`. Baseline and candidate always run in SEPARATE
+    processes: a warm interpreter shared by the two legs shares JIT/autotune state and reports a
+    pseudo-1.0x that is an artifact, not a measurement.
 
-    Side isolation is what makes the number real: a warm interpreter shared by the two legs shares
-    JIT/autotune state and reports a pseudo-1.0x that is an artifact, not a measurement. That is
-    guaranteed by the overlay on each leg's PYTHONPATH, not by restarting for every shape.
+    `process_mode="batched"` (default) starts ONE process per leg per round (per GPU shard with
+    `gpus`), streaming every pending bucket. A cold torch/stack import costs 5-25 s, so paying it
+    once per leg instead of once per (bucket, leg, pair) is most of a UT's wall time. Round 2+
+    reverses the leg order and the bucket order, so drift over a sweep is not one-sided.
+    `process_mode="fresh"` restarts for every (bucket, leg, pair); keep it for A/A checks of state
+    carried between buckets inside one process (e.g. an autotune cache keyed without the varying
+    dimension). Warmup, device-event windows, graph policy and cache preparation are the same.
 
-    `process_mode="batched"` (default): one immutable-overlay process per side, per round, per GPU
-    shard, streaming every pending shape. A cold torch/stack import costs 5-25 s per process; paying
-    it once per side instead of once per (shape, side, rep) is most of a UT's wall time. Round 2+
-    reverses both the side order and the shape order, so sweep-order drift is not one-sided. Warmup,
-    device-event windows, graph policy and cache preparation are unchanged (`time_op`).
+    Process-to-process variance is what `time_op`'s in-process repeats cannot average away. Measured
+    on gfx950 it is ~0.1-0.5% on a prefill bucket and up to ~14% on a small-M decode bucket — so a
+    real 1.05x candidate sits inside the noise of a single unpaired pair. Two things fix that:
 
-    `process_mode="fresh"`: the reference mode -- one fresh process per (bucket, leg, pair). Keep it
-    for A/A checks of state carried between shapes inside one process (e.g. an autotune cache keyed
-    without the shape that changes); see `_measure_fresh_legs`.
+    - INTERLEAVE. Each rep is a B,C PAIR, never all Bs then all Cs. Any drift over the sweep (clocks,
+      thermals, a neighbour on the box) then lands on both legs and cancels, instead of accruing to
+      whichever leg ran later.
+    - REPEAT, BUT ONLY WHEN IT MATTERS. `max_reps` pairs is the CEILING, not the plan. After each pair
+      the running median ratio is checked: once it is outside `undecided`, the verdict cannot plausibly
+      flip and the bucket stops. A 2.3x bucket costs one pair; a 1.05x bucket — the one whose answer
+      is in doubt — spends the full budget.
 
-    In both modes each rep is an interleaved B,C pair and `max_reps` is a CEILING: a bucket stops as
-    soon as its running median ratio is outside `undecided` (see `_measure_fresh_legs`).
-
-    `gpus` (logical indices) shards BUCKETS over devices; every pair of one bucket stays on one
-    device, so a bucket's ratio never compares two GPUs. `done` ({sig: row}) are buckets an
-    interrupted run already measured in the same mode; they are returned as they are, not re-timed.
-    `on_bucket(row)` is called after every bucket measured here, so the caller can persist it."""
+    `baseline_ms`/`optimized_ms` are the MEDIAN over the pairs actually run, so one unlucky process
+    cannot carry the bucket. `reps` and `speedup_spread` (per-pair speedup range / median, 0.0 for a
+    single pair) ride along so a wide bucket is visible downstream rather than averaged into silence.
+    A bucket with no case on a leg is skipped; an untimeable one reports `speedup: None`."""
     if process_mode not in ("batched", "fresh"):
         raise ValueError("process_mode must be 'batched' or 'fresh'")
-    done = {s: r for s, r in (done or {}).items() if r.get("process_mode") == process_mode}
-
-    def completed(row):
-        row["process_mode"] = process_mode
-        if on_bucket:
-            on_bucket(row)
-
-    if process_mode == "fresh":
-        rows = _measure_fresh_legs(task_dir, meta, timeout=timeout, max_reps=max_reps,
-                                   undecided=undecided, gpus=gpus, done=done, on_bucket=completed)
-        return [dict(r, process_mode=process_mode) for r in rows]
     task = os.path.abspath(task_dir)
     base, cand = build_candidate_overlay(task, meta)
     assert_legs_differ(task, base, cand, meta)
     sigs = _run_leg(task, base, "list", timeout=timeout)["sigs"]
     if len(sigs) != len(set(sigs)):
         raise ValueError("duplicate timing case sigs: %s" % sigs)
-    todo = [s for s in sigs if s not in done]
-    devices = list(gpus or [None])[:max(1, len(todo))]
-    import threading
-    from concurrent.futures import ThreadPoolExecutor
-    lock = threading.Lock()
-
-    def emit(row):
-        with lock:
-            completed(row)
-
-    def shard(item):
-        index, gpu = item
-        return _measure_sweep(task, base, cand, todo[index::len(devices)], timeout, max_reps,
-                              undecided, gpu_env(gpu), emit)
-    rows = dict(done)
-    if todo:
-        # A shard's exception propagates once the executor has drained the other shards.
+    if process_mode == "fresh":
+        env = gpu_env(gpus[0]) if gpus else None
+        rows = {s: _measure_bucket(task, base, cand, s, timeout, max_reps, undecided, env) for s in sigs}
+    else:
+        # A bucket's pairs stay on one device, so its ratio never compares two GPUs.
+        devices = list(gpus or [None])[:max(1, len(sigs))]
+        from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=len(devices)) as pool:
-            for part in pool.map(shard, enumerate(devices)):
-                rows.update(part)
-    return [rows[s] for s in sigs if rows.get(s)]
+            parts = pool.map(lambda i: _measure_sweep(task, base, cand, sigs[i::len(devices)], timeout,
+                                                      max_reps, undecided, gpu_env(devices[i])),
+                             range(len(devices)))
+            rows = {s: r for part in parts for s, r in part.items()}
+    return [dict(rows[s], process_mode=process_mode) for s in sigs if rows.get(s)]
 
 
-def _measure_sweep(task, base, cand, sigs, timeout, max_reps, undecided, env, emit):
+def _measure_sweep(task, base, cand, sigs, timeout, max_reps, undecided, env):
     """Rounds of one baseline process + one candidate process over every still-undecided sig."""
-    lo, hi = undecided
-    pending, rows = list(sigs), {}
-    pairs = {s: ([], []) for s in sigs}
+    pending, rows, pairs = list(sigs), {}, {s: ([], []) for s in sigs}
     for rep in range(max(1, int(max_reps))):
         if not pending:
             break
         order = pending if rep % 2 == 0 else pending[::-1]
-        sides = [("baseline", base), ("candidate", cand)]
-        if rep % 2:
-            sides.reverse()
-        results = {}
-        for side, overlay in sides:
-            response = _run_leg(task, overlay, "time", sigs=order, timeout=timeout, env_extra=env)
-            results[side] = _checked_timing_rows(response, order, side)
+        sides = [("baseline", base), ("candidate", cand)][::-1 if rep % 2 else 1]
+        got = {side: _checked_timing_rows(_run_leg(task, overlay, "time", sigs=order, timeout=timeout,
+                                                   env_extra=env), order, side)
+               for side, overlay in sides}
         again = []
         for sig in pending:
-            b, o = results["baseline"].get(sig), results["candidate"].get(sig)
+            b, o = got["baseline"].get(sig), got["candidate"].get(sig)
             if b is None or o is None:
-                continue                   # no case on a leg: skipped, exactly as in fresh mode
-            brows, orows = pairs[sig]
-            brows.append(b)
-            orows.append(o)
-            row = _summarize_pairs(sig, brows, orows)
-            row["pair_order"] = ["BC" if n % 2 == 0 else "CB" for n in range(len(brows))]
-            good_b = [r.get("ms") for r in brows if r.get("ms")]
-            good_o = [r.get("ms") for r in orows if r.get("ms")]
-            # nothing timable -> more pairs cannot change that; decisive -> no resolution needed
-            if (rep + 1 < max_reps and good_b and good_o
-                    and lo <= _median(good_b) / _median(good_o) <= hi):
+                continue
+            pairs[sig][0].append(b)
+            pairs[sig][1].append(o)
+            if rep + 1 < max_reps and _undecided(*pairs[sig], undecided):
                 again.append(sig)
             else:
-                rows[sig] = row
-                emit(row)
+                rows[sig] = dict(_summarize_pairs(sig, *pairs[sig]),
+                                 pair_order=["CB" if n % 2 else "BC" for n in range(rep + 1)])
         pending = again
     return rows
 
 
+def _measure_bucket(task, base, cand, sig, timeout, max_reps, undecided, env):
+    """One bucket's interleaved B,C pairs, each leg a fresh process; None if a leg has no case."""
+    brows, orows = [], []
+    for _ in range(max(1, int(max_reps))):
+        b = _checked_timing_rows(_run_leg(task, base, "time", bucket=sig, timeout=timeout,
+                                          env_extra=env), [sig], "baseline").get(sig)
+        o = _checked_timing_rows(_run_leg(task, cand, "time", bucket=sig, timeout=timeout,
+                                          env_extra=env), [sig], "candidate").get(sig)
+        if b is None or o is None:
+            break
+        brows.append(b)
+        orows.append(o)
+        if not _undecided(brows, orows, undecided):
+            break
+    return _summarize_pairs(sig, brows, orows) if brows else None
+
+
+def _undecided(brows, orows, band):
+    """True while more pairs can still change the verdict: both legs timable and the running median
+    ratio inside `band`. Nothing timable -> more pairs cannot help; decisive -> none needed."""
+    good_b = [r.get("ms") for r in brows if r.get("ms")]
+    good_o = [r.get("ms") for r in orows if r.get("ms")]
+    return bool(good_b and good_o) and band[0] <= _median(good_b) / _median(good_o) <= band[1]
+
+
 def _checked_timing_rows(response, expected, side):
-    """{sig: row} of one timing process. A sig absent from the response is a bucket with no case
-    (skipped); a duplicated or unrequested sig means the leg did not time what was asked."""
+    """{sig: row} of one timing process. An absent sig is a bucket with no case (skipped); a
+    duplicated or unrequested one means the leg did not time what was asked."""
     found = response.get("cases", [])
     got = [r.get("sig") for r in found]
     if len(got) != len(set(got)) or not set(got) <= set(expected):
-        raise RuntimeError("%s timing sweep duplicated or added cases: asked %s, got %s"
+        raise RuntimeError("%s timing leg duplicated or added cases: asked %s, got %s"
                            % (side, list(expected), got))
     for row in found:
         row["process"] = response.get("process", {})
@@ -1787,118 +1781,11 @@ def _summarize_pairs(sig, brows, orows):
             "reps": len(bms),
             "speedup_spread": ((max(pair_sp) - min(pair_sp)) / _median(pair_sp)
                                if len(pair_sp) > 1 else 0.0),
-            "baseline_timing": _leg_receipt(brows), "optimized_timing": _leg_receipt(orows)}
-
-
-def _leg_receipt(rows):
-    """How a leg's `ms` was produced: timers, primed/host_ms (time_op's device-vs-host verdict) and
-    the per-process / per-shape setup timings that sit OUTSIDE the device-event window."""
-    timers = sorted({str(r.get("timer")) for r in rows})
-    primed = [r.get("primed") for r in rows]
-    return {"timers": timers,
-            # True only if every pair says device-bound; None if any pair could not tell (ABSENT)
-            "primed": (None if any(p is None for p in primed) else all(primed)) if rows else None,
-            "host_ms": [r.get("host_ms") for r in rows],
-            "diagnostics": [{"case": r.get("diagnostics", {}), "process": r.get("process", {})}
-                            for r in rows]}
-
-
-def _measure_fresh_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1.10), gpus=None,
-                        done=None, on_bucket=None):
-    """`measure_legs(process_mode="fresh")`: one bucket per FRESH subprocess per leg.
-
-    A fresh process for every shape is an additional control for state carried between SHAPES
-    (the two sides are isolated by their own processes in either mode). It is also what makes ONE
-    pair per bucket too coarse: fresh-process variance is exactly the variance `time_op`'s in-process
-    repeats cannot average away. Measured on gfx950 it is ~0.1-0.5% on a prefill bucket and up to
-    ~14% on a small-M decode bucket — so a real 1.05x candidate sits inside the noise of a single
-    unpaired pair, which is the resolution the direction fix needs and did not have.
-
-    Two things fix that, and only one of them costs anything:
-
-    - INTERLEAVE. Each rep is a B,C PAIR, never all Bs then all Cs. Any drift over the sweep (clocks,
-      thermals, a neighbour on the box) then lands on both legs and cancels, instead of accruing to
-      whichever leg ran later. This is free — same subprocess count.
-    - REPEAT, BUT ONLY WHEN IT MATTERS. `max_reps` pairs is the CEILING, not the plan. After each pair
-      the running median ratio is checked: once it is outside `undecided`, the verdict cannot plausibly
-      flip and the bucket stops. A 2.3x bucket costs one pair, exactly as before; a 1.05x bucket — the
-      one whose answer is in doubt — spends the full budget. Flat `reps=3` would have tripled the cost
-      of every bucket to buy resolution on the few that need it, and this path already pays a cold
-      torch import per subprocess.
-
-    `baseline_ms`/`optimized_ms` are the MEDIAN over the pairs actually run, so one unlucky process
-    cannot carry the bucket. `reps` and `speedup_spread` (per-pair speedup range / median, 0.0 for a
-    single pair) ride along so a wide bucket is visible downstream rather than averaged into silence."""
-    task = os.path.abspath(task_dir)
-    base, cand = build_candidate_overlay(task, meta)
-    assert_legs_differ(task, base, cand, meta)
-    sigs = _run_leg(task, base, "list", timeout=timeout)["sigs"]
-    done = dict(done or {})
-    todo = [s for s in sigs if s not in done]
-
-    def measured(sig, env_extra):
-        row = _measure_bucket(task, base, cand, sig, timeout, max_reps, undecided, env_extra)
-        if row and on_bucket:
-            on_bucket(row)
-        return row
-
-    def ordered(rows):
-        rows = dict(rows, **{s: r for s, r in done.items() if s in sigs})
-        return [rows[s] for s in sigs if rows.get(s)]
-    gpus = list(gpus or [])
-    if len(gpus) > 1 and len(todo) > 1:
-        import queue
-        import threading
-        free, rows, errors = queue.Queue(), {}, []
-        for g in gpus:
-            free.put(g)
-        lock = threading.Lock()
-
-        def one(sig):
-            g = free.get()
-            try:
-                row = _measure_bucket(task, base, cand, sig, timeout, max_reps, undecided, gpu_env(g))
-                rows[sig] = row
-                if row and on_bucket:
-                    with lock:
-                        on_bucket(row)
-            except BaseException as exc:
-                with lock:
-                    errors.append(exc)
-            finally:
-                free.put(g)
-        threads = [threading.Thread(target=one, args=(sig,)) for sig in todo]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-        if errors:
-            raise errors[0]
-        return ordered(rows)
-    env = gpu_env(gpus[0]) if gpus else None
-    return ordered({sig: measured(sig, env) for sig in todo})
-
-
-def _measure_bucket(task, base, cand, sig, timeout, max_reps, undecided, env_extra):
-    """One bucket's interleaved B,C pairs in fresh processes; None when neither leg has the case."""
-    lo, hi = undecided
-    brows, orows = [], []
-    for _ in range(max(1, int(max_reps))):
-        b = _checked_timing_rows(_run_leg(task, base, "time", bucket=sig, timeout=timeout,
-                                          env_extra=env_extra), [sig], "baseline").get(sig)
-        o = _checked_timing_rows(_run_leg(task, cand, "time", bucket=sig, timeout=timeout,
-                                          env_extra=env_extra), [sig], "candidate").get(sig)
-        if b is None or o is None:
-            break
-        brows.append(b)
-        orows.append(o)
-        good_b = [r.get("ms") for r in brows if r.get("ms")]
-        good_o = [r.get("ms") for r in orows if r.get("ms")]
-        if not good_b or not good_o:
-            break                      # nothing timable here; more pairs cannot change that
-        if not (lo <= _median(good_b) / _median(good_o) <= hi):
-            break                      # decisive already — do not buy resolution we do not need
-    return _summarize_pairs(sig, brows, orows) if brows else None
+            # setup cost OUTSIDE the device-event window, per pair: process + per-bucket stages
+            "diagnostics": {"baseline": [dict(r.get("diagnostics") or {}, process=r["process"])
+                                         for r in brows],
+                            "candidate": [dict(r.get("diagnostics") or {}, process=r["process"])
+                                          for r in orows]}}
 
 
 def baseline_random_outputs(task_dir, meta, *, seed=0, draws=0, timeout=3600):

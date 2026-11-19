@@ -2805,7 +2805,7 @@ class TestMeasureLegs(_LegTestCase):
         self.assertEqual([c["env"]["PYTHONPATH"].split(os.pathsep)[0] for c in legs],
                          [self.base, self.cand])
         self.assertEqual([_timed_sigs(c["cmd"]) for c in legs], [["decode", "prefill"]] * 2)
-        self.assertIn("process", per[0]["baseline_timing"]["diagnostics"][0])
+        self.assertEqual(len(per[0]["diagnostics"]["baseline"]), 1)
 
     def test_an_unknown_process_mode_is_refused(self):
         self._legs()
@@ -2954,39 +2954,12 @@ class TestMeasureLegsResolution(_LegTestCase):
 
 
 class TestMeasureLegsBatched(unittest.TestCase):
-    """The batched sweep's bookkeeping: resume, GPU shards and what a sweep may answer."""
+    """The batched sweep's bookkeeping: GPU shards and what a sweep may answer."""
 
     def _measure(self, leg, **kwargs):
         with patch.object(hl, "build_candidate_overlay", return_value=("base", "cand")), \
              patch.object(hl, "assert_legs_differ"), patch.object(hl, "_run_leg", side_effect=leg):
             return hl.measure_legs("/fixture", {}, **kwargs)
-
-    def test_done_buckets_are_returned_untouched_and_only_new_ones_are_emitted(self):
-        calls, emitted = [], []
-
-        def leg(task, overlay, mode, **kw):
-            if mode == "list":
-                return {"sigs": ["a", "b", "done"]}
-            calls.append((overlay, list(kw["sigs"])))
-            return {"cases": [{"sig": s, "ms": 2.0 if overlay == "base" else 1.0} for s in kw["sigs"]]}
-        done = {"done": {"sig": "done", "speedup": 3.0, "process_mode": "batched"}}
-        per = self._measure(leg, on_bucket=emitted.append, done=done)
-        self.assertEqual(calls, [("base", ["a", "b"]), ("cand", ["a", "b"])])
-        self.assertEqual([r["sig"] for r in per], ["a", "b", "done"])
-        self.assertEqual(per[2]["speedup"], 3.0)
-        self.assertEqual([r["sig"] for r in emitted], ["a", "b"])
-
-    def test_a_bucket_done_in_another_process_mode_is_measured_again(self):
-        seen = []
-
-        def leg(task, overlay, mode, **kw):
-            if mode == "list":
-                return {"sigs": ["a"]}
-            seen.append(overlay)
-            return {"cases": [{"sig": "a", "ms": 1.0}]}
-        per = self._measure(leg, max_reps=1, done={"a": {"sig": "a", "process_mode": "fresh"}})
-        self.assertEqual(seen, ["base", "cand"])
-        self.assertEqual(per[0]["process_mode"], "batched")
 
     def test_gpu_shards_split_the_buckets_and_keep_each_pair_on_one_device(self):
         seen = []
@@ -3001,16 +2974,15 @@ class TestMeasureLegsBatched(unittest.TestCase):
         self.assertEqual(sorted(seen), [("0", "base", ("a", "c")), ("0", "cand", ("a", "c")),
                                         ("1", "base", ("b",)), ("1", "cand", ("b",))])
 
-    def test_a_failing_gpu_shard_reaches_the_caller_in_both_modes(self):
+    def test_a_failing_gpu_shard_reaches_the_caller(self):
         def leg(task, overlay, mode, **kw):
             if mode == "list":
                 return {"sigs": ["a", "b"]}
             if kw["env_extra"]["HIP_VISIBLE_DEVICES"] == "1":
                 raise RuntimeError("worker failed")
-            return {"cases": [{"sig": s, "ms": 1.0} for s in kw.get("sigs") or [kw["bucket"]]]}
-        for mode in ("batched", "fresh"):
-            with self.subTest(mode=mode), self.assertRaisesRegex(RuntimeError, "worker failed"):
-                self._measure(leg, gpus=[0, 1], max_reps=1, process_mode=mode)
+            return {"cases": [{"sig": s, "ms": 1.0} for s in kw["sigs"]]}
+        with self.assertRaisesRegex(RuntimeError, "worker failed"):
+            self._measure(leg, gpus=[0, 1], max_reps=1)
 
     def test_a_sweep_that_duplicates_or_adds_a_case_is_refused(self):
         for cases in ([{"sig": "a", "ms": 1.0}] * 2, [{"sig": "a", "ms": 1.0}, {"sig": "z", "ms": 1.0}]):
@@ -3285,7 +3257,7 @@ class TestOracleSharedAndLazy(_HarnessTestCase):
             }],
         }
         self.torch.load = lambda *a, **k: blob
-        cases = hl.eager_cases_from_oracle("ref.pt", device="cpu")
+        cases = list(hl.iter_eager_cases_from_oracle("ref.pt", device="cpu"))
         self.assertEqual(len(cases), 1)
         self.assertEqual(cases[0]["sig"], "s0")
         self.assertEqual(cases[0]["regime"], "decode")
