@@ -22,6 +22,8 @@ const ok = (cond, msg) => { if (!cond) { console.error('  FAIL:', msg); failures
 
 const semStart = src.indexOf('function makeSem(ids) {');
 const makeSemSrc = src.slice(semStart, src.indexOf('\n}\n', semStart) + 2);
+const planStart = src.indexOf('function headAuthorPlan(h, authorPlan) {');
+const headAuthorPlanSrc = planStart === -1 ? '' : src.slice(planStart, src.indexOf('\n}\n', planStart) + 2);
 const start = src.indexOf('  const headPool = ');
 const end = src.indexOf('const { ext, isDominant, headCands } = p;', start);
 ok(semStart !== -1 && start !== -1 && end > start, 'the default head track and makeSem located in e2e_workflow.js');
@@ -38,6 +40,7 @@ const FREE = [
   'want', 'kernelQueue',
 ];
 const body = `${makeSemSrc}
+${headAuthorPlanSrc}
 let headDispatched = 0, ABL_NESTED_CAP_MS = null;
 ${src.slice(start, end)}
     __integrate(h, p.headCands);
