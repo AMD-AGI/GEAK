@@ -4589,6 +4589,20 @@ const history = ST.history || { insights: [], ledger: [], milestones: [], bottle
 // never decomposed into a standalone dense GEMM — so dense-GEMM synth is off for it.
 function gemmSynthFor(h) { return (h && h.op_kind === 'moe') ? 'false' : GEMM_SYNTH; }
 
+// The author lanes a head's plan becomes. A source-delivered prepared UT proves on every run that each
+// editable leaf executes and that a mutation of it is caught, so only a rewrite of those leaves can
+// pass: while the plan has a rewrite, its author entries are dropped. HEAD_AUTHOR_MAX applies after.
+function headAuthorPlan(h, authorPlan) {
+  let planned = authorPlan || [];
+  const leafGated = h.source_delivery_required === true && planned.some((ap) => ap && ap.route === 'rewrite');
+  if (leafGated && planned.some((ap) => !ap || ap.route !== 'rewrite')) {
+    const dropped = planned.filter((ap) => !ap || ap.route !== 'rewrite').map((ap) => (ap && ap.language) || '?');
+    log(`  ${h.short_name}: dropped author lane(s) ${dropped.join(', ')}: the prepared UT gates on its own editable leaves, so only a rewrite of them can pass.`);
+    planned = planned.filter((ap) => ap && ap.route === 'rewrite');
+  }
+  return planned.slice(0, HEAD_AUTHOR_MAX);
+}
+
 // ===========================================================================
 // PHASE: TuningSkillset — the VENDORED tuning skillset, run WHOLE and STANDALONE, BEFORE HeadKernel.
 // TUNING_SKILLSET_DIR is one hash-pinned tree (scripts/tuning_skillset_sync.py). tuning_specialist
@@ -5396,7 +5410,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         st.cands.push({ kind: 'direct_light', source: bake.winner_backend, winner_kind: bake.winner_kind,
           apply_env: bake.apply_env || '', apply_flags: bake.apply_flags || '', code_patch: bake.code_patch || '',
           tuning_artifact: bake.tuning_artifact || '', isolated: bake.isolated_speedup, parity_note: bake.parity_note || 'expected_close' });
-      for (const ap of (bake && bake.author_plan ? bake.author_plan.slice(0, HEAD_AUTHOR_MAX) : []))
+      for (const ap of (bake ? headAuthorPlan(h, bake.author_plan) : []))
         authorJobs.push({ short_name: h.short_name, h, ext, ap, best_known_ms: bake.best_known_ms });
     }
 
@@ -5599,7 +5613,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     }
     // Author/rewrite route per planned language via the kernel layer: mode=author writes from scratch
     // then optimizes, mode=optimize rewrites an existing impl; the oracle in ext.task_dir judges both.
-    let plan = (bake.author_plan || []).slice(0, HEAD_AUTHOR_MAX);
+    let plan = headAuthorPlan(h, bake.author_plan);
     // ---- B4 gate ----
     // One bounded trial for the author route (the expensive part of a head): at the deadline it
     // continues only if the head already holds a non-incumbent candidate, else it pauses, with a

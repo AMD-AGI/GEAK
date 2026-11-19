@@ -374,6 +374,10 @@ jobs:
       # carry-forward, and the deploy-bundle handoff to finalize. Node + git only.
       - name: tuning skillset phase regression
         run: node e2e_workflow/scripts/test_tuning_skillset_phase.js
+      # A source-delivered prepared UT gates on its own editable leaves, so the head plan keeps only a
+      # rewrite of them and drops author lanes that cannot pass. No GPU, no model.
+      - name: head author plan under the UT's leaf gates
+        run: node e2e_workflow/scripts/test_head_plan_leaf_gates.js
       # The elapsed clock and the final reserve are the only thing standing between a
       # long run and a hard kill with no report (Hyperloom #1202). Only this job can
       # exercise the JS half, and the clock is pure time arithmetic — no GPU, no model.
