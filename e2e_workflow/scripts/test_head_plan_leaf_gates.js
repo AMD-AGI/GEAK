@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Regression guard for the head author plan on a source-delivered prepared UT (no GPU, no model).
 //
-// Such a UT proves on every run that each editable leaf executes and that a mutation of it is caught,
-// so only a rewrite of those leaves can pass: author entries are dropped while a rewrite is planned.
+// Such a UT fails a candidate whose kernels it cannot attribute to the task's own source. Without
+// candidate gates only a rewrite of the extracted leaves can pass, so author entries are dropped while a
+// rewrite is planned; with them, author entries in its `launchers` languages are kept.
 //
 // Run:  node e2e_workflow/scripts/test_head_plan_leaf_gates.js
 'use strict';
@@ -55,6 +56,22 @@ ok(Array.isArray(r.plan) && r.plan.length === 0 && r.logs.length === 0, 'an empt
 
 r = planFor(delivered, undefined);
 ok(Array.isArray(r.plan) && r.plan.length === 0, 'a missing plan is an empty one');
+
+const gated = (launchers) => ({ ...delivered, prepared_ut: { result: { candidate_gates: { version: 1, launchers } } } });
+r = planFor(gated(['triton']), [author('triton'), author('hip'), rewrite('flydsl')]);
+ok(r.plan.map((ap) => `${ap.route}:${ap.language}`).join(',') === 'author:triton,rewrite:flydsl',
+  'a UT with candidate gates keeps the author lanes in its launcher languages and the rewrite');
+ok(r.logs.some((l) => /dropped author lane\(s\) hip: the prepared UT attributes only triton kernels/.test(l)),
+  'the author lane outside its launchers is dropped and logged');
+
+r = planFor(gated(['Triton', 'HIP']), [author('triton'), author('hip'), rewrite('flydsl')]);
+ok(r.plan.length === 3 && r.logs.length === 0, 'launcher names match the plan languages case-insensitively');
+
+for (const gates of [gated([]), gated('triton'), { ...delivered, prepared_ut: { result: {} } }, { ...delivered, prepared_ut: {} }]) {
+  r = planFor(gates, [author('triton'), rewrite('hip')]);
+  ok(r.plan.length === 1 && r.plan[0].route === 'rewrite' && r.logs.some((l) => /gates on its own editable leaves/.test(l)),
+    `no usable launchers keep the leaf-gate rule (${JSON.stringify(gates.prepared_ut)})`);
+}
 
 console.log(failures === 0 ? '\nPASS: head plans stay within what the prepared UT can accept.' : `\nFAILED: ${failures} assertion(s).`);
 process.exit(failures === 0 ? 0 : 1);

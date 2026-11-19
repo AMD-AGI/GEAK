@@ -2761,6 +2761,232 @@ class TestAssertLegsDiffer(_LegTestCase):
                 self.assertIn("ModuleNotFoundError", str(cm.exception))
 
 
+class TestCandidateGates(unittest.TestCase):
+    """Binding and negative controls judged by what a candidate launches, not the extraction's leaves."""
+
+    LEAVES = ("moe_gemm1", "moe_gemm2")
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="harness_gates_")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.ks = os.path.join(self.tmp, "task", "kernel_src")
+        self.pkg = os.path.join(self.tmp, "site-packages", "aiter")
+        for d in (self.ks, self.pkg):
+            os.makedirs(d)
+            for name in ("gemm1.py", "gemm2.py", "sort.py", "chain.py"):
+                with open(os.path.join(d, name), "w") as fh:
+                    fh.write(f"SCALE = 1.0  # {name}\n")
+        self.base = self._census(moe_gemm1_k=self._at(self.pkg, "gemm1.py"), moe_gemm2_k=self._at(self.pkg, "gemm2.py"),
+                                 moe_sort_k=self._at(self.pkg, "sort.py"), fill_k=None)
+        self.meta = {"leaves": [
+            {"module": "aiter.gemm1", "file": "kernel_src/gemm1.py", "kernel_prefix": "moe_gemm1",
+             "mutation": {"find": "SCALE = 1.0", "replace": "SCALE = 2.0", "what": "scale"}},
+            {"module": "aiter.gemm2", "file": "kernel_src/gemm2.py", "kernel_prefix": "moe_gemm2",
+             "mutation": {"find": "SCALE = 1.0", "replace": "SCALE = 2.0", "what": "scale"}}]}
+
+    @staticmethod
+    def _at(root, name):
+        return os.path.join(root, name)
+
+    @staticmethod
+    def _sigs(sigs):
+        return {"sigs": {sig: {k: {"launches": 2, "source_file": f} for k, f in kernels.items()}
+                         for sig, kernels in sigs.items()}}
+
+    @classmethod
+    def _census(cls, **kernels):
+        return cls._sigs({"decode_m8": kernels})
+
+    def _fused(self):
+        return self._census(moe_gemm12_fused_k=self._at(self.ks, "gemm1.py"), moe_sort_k=self._at(self.pkg, "sort.py"),
+                            fill_k=None)
+
+    def _catalog(self, rows):
+        with open(os.path.join(self.ks, hl.CONTROL_CATALOG), "w") as fh:
+            json.dump({"controls": rows}, fh)
+
+    def _run(self, control, census_kernels, mismatches=6, worst=1.0, **extra):
+        root = os.path.join(self.tmp, "mut_" + control["id"].replace(":", "_"), "kernel_src")
+        census = self._census(**{k: (os.path.join(root, f) if f and not os.path.isabs(f) else f)
+                                 for k, f in census_kernels.items()})
+        return dict(control, anchor_found=True, mutated_root=root, census=census,
+                    numerical_mismatches=mismatches, worst_rel_err=worst, **extra)
+
+    def test_a_pristine_candidate_binds_and_is_covered_by_the_extraction_controls(self):
+        cand = self._census(moe_gemm1_k=self._at(self.ks, "gemm1.py"), moe_gemm2_k=self._at(self.ks, "gemm2.py"),
+                            moe_sort_k=self._at(self.pkg, "sort.py"), fill_k=None)
+        b = hl.candidate_binding(self.base, cand, self.ks, self.LEAVES)
+        self.assertTrue(b["ok"], b["why"])
+        self.assertEqual(b["own"], {"moe_gemm1_k": "gemm1.py", "moe_gemm2_k": "gemm2.py"})
+        self.assertEqual(sorted(b["shared_dependency"]), ["fill_k", "moe_sort_k"])
+        self.assertEqual((b["retired_leaves"], b["added"]), ([], []))
+        ext = hl.extraction_controls(self.meta)
+        runs = hl.controls_to_run(b["own"], ext, [])
+        self.assertEqual([c["id"] for c in runs], ["extraction:aiter.gemm1", "extraction:aiter.gemm2"])
+        results = [self._run(runs[0], {"moe_gemm1_k": "gemm1.py", "moe_gemm2_k": "gemm2.py"}),
+                   self._run(runs[1], {"moe_gemm1_k": "gemm1.py", "moe_gemm2_k": "gemm2.py"})]
+        v = hl.negative_control_verdict(b["own"], results, tol=1e-2)
+        self.assertTrue(v["ok"], v["why"])
+        self.assertEqual(v["coverage"], {"moe_gemm1_k": ["extraction:aiter.gemm1"],
+                                         "moe_gemm2_k": ["extraction:aiter.gemm2"]})
+
+    def test_a_fused_candidate_passes_and_reports_the_leaf_it_retired(self):
+        b = hl.candidate_binding(self.base, self._fused(), self.ks, self.LEAVES)
+        self.assertTrue(b["ok"], b["why"])
+        self.assertEqual(b["own"], {"moe_gemm12_fused_k": "gemm1.py"})
+        self.assertEqual((b["retired_leaves"], b["added"]), (["moe_gemm1_k", "moe_gemm2_k"], ["moe_gemm12_fused_k"]))
+        self._catalog([{"id": "fused_acc", "file": "kernel_src/gemm1.py", "find": "SCALE = 1.0",
+                        "replace": "SCALE = 0.5", "kernels": ["moe_gemm12_fused"], "what": "accumulator scale"}])
+        declared, errors = hl.load_declared_controls(self.ks)
+        self.assertEqual(errors, [])
+        runs = hl.controls_to_run(b["own"], hl.extraction_controls(self.meta), declared)
+        self.assertEqual([c["id"] for c in runs], ["extraction:aiter.gemm1", "fused_acc"])
+        stale = dict(self._run(runs[0], {"moe_gemm12_fused_k": "gemm1.py"}), anchor_found=False)
+        v = hl.negative_control_verdict(b["own"], [stale, self._run(runs[1], {"moe_gemm12_fused_k": "gemm1.py"})],
+                                        tol=1e-2)
+        self.assertTrue(v["ok"], v["why"])
+        self.assertEqual(v["coverage"], {"moe_gemm12_fused_k": ["fused_acc"]})
+        self.assertEqual(v["stale_extraction"], ["extraction:aiter.gemm1"])
+
+    def test_a_leaf_from_the_installed_package_fails_binding(self):
+        for name, census in (
+                ("same kernel", self._census(moe_gemm1_k=self._at(self.ks, "gemm1.py"),
+                                             moe_gemm2_k=self._at(self.pkg, "gemm2.py"))),
+                ("renamed kernel", self._census(moe_gemm1_k=self._at(self.ks, "gemm1.py"),
+                                                other_k=self._at(self.pkg, "gemm2.py"))),
+                ("unattributed", self._census(moe_gemm1_k=self._at(self.ks, "gemm1.py"), moe_gemm2_k=None))):
+            with self.subTest(name):
+                b = hl.candidate_binding(self.base, census, self.ks, self.LEAVES)
+                self.assertFalse(b["ok"])
+                self.assertIn("installed copy", b["why"])
+
+    def test_a_kernel_the_baseline_never_launched_from_outside_kernel_src_is_foreign(self):
+        for name, f in (("another library", "/opt/rocm/lib/libhipblaslt.so"), ("new framework kernel", None)):
+            with self.subTest(name):
+                census = self._census(moe_gemm12_fused_k=self._at(self.ks, "gemm1.py"), Cijk_gemm=f)
+                b = hl.candidate_binding(self.base, census, self.ks, self.LEAVES)
+                self.assertFalse(b["ok"])
+                self.assertEqual(b["foreign"], ["Cijk_gemm"])
+
+    def test_a_dependency_moved_to_another_file_is_foreign(self):
+        census = self._census(moe_gemm1_k=self._at(self.ks, "gemm1.py"), moe_sort_k="/opt/elsewhere/sort.py")
+        self.assertEqual(hl.candidate_binding(self.base, census, self.ks, self.LEAVES)["foreign"], ["moe_sort_k"])
+
+    def test_every_signature_runs_a_kernel_of_the_candidates_own(self):
+        base = self._sigs({"m8": {"moe_gemm1_k": self._at(self.pkg, "gemm1.py"), "fill_k": None},
+                           "m96": {"moe_gemm1_k": self._at(self.pkg, "gemm1.py"), "fill_k": None}})
+        for name, sigs in (("only shared kernels", {"m8": {"moe_gemm1_k": self._at(self.ks, "gemm1.py")},
+                                                     "m96": {"fill_k": None}}),
+                           ("signature missing", {"m8": {"moe_gemm1_k": self._at(self.ks, "gemm1.py")}})):
+            with self.subTest(name):
+                b = hl.candidate_binding(base, self._sigs(sigs), self.ks, self.LEAVES)
+                self.assertFalse(b["ok"])
+                self.assertEqual(b["signatures_without_own"], ["m96"])
+                self.assertIn("none of its own kernels: ['m96']", b["why"])
+
+    def test_a_dependency_counts_only_on_a_signature_the_baseline_launched_it_on(self):
+        sort = self._at(self.pkg, "sort.py")
+        base = self._sigs({"m8": {"moe_gemm1_k": self._at(self.pkg, "gemm1.py")},
+                           "m96": {"moe_gemm1_k": self._at(self.pkg, "gemm1.py"), "moe_sort_k": sort}})
+        own = self._at(self.ks, "gemm1.py")
+        b = hl.candidate_binding(base, self._sigs({"m8": {"moe_gemm1_k": own},
+                                                   "m96": {"moe_gemm1_k": own, "moe_sort_k": sort}}),
+                                 self.ks, self.LEAVES)
+        self.assertTrue(b["ok"], b["why"])
+        self.assertEqual(b["shared_dependency"], ["moe_sort_k"])
+        b = hl.candidate_binding(base, self._sigs({"m8": {"moe_gemm1_k": own, "moe_sort_k": sort},
+                                                   "m96": {"moe_gemm1_k": own, "moe_sort_k": sort}}),
+                                 self.ks, self.LEAVES)
+        self.assertFalse(b["ok"])
+        self.assertEqual(b["foreign"], ["moe_sort_k"])
+
+    def test_a_candidate_that_launches_none_of_its_own_kernels_fails(self):
+        census = self._census(moe_sort_k=self._at(self.pkg, "sort.py"), fill_k=None)
+        b = hl.candidate_binding(self.base, census, self.ks, self.LEAVES)
+        self.assertFalse(b["ok"])
+        self.assertIn("no kernel of its own", b["why"])
+
+    def test_without_leaf_prefixes_binding_fails_closed(self):
+        b = hl.candidate_binding(self.base, self._fused(), self.ks, [])
+        self.assertFalse(b["ok"])
+        self.assertIn("no extracted leaf kernel prefixes", b["why"])
+
+    def test_the_overlay_copy_of_the_bound_module_counts_as_kernel_src(self):
+        copy = os.path.join(self.tmp, "task", "_cand_overlay", "_patched", "aiter.chain.py")
+        census = self._census(moe_chain_k=copy, moe_gemm1_k=self._at(self.ks, "gemm1.py"))
+        b = hl.candidate_binding(self.base, census, self.ks, self.LEAVES, aliases={copy: "chain.py"})
+        self.assertTrue(b["ok"], b["why"])
+        self.assertEqual(b["own"]["moe_chain_k"], "chain.py")
+        self.assertFalse(hl.candidate_binding(self.base, census, self.ks, self.LEAVES)["ok"])
+
+    def test_a_declared_control_that_does_not_break_the_outputs_fails(self):
+        own = {"moe_gemm12_fused_k": "gemm1.py"}
+        ctl = {"id": "fused_acc", "origin": "declared", "file": "gemm1.py", "prefixes": ["moe_gemm12_fused"]}
+        for name, result in (
+                ("no mismatch", self._run(ctl, {"moe_gemm12_fused_k": "gemm1.py"}, mismatches=0, worst=0.0)),
+                ("inside the margin", self._run(ctl, {"moe_gemm12_fused_k": "gemm1.py"}, worst=0.05)),
+                ("anchor missing", dict(self._run(ctl, {"moe_gemm12_fused_k": "gemm1.py"}), anchor_found=False)),
+                ("ran the unmutated file", self._run(ctl, {"moe_gemm12_fused_k": self._at(self.ks, "gemm1.py")})),
+                ("named kernel never launched", self._run(ctl, {"moe_sort_k": self._at(self.pkg, "sort.py")})),
+                ("same compile identity", self._run(ctl, {"moe_gemm12_fused_k": "gemm1.py"}, identity_changed=False))):
+            with self.subTest(name):
+                v = hl.negative_control_verdict(own, [result], tol=1e-2)
+                self.assertFalse(v["ok"])
+                self.assertEqual(v["declared_failed"], ["fused_acc"])
+
+    def test_an_undeclared_new_kernel_is_uncovered(self):
+        own = {"moe_gemm12_fused_k": "gemm1.py"}
+        stale = dict(self._run(hl.extraction_controls(self.meta)[0], {"moe_gemm12_fused_k": "gemm1.py"}),
+                     anchor_found=False)
+        v = hl.negative_control_verdict(own, [stale], tol=1e-2)
+        self.assertFalse(v["ok"])
+        self.assertEqual(v["uncovered"], ["moe_gemm12_fused_k"])
+        self.assertIn("no passing control", v["why"])
+
+    def test_a_control_covers_a_kernel_only_by_mutating_that_kernels_own_file(self):
+        own = {"moe_gemm12_fused_k": "gemm1.py"}
+        glue = {"id": "chain_glue", "origin": "declared", "file": "chain.py", "prefixes": ["moe_gemm12_fused"]}
+        v = hl.negative_control_verdict(own, [self._run(glue, {"moe_gemm12_fused_k": "gemm1.py"})], tol=1e-2)
+        self.assertFalse(v["ok"])
+        self.assertEqual((v["declared_failed"], v["uncovered"]), ([], ["moe_gemm12_fused_k"]))
+
+    def test_catalog_errors_fail_the_verdict(self):
+        v = hl.negative_control_verdict({}, [], tol=1e-2, errors=["c: duplicate id"])
+        self.assertFalse(v["ok"])
+        self.assertEqual(v["why"], "c: duplicate id")
+
+    def test_the_catalog_is_optional_and_validated(self):
+        self.assertEqual(hl.load_declared_controls(self.ks), ([], []))
+        good = {"id": "ok", "file": "gemm1.py", "find": "SCALE = 1.0", "replace": "SCALE = 3.0", "kernels": ["moe_g"]}
+        bad = {"dup": dict(good), "outside": dict(good, id="outside", file="../../site-packages/aiter/gemm1.py"),
+               "catalog": dict(good, id="catalog", file=hl.CONTROL_CATALOG),
+               "missing": dict(good, id="missing", file="gone.py"), "no_find": dict(good, id="no_find", find=""),
+               "no_op": dict(good, id="no_op", replace="SCALE = 1.0"), "no_kernels": dict(good, id="no_kernels", kernels=[])}
+        bad["dup"]["id"] = "ok"
+        self._catalog([good] + list(bad.values()))
+        controls, errors = hl.load_declared_controls(self.ks)
+        self.assertEqual([c["id"] for c in controls], ["ok"])
+        self.assertEqual(controls[0]["prefixes"], ["moe_g"])
+        self.assertEqual([e.split(":")[0] for e in errors],
+                         ["ok", "outside", "catalog", "missing", "no_find", "no_op", "no_kernels"])
+        for doc in ("not json", '["controls"]'):
+            with open(os.path.join(self.ks, hl.CONTROL_CATALOG), "w") as fh:
+                fh.write(doc)
+            self.assertEqual(len(hl.load_declared_controls(self.ks)[1]), 1)
+
+    def test_apply_control_mutates_a_copy_and_never_the_task(self):
+        ctl = hl.extraction_controls(self.meta)[0]
+        ks, path, found = hl.apply_control(self.ks, ctl, os.path.join(self.tmp, "mut"))
+        self.assertTrue(found)
+        with open(path) as fh:
+            self.assertIn("SCALE = 2.0", fh.read())
+        with open(os.path.join(self.ks, "gemm1.py")) as fh:
+            self.assertIn("SCALE = 1.0", fh.read())
+        self.assertEqual(os.path.dirname(path), ks)
+        _, _, found = hl.apply_control(self.ks, dict(ctl, find="absent"), os.path.join(self.tmp, "mut2"))
+        self.assertFalse(found)
+
+
 class TestMeasureLegs(_LegTestCase):
     def test_every_bucket_is_timed_in_a_fresh_subprocess_per_leg(self):
         """A warm interpreter shares JIT/autotune state between legs and reports a fake 1.0x."""

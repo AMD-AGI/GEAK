@@ -4626,16 +4626,23 @@ const history = ST.history || { insights: [], ledger: [], milestones: [], bottle
 // never decomposed into a standalone dense GEMM — so dense-GEMM synth is off for it.
 function gemmSynthFor(h) { return (h && h.op_kind === 'moe') ? 'false' : GEMM_SYNTH; }
 
-// The author lanes a head's plan becomes. A source-delivered prepared UT proves on every run that each
-// editable leaf executes and that a mutation of it is caught, so only a rewrite of those leaves can
-// pass: while the plan has a rewrite, its author entries are dropped. HEAD_AUTHOR_MAX applies after.
+// The author lanes a head's plan becomes. A source-delivered prepared UT fails a candidate whose kernels
+// it cannot attribute to the task's own source. One with candidate gates attributes kernels built in its
+// `launchers` languages; one without proves on every run that each extracted leaf executes and that a
+// mutation of it is caught, so only a rewrite of those leaves can pass. While the plan has a rewrite, the
+// author entries its UT cannot accept are dropped. HEAD_AUTHOR_MAX applies after.
 function headAuthorPlan(h, authorPlan) {
   let planned = authorPlan || [];
+  const gates = (h.prepared_ut && h.prepared_ut.result && h.prepared_ut.result.candidate_gates) || {};
+  const launchers = new Set((Array.isArray(gates.launchers) ? gates.launchers : []).map((l) => String(l).toLowerCase()));
+  const accepted = (ap) => !!ap && (ap.route === 'rewrite' || launchers.has(String(ap.language || '').toLowerCase()));
   const leafGated = h.source_delivery_required === true && planned.some((ap) => ap && ap.route === 'rewrite');
-  if (leafGated && planned.some((ap) => !ap || ap.route !== 'rewrite')) {
-    const dropped = planned.filter((ap) => !ap || ap.route !== 'rewrite').map((ap) => (ap && ap.language) || '?');
-    log(`  ${h.short_name}: dropped author lane(s) ${dropped.join(', ')}: the prepared UT gates on its own editable leaves, so only a rewrite of them can pass.`);
-    planned = planned.filter((ap) => ap && ap.route === 'rewrite');
+  if (leafGated && planned.some((ap) => !accepted(ap))) {
+    const dropped = planned.filter((ap) => !accepted(ap)).map((ap) => (ap && ap.language) || '?');
+    const why = launchers.size ? `the prepared UT attributes only ${[...launchers].join('/')} kernels to its own source`
+      : 'the prepared UT gates on its own editable leaves, so only a rewrite of them can pass';
+    log(`  ${h.short_name}: dropped author lane(s) ${dropped.join(', ')}: ${why}.`);
+    planned = planned.filter(accepted);
   }
   return planned.slice(0, HEAD_AUTHOR_MAX);
 }

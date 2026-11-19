@@ -42,6 +42,10 @@ Downstream stages consume the prepared queues in saved order, subject to executi
 budgets. They do not nominate new kernels, apply another percentage threshold or
 author UTs. Cases, weights and source binding remain fixed; optimization runs the
 existing UT against changed candidate code and gates each integration with E2E A/B.
+A UT declaring `candidate_gates` binds and controls the kernels each candidate
+launches: a candidate that adds or rewrites kernels declares their controls in
+`kernel_src/negative_controls.json`, and author lanes use only its `launchers`
+languages ([candidate gates](candidate-gates.md)).
 Head wins and completed milestones do not refresh extraction. Saved cost weights
 remain those measured during preparation, not measurements of the optimized stack.
 Queue exhaustion ends dispatch; undispatched tasks remain in carried state. Fast
@@ -58,7 +62,9 @@ requirement is deferred as well. Its extraction coverage remains recorded.
 
 Run the skill's own per-task preflight first, preserving `run/requested_kernel.json`
 and `run/RETURN.json`. The workflow adapter reads these existing files; it does not
-repeat kernel selection or GPU validation. Write a `workflow_tasks.json` containing:
+repeat kernel selection or GPU validation. Put the task's `meta.candidate_gates` in
+the return as `candidate_gates`: the workflow plans author lanes from that copy.
+Write a `workflow_tasks.json` containing:
 
 ```json
 {
