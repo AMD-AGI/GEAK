@@ -92,3 +92,24 @@ default, and installs the observer. The state records the model and iteration-lo
 directory; `run_points.py` forwards them to each point. The template's profiler
 configuration can be overridden for the installed vLLM version. A probe observation
 is not automatically the baseline's workload distribution.
+
+## Launch evidence on vLLM
+
+A decode kernel replayed from a CUDA graph names no op and no frame; `run_points.py`
+asks `probe_server.py` for eager windows, chosen so that every such kernel is asked for at
+a point that replayed it (DSpark runs the id-rows MoE GEMMs only at batch 2). A kernel
+asked for there and still absent takes another path eagerly (a graph-only one-shot
+all-reduce) and stays without an entry.
+
+With `--enable-dbo`, prefills of at least `--dbo-prefill-token-threshold` tokens run as
+micro-batches in threads started for that step. The observer turns on the profiler's
+`profile_all_threads`, which keeps their torch ops; the Python tracer still records no
+frames there. Selected prefill kernels without frames get one serial window on the same
+server, at the largest observed prefill below the threshold (`<point>@serial`, frames and
+ops only, never in the ledger). Code that only the micro-batch path runs (DBO's SDMA
+hand-offs) does not launch there and stays without an entry; name it from source at review.
+
+Kernels launched straight through `hipModuleLaunchKernel` (amd_kernels, FlyDSL) have no
+host op on any thread, so no operand dims: their case shapes come from the phase shape.
+`source_map.py` lists `amd_kernels` with the serving packages, so its entries, not the
+vLLM caller, are the operators.
