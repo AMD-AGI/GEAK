@@ -80,15 +80,53 @@ COLLECTIVE_PAT = re.compile(
     r"cross_device_reduce|quickreduce|allreduce|all_reduce|allgather_vec|all_gather"
     r"|reduce_scatter|alltoall|all_to_all|nccl|rccl", re.I)
 WAIT_KERNEL = "__collective_wait__"
+# Copy-engine rows (profiler names "Memcpy HtoD (Host -> Device)", "Memset (Device)"), the
+# same rows build_ranking.kind() classifies as memory.
+COPY_PAT = re.compile(r"mem(cpy|set)", re.I)
+
+
+def merged(intervals):
+    out = []
+    for a, b in sorted(intervals):
+        if out and a <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return out
+
+
+def uncovered(intervals, cover):
+    """Length of the union of `intervals` outside the merged, sorted `cover`."""
+    tot = 0.0
+    for a, b in merged(intervals):
+        tot += b - a
+        i = bisect.bisect_right(cover, [a, float("inf")]) - 1
+        for c0, c1 in cover[max(i, 0):]:
+            if c0 >= b:
+                break
+            tot -= max(0.0, min(b, c1) - max(a, c0))
+    return tot
 
 
 def kernels_in(dev, starts, ts, te):
+    """Kernels sum their durations. A copy/memset row is billed only where no kernel runs:
+    copy engines overlap compute, and their rows can overlap one another (vLLM 0.33 on
+    MI355X: 15120 HtoD rows summing 2.26 s inside a 1.18 s prefill whose kernels cover all
+    but 0.3 ms of them). Summed, they were 61% of prefill time."""
     lo, hi = bisect.bisect_left(starts, ts), bisect.bisect_left(starts, te)
     out, coll = defaultdict(float), defaultdict(list)
-    for _t, dur, nm in dev[lo:hi]:
+    copies = defaultdict(list)
+    for t, dur, nm in dev[lo:hi]:
+        if COPY_PAT.match(nm):
+            copies[nm].append((t, t + dur))
+            continue
         out[nm] += dur
         if COLLECTIVE_PAT.search(nm):
             coll[nm].append(dur)
+    if copies:
+        cover = merged((t, t + dur) for t, dur, nm in dev[lo:hi] if not COPY_PAT.match(nm))
+        for nm, iv in copies.items():
+            out[nm] = uncovered(iv, cover)
     return dict(out), hi - lo, dict(coll)
 
 

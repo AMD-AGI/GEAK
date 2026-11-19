@@ -178,11 +178,42 @@ class VllmProfileTest(unittest.TestCase):
         got = probe.traces_written(str(target), 0)
         self.assertEqual([Path(r["path"]).name for r in got], ["de_1_rank0.trace.json"])
 
+    def test_frontend_trace_is_not_a_rank(self):
+        # vLLM 0.33 (MiniMax-M3.1-Flash image) also traces the API server per window.
+        # Linked as a 5th file at TP=4, verify scanned it (0 kernels) and every census
+        # failed: "ranks disagree" for prefill, "fewer than 2 decode anchors" for decode.
+        target = self.root / "pt_a"
+        target.mkdir()
+        rank = "pt_a_dp0_pp0_tp0_dcp0_ep0_rank0.1795.pt.trace.json.gz"
+        (self.root / rank).write_text("{}")
+        (self.root / "pt_a_host_376.async_llm.1795.pt.trace.json.gz").write_text("{}" * 99)
+        got = probe.traces_written(str(target), 0)
+        self.assertEqual([Path(r["path"]).name for r in got], [rank])
+
+    @unittest.skipUnless((ROOT / "scripts/probe_server.py").exists(), "main uses its existing serving adapter")
+    def test_vllm_server_info_from_engine_log(self):
+        import probe_server
+        log = self.root / "server.log"
+        log.write_text("INFO [scheduler.py:346] Chunked prefill is enabled with max_num_batched_tokens=32768.\n"
+                       "speculative_config=SpeculativeConfig(method='dspark'), compilation_config={"
+                       "'cudagraph_capture_sizes': [1, 2, 4, 8, 2048], "
+                       "'decode_cudagraph_capture_request_sizes': [1, 2, 3, 16], 'x': 1}\n")
+        info = probe_server.vllm_server_info(str(log))
+        self.assertEqual(info["server_args"], {"chunked_prefill_size": 32768, "cuda_graph_bs": [1, 2, 3, 16]})
+        # without the V2 request sizes, spec-decode token capture sizes are not batch sizes
+        log.write_text(log.read_text().replace("'decode_cudagraph_capture_request_sizes': [1, 2, 3, 16], ", ""))
+        info = probe_server.vllm_server_info(str(log))
+        self.assertNotIn("cuda_graph_bs", info["server_args"])
+        self.assertTrue(info["notes"])
+        log.write_text("nothing stated\n")
+        self.assertIsNone(probe_server.vllm_server_info(str(log)))
+
     @unittest.skipUnless((ROOT / "scripts/probe_server.py").exists(), "main uses its existing serving adapter")
     def test_vllm_launcher_and_init_preserve_backend(self):
         import probe_server
         fields = {k: None for k in ("torch_profiler_dump_cuda_time_total", "detailed_trace_annotation",
-                                    "torch_profiler_record_shapes", "torch_profiler_with_stack")}
+                                    "torch_profiler_record_shapes", "torch_profiler_with_stack",
+                                    "ignore_frontend")}
         config = types.ModuleType("vllm.config")
         config.ProfilerConfig = types.SimpleNamespace(model_fields=fields)
         cfg = {"framework": "vllm", "model": "model", "tp": 2, "port": 8001,
@@ -195,6 +226,7 @@ class VllmProfileTest(unittest.TestCase):
         prof = json.loads(cmd[cmd.index("--profiler-config") + 1])
         self.assertTrue(prof["detailed_trace_annotation"])
         self.assertFalse(prof["torch_profiler_dump_cuda_time_total"])
+        self.assertTrue(prof["ignore_frontend"])
         self.assertEqual(env["GEAK_ITERATION_LOG_DIR"], str(self.root / "iterations"))
         cfg["args"] += ["--profiler-config=" + json.dumps({"torch_profiler_dir": "/old", "max_iterations": 11})]
         with patch.dict(sys.modules, {"vllm.config": config}), patch.dict(os.environ, {"GPU_ARCHS": "gfx950"}):
@@ -222,6 +254,18 @@ class VllmProfileTest(unittest.TestCase):
         wins, _, err = point_census.instance_windows(gpu, cpu, "PREFILL")
         self.assertIsNone(err)
         self.assertEqual([(w["start"], w["end"], w["shape"]) for w in wins], [(100, 130, 206)])
+
+
+    @unittest.skipUnless((ROOT / "scripts/point_census.py").exists(), "main uses parse_profile")
+    def test_copies_are_billed_only_where_no_kernel_runs(self):
+        import point_census
+        copy = "Memcpy HtoD (Host -> Device)"
+        # two overlapping copy rows under a kernel, one exposed copy, a memset half exposed
+        dev = [(0, 10, "gemm"), (2, 3, copy), (3, 3, copy), (12, 2, copy),
+               (15, 5, "norm"), (18, 4, "Memset (Device)")]
+        got, n, coll = point_census.kernels_in(dev, [d[0] for d in dev], 0, 100)
+        self.assertEqual(got, {"gemm": 10, "norm": 5, copy: 2, "Memset (Device)": 2})
+        self.assertEqual((n, coll), (6, {}))
 
 
 if __name__ == "__main__":
