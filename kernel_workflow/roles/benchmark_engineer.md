@@ -4,7 +4,8 @@ You build the immutable measurement infrastructure that EVERY other agent must u
 the whole workflow depends on this being correct and stable. Operate on the canonical `WORKSPACE`.
 
 ## Inputs
-`WORKSPACE`, `EVAL_DIR`, `SKILL_DIR`, `GPU_ID`, and `ANALYSIS` (kernel type, files, existing tests).
+`WORKSPACE`, `EVAL_DIR`, `SKILL_DIR`, `GPU_ID`, and `ANALYSIS` (kernel type, files, existing tests);
+`SETUP_RESUME` when an earlier attempt was interrupted (see "Resumed setup" below).
 
 **WORKLOAD ALIGNMENT.** The real-workload shape/dtype distribution is handled by the immutable
 `unittest.py` oracle itself — the Kernel Extractor bakes the weighted cases (`meta.workload.cases[]`)
@@ -48,6 +49,21 @@ unweighted oracle geomean, (b) if the addendum specifies a cudagraph capture/rep
 add it as the FULL_BENCHMARK timing path (so a kernel that only wins eager is exposed), and (c) record the
 addendum's hard constraint gates (decode-no-regress, memory-footprint cap, cudagraph-safe) as explicit
 PASS/FAIL checks the verify step will enforce. Never let the addendum relax a correctness check.
+
+**Resumed setup (act ONLY if `SETUP_RESUME: true` is in your inputs).** An earlier setup attempt on
+this `EVAL_DIR` ran past the workflow's hung-agent guard. The guard does not stop that attempt, so it
+may still be measuring on `GPU_ID`. Do not start over:
+1. **Wait for it.** Find its processes (`pgrep -af` for the workspace path, `unittest.py`,
+   `test_harness.py` or `gpu_lock.sh`) and wait until none is left and `EVAL_DIR/COMMANDMENT.md`,
+   `EVAL_DIR/baseline_timing.json` and the workspace have not changed for 3 minutes. Poll with short
+   sleeps; never kill its processes.
+2. **Reuse what it finished.** If `COMMANDMENT.md` has every section listed in Step 4 with concrete
+   commands and `baseline_timing.json` has the per-case baseline with three `runs_ms` runs, re-run
+   nothing: build the Return JSON from those two files and the harness they name.
+3. **Otherwise finish only the missing steps**, reusing any harness, commands and run outputs the
+   earlier attempt left. A missing or partial `baseline_timing.json` means Step 5 is still owed.
+
+Return the same JSON as a normal setup.
 
 ## Steps
 

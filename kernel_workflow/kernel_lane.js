@@ -789,6 +789,9 @@ const cfg = (o) => Object.entries(o).map(([k, v]) =>
 // make resume cheap.
 const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : 3600000, 10);
 const AGENT_RETRIES = Math.max(1, parseInt(A.agent_retries != null ? A.agent_retries : 4, 10));
+// Labels whose latest call the hung-agent guard resolved. The guard cannot stop the agent, so a phase
+// whose work lands on disk (benchmark setup) can resume from it instead of failing the lane.
+const guardExpired = new Set();
 // GEAK-ABLATION-ARMS-v1 (B6): registered mechanical dispatches are folded into the NEXT
 // agent instead of getting an agent of their own. In the historical Qwen3 run the
 // storage-reclaim agent -- whose whole job is to run one fixed bash command -- cost
@@ -1965,6 +1968,7 @@ async function agentTCore(p, o) {
   // non-routed (routing=false calls it with no id), so the recorded timeline event stays byte-identical.
   const dispatchId = arguments.length > 2 ? arguments[2] : null;
   const label = (o && o.label) ? o.label : 'agent';
+  guardExpired.delete(label);
   if (ABL_B6 && typeof p === 'string') { const pre = ablDrainPrelude(); if (pre) p = pre + p; }
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
     const ev = tlAgent(p, o, attempt, dispatchId);   // record AT DISPATCH; ok=false until it resolves (dispatch id threaded for receipt-by-id — Astra re-review #6)
@@ -1976,6 +1980,7 @@ async function agentTCore(p, o) {
       const guard = new Promise((resolve) => {
         to = setTimeout(() => {
           log(`  [hung-agent guard] ${label} exceeded ${Math.round(AGENT_TIMEOUT_MS / 60000)}min with no return — resolving null so the round proceeds.`);
+          guardExpired.add(label);
           resolve(null);
         }, AGENT_TIMEOUT_MS);
       });
@@ -2456,16 +2461,31 @@ const KK_REFS = (analysis && Array.isArray(analysis.kk_refs)) ? analysis.kk_refs
 // PHASE: Benchmark setup (Benchmark Engineer)
 // ===========================================================================
 phase('Benchmark');
-const bench = await agentT(
-  roleAgent('benchmark_engineer', 'setup', 'Build the COMMANDMENT and record a reliable baseline.', {
-    WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL,
-    ANALYSIS: analysis,
-    ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
-    ...(WORKLOAD_SPEC_PATH ? { WORKLOAD_SPEC_PATH } : {}),
-    ...(WORKLOAD_SPEC ? { WORKLOAD_SPEC } : {}),
-  }),
+const benchInputs = {
+  WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL,
+  ANALYSIS: analysis,
+  ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
+  ...(WORKLOAD_SPEC_PATH ? { WORKLOAD_SPEC_PATH } : {}),
+  ...(WORKLOAD_SPEC ? { WORKLOAD_SPEC } : {}),
+};
+let bench = await agentT(
+  roleAgent('benchmark_engineer', 'setup', 'Build the COMMANDMENT and record a reliable baseline.', benchInputs),
   { phase: 'Benchmark', label: 'benchmark_engineer', schema: BENCH_SCHEMA });
-if (!bench || !bench.baseline_per_case) throw new Error('Benchmark setup failed: no baseline recorded');
+// A setup cut by the hung-agent guard keeps running (a long UT plus three FULL_BENCHMARK runs can pass
+// the guard) and usually leaves COMMANDMENT.md and baseline_timing.json behind. One resume waits for
+// it, reuses what it finished and runs only the missing steps.
+let setupCut = guardExpired.has('benchmark_engineer');
+if ((!bench || !bench.baseline_per_case) && setupCut) {
+  log(`  [setup-resume] benchmark setup passed the ${Math.round(AGENT_TIMEOUT_MS / 60000)}min hung-agent guard; resuming from ${EVAL_DIR}.`);
+  bench = await agentT(
+    roleAgent('benchmark_engineer', 'setup', 'Resume an interrupted benchmark setup.', { ...benchInputs, SETUP_RESUME: true }),
+    { phase: 'Benchmark', label: 'benchmark_engineer:resume', schema: BENCH_SCHEMA });
+  setupCut = guardExpired.has('benchmark_engineer:resume');
+}
+if (!bench || !bench.baseline_per_case) {
+  throw new Error('Benchmark setup failed: no baseline recorded' +
+    (setupCut ? ` (hung-agent guard expired after ${Math.round(AGENT_TIMEOUT_MS / 60000)}min)` : ''));
+}
 const BASELINE_PER_CASE = bench.baseline_per_case;
 const BASELINE_GEOMEAN_MS = bench.baseline_geomean_ms;
 log(`Benchmark done. ${bench.num_test_cases || BASELINE_PER_CASE.length} cases, baseline geomean ${BASELINE_GEOMEAN_MS} ms, reliable=${bench.reliable}`);
