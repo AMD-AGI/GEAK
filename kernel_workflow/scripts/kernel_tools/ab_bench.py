@@ -509,18 +509,24 @@ def summarize(cell_ms, baseline, band=None, min_improve_pct=MIN_IMPROVE_PCT):
         # carries every position, thermal and cache effect a candidate's delta also rides on.
         noise = max(b["spread_pct"] or 0, r["spread_pct"] or 0)
         src = "arm_spread"
+        # Which arm sets the floor: a wide BASELINE arm says the window was noisy, not that the
+        # candidate is a null -- the remedy is more cells, not a verdict.
+        arm = "baseline" if (b["spread_pct"] or 0) >= (r["spread_pct"] or 0) else "candidate"
         if band and band["band_pct"] > noise:
-            noise, src = band["band_pct"], "control_arm"
+            noise, src, arm = band["band_pct"], "control_arm", "control"
         r["noise_band_pct"] = round(noise, 3)
         r["noise_band_source"] = src
+        r["noise_band_arm"] = arm
         r["resolved"] = delta_pct > noise
         r["clears_min_improve"] = bool(sp_med and sp_med >= 1.0 + min_improve_pct / 100.0)
         r["screen"] = "pass" if (r["resolved"] and r["clears_min_improve"]) else (
             "slower" if sp_med and sp_med < 1.0 and r["resolved"] else "no")
         if not r["resolved"]:
-            r["note"] = (f"delta {delta_pct:.2f}% <= {src} band {noise:.2f}% -- NOT RESOLVED in "
-                         f"this window. Add cells, or discriminate with a clock-insensitive "
-                         f"counter. Record it as `--verdict null`, not as a small win.")
+            r["note"] = (f"delta {delta_pct:.2f}% <= {src} band {noise:.2f}% (widest: {arm} arm) -- "
+                         f"NOT RESOLVED in this window. Add cells, or discriminate with a "
+                         f"clock-insensitive counter. Record it as `--verdict null`, not as a small win."
+                         + (" The baseline arm carries the spread: re-measure (more --cells, --preload) "
+                            "before reading this as a null." if arm == "baseline" else ""))
         elif not r["clears_min_improve"] and sp_med and sp_med >= 1.0:
             r["note"] = (f"resolved, but {100 * (sp_med - 1):.2f}% < the {min_improve_pct:.1f}% "
                          f"screening threshold -- not a screen pass (the band never lowers that bar).")
@@ -636,6 +642,11 @@ def _selftest():
     r = summarize({"base": [10.0, 11.0], "cand": [9.9, 10.9]}, "base")
     assert r["cand"]["resolved"] is False and r["cand"]["screen"] == "no", r
     assert "NOT RESOLVED" in r["cand"]["note"], r
+    # 2b. the note names the arm that sets the floor; a noisy BASELINE is not a null candidate
+    r = summarize({"base": [10.0, 10.7, 10.2], "cand": [9.8, 9.82, 9.81]}, "base")
+    assert r["cand"]["noise_band_arm"] == "baseline" and "re-measure" in r["cand"]["note"], r
+    r = summarize({"base": [10.0, 10.02], "cand": [9.8, 10.5]}, "base")
+    assert r["cand"]["noise_band_arm"] == "candidate" and "re-measure" not in r["cand"]["note"], r
     # 2b. resolved but under GEAK's 2% screening threshold: still not a screen pass (stricter only)
     r = summarize({"base": [10.0, 10.0, 10.0], "cand": [9.9, 9.9, 9.9]}, "base")
     assert r["cand"]["resolved"] is True and r["cand"]["clears_min_improve"] is False, r
@@ -803,7 +814,8 @@ def main():
     ap.add_argument("--flush-mb", type=int, default=None,
                     help="size of harness_lib's read-evict buffer (sets HARNESS_CACHE_FLUSH_MB; "
                          "default: harness_lib's own, 512)")
-    ap.add_argument("--tol", type=float, default=2e-3, help="oracle tolerance (default 0.002)")
+    ap.add_argument("--tol", type=float, default=2e-3,
+                    help="oracle tolerance (default 0.002); pass the task's own correctness tolerance")
     ap.add_argument("--baseline", help="variant to compare against (default: the first)")
     ap.add_argument("--min-improve-pct", type=float, default=MIN_IMPROVE_PCT,
                     help="screening threshold (default 2.0); pass the workflow value explicitly. "
@@ -903,6 +915,9 @@ def main():
                    or r.get("_non_finite_metrics") and f"NON-FINITE metrics {r['_non_finite_metrics']}"
                    or r.get("_fail") or r.get("_error"))
             print(f"  oracle FAIL  {n:28s} {why}  -> NOT TIMED")
+    if len(passed) < len(names) and not any(x == "--tol" or x.startswith("--tol=") for x in sys.argv):
+        print(f"  note: --tol was not given, so the oracle used the default {a.tol:g}. Pass the "
+              "task's own correctness tolerance (its COMMANDMENT / correctness command) explicitly.")
     if not passed:
         sys.exit("every variant failed its oracle; nothing to time")
 
