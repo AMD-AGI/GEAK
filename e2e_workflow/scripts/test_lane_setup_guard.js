@@ -93,14 +93,20 @@ async function runSetup(plan) {
   ok(authorRetryable({ authored: true, final_geomean: 0.9, validation_status: 'pass' }) === false,
     'it never retries a completed no-speedup');
 
-  const mkLaneArgs = (A) => new Function('A', 'LANE_USE_LEARNED_KB', 'OPTIMIZER', 'ablLaneArgs', 'GPU_FAMILY',
-    'EXPECTED_GFX', 'EXPECTED_TARGET', 'EXPECTED_DEVICE_NAME', 'EXPECTED_PHYSICAL_CU_COUNT',
-    `${laneArgsSrc}\nreturn laneArgs;`)(A, 'false', '', () => ({}), {}, '', '', '', 0);
+  const mkLaneArgs = (A, isAgentx = false) => new Function('A', 'LANE_USE_LEARNED_KB', 'OPTIMIZER', 'ablLaneArgs',
+    'GPU_FAMILY', 'EXPECTED_GFX', 'EXPECTED_TARGET', 'EXPECTED_DEVICE_NAME', 'EXPECTED_PHYSICAL_CU_COUNT', 'IS_AGENTX',
+    `${laneArgsSrc}\nreturn laneArgs;`)(A, 'false', '', () => ({}), {}, '', '', '', 0, isAgentx);
   ok(!('agent_timeout_ms' in mkLaneArgs({})({ budget: 6 })), 'an unset agent_timeout_ms leaves the lane default');
   ok(mkLaneArgs({ agent_timeout_ms: 21600000 })({ budget: 6 }).agent_timeout_ms === '21600000',
     'an explicit agent_timeout_ms reaches the lane');
   ok(mkLaneArgs({ agent_timeout_ms: 21600000 })({ agent_timeout_ms: '60000' }).agent_timeout_ms === '60000',
     'a per-call value still wins');
+  ok(mkLaneArgs({ agent_timeout_ms: 21600000 }, true)({ budget: 6 }).agent_timeout_ms === '21600000',
+    'the timeout also reaches a trace replay lane');
+  ok(!('min_improve' in mkLaneArgs({})({ budget: 6 })), 'a fixed-load lane keeps its own commit gate');
+  ok(mkLaneArgs({}, true)({ budget: 6 }).min_improve === 'noise' &&
+    mkLaneArgs({}, true)({ min_improve: '0.01' }).min_improve === '0.01',
+    'a trace replay lane gets the noise commit gate unless the call sets one');
 
   console.log(failures === 0 ? '\nPASS: lane setup survives the hung-agent guard.' : `\nFAILED: ${failures} assertion(s).`);
   process.exit(failures === 0 ? 0 : 1);
