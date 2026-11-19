@@ -1,0 +1,24 @@
+{
+  "collection_id": "agentx-mi355x-20261113",
+  "origin": "InferenceX AgentX MI355X history research collected from 2026-11-13",
+  "directory": "collections/agentx-mi355x-20261113",
+  "storage": "shared raw archive outside the code checkout; local collections view excluded from Git",
+  "checksum_file": "agentx-mi355x-20261113.sha256",
+  "checksum_scope": {
+    "anchor_files": 57,
+    "scope": "Original top-level documents/data exports, original history/API responses and selected acquisition manifests; not a complete recursive checksum of source trees or measurement artifacts."
+  },
+  "source_evidence": [
+    "sources/",
+    "experiments/"
+  ],
+  "original_companions": [
+    "analysis/",
+    "data/",
+    "reports/",
+    "top-level historical plans and reports"
+  ],
+  "preservation": "Entire original collection retained by same-filesystem directory rename; existing layout, file contents and permissions unchanged. The previous entry and local collections view point to the retained archive.",
+  "write_policy": "Retain this collection; store later acquisitions and revised interpretations separately.",
+  "archived_utc": "2026-11-19T06:25:05.378601+00:00"
+}
