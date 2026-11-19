@@ -19,9 +19,13 @@ of remaining headroom and full delivery cost. Dispatch qualified independent wor
 priority order on isolated resources; prepare unresolved high-impact opportunities
 concurrently. Revisit ordering as reports arrive.
 
-Translate useful experience into the existing `PLAN.md` question and deciding evidence;
-pass relevant conditions, differences and source links through the implementation's
-actual inputs. Revisit relevance when new reports change the bottleneck.
+In `PLAN.md`, name the relevant mechanism, current match or mismatch, plausible effect
+and evidence that would change its priority. A supplied guide is not this decision.
+Promising mechanisms with missing applicability evidence can justify a bounded feasibility
+call; route opportunities beyond a frozen task through an appropriate module within the
+authorized scope. Pass conditions, differences and source links through actual inputs.
+Revisit both leading and deferred opportunities when reports change headroom, costs or
+the bottleneck; an unavailable historical implementation does not close its mechanism.
 
 Keep evidence and reusable notes with their campaign or supplied external index:
 **conditions → mechanism → observed result/cost → limits**, including versions and unknowns.
