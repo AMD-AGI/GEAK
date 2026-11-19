@@ -181,6 +181,9 @@ const laneArgs = (wfArgs) => {
       ...(A.evolution_source_paths != null ? { evolution_source_paths: A.evolution_source_paths } : {}) } : {}),
     ...ablLaneArgs(),
     ...(A.llm_stats != null ? { llm_stats: String(A.llm_stats) } : {}),
+    // An explicit agent_timeout_ms (GEAK_AGENT_TIMEOUT_MS) also bounds the lanes' agents; unset, a
+    // lane keeps its own 60min hung-agent guard.
+    ...(A.agent_timeout_ms != null ? { agent_timeout_ms: String(A.agent_timeout_ms) } : {}),
     // routing is opt-in and forwarded ONLY when the parent set it explicitly, so a routing run reaches
     // the child lane's helper scopes instead of the experiment silently covering the parent alone.
     ...(A.routing != null ? { routing: String(A.routing) } : {}),
@@ -5660,8 +5663,11 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       }
       let al;
       // Retry a TRANSIENT failure (threw, or no final_geomean) so a language is not silently dropped;
-      // never retry a completed no-speedup (final_geomean <= 1.0), which is a real result.
+      // never retry a completed no-speedup (final_geomean <= 1.0), which is a real result, nor a lane
+      // whose setup the hung-agent guard cut twice: a retry runs under the same guard.
       const AUTHOR_TRIES = parseInt(A.head_author_tries != null ? A.head_author_tries : (FAST_MODE ? 1 : 2), 10);
+      const authorRetryable = (r) => !(r && /hung-agent guard expired/.test(String(r.reason || ''))) &&
+        (!r || r.validation_status === 'error' || (r.authored === false && r.final_geomean == null));
       for (let attempt = 1; attempt <= AUTHOR_TRIES; attempt++) {
         try {
           al = await fastBoundedWorkflow({ scriptPath: KERNEL_WF_SCRIPT }, {
@@ -5686,8 +5692,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             apply_to_original: 'false',
           }, `${h.short_name}:${lang}`);
         } catch (e) { al = { authored: false, validation_status: 'error', reason: String(e) }; }
-        const transient = !al || al.validation_status === 'error' || (al.authored === false && al.final_geomean == null);
-        if (!transient || attempt === AUTHOR_TRIES) break;
+        if (!authorRetryable(al) || attempt === AUTHOR_TRIES) break;
         log(`  ${h.short_name}: author ${lang} attempt ${attempt}/${AUTHOR_TRIES} died transiently (${al ? al.reason || al.validation_status : 'null'}) — retrying so this language isn't dropped.`);
       }
       // Rank on the WORKLOAD-WEIGHTED speedup (same basis as bake.isolated_speedup), not the

@@ -379,6 +379,10 @@ jobs:
       # exercise the JS half, and the clock is pure time arithmetic — no GPU, no model.
       - name: wall-clock budget / final reserve regression
         run: node e2e_workflow/scripts/test_time_budget_reserve.js
+      # A lane's benchmark setup cut by the hung-agent guard is resumed from disk instead of failing,
+      # and the author loop does not retry it under the same guard. No GPU, no model.
+      - name: kernel-lane setup under the hung-agent guard
+        run: node e2e_workflow/scripts/test_lane_setup_guard.js
       # The final phase measures on GPUs the search may still hold: the tuning window and the
       # run_reaper.py fence ahead of Finalize and Validate. No GPU, no model.
       - name: final-phase GPU handover regression
