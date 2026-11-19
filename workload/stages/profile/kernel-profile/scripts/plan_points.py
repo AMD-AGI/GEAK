@@ -147,10 +147,10 @@ def boundaries(serving, eval_dir):
     for i, arg in enumerate(args):
         key, sep, value = arg.partition("=")
         if key in ("--chunked-prefill-size", "--max-prefill-tokens", "--cuda-graph-max-bs",
-                   "--cuda-graph-max-bs-decode"):
+                   "--cuda-graph-max-bs-decode", "--max-num-batched-tokens"):
             info[key[2:].replace("-", "_")] = int(value if sep else args[i + 1])
     b = {"prefill_chunk": None, "graph_bs": [], "notes": []}
-    for k in ("chunked_prefill_size", "max_prefill_tokens", "chunk_size"):
+    for k in ("chunked_prefill_size", "max_prefill_tokens", "chunk_size", "max_num_batched_tokens"):
         if info.get(k):
             b["prefill_chunk"] = int(info[k])
             break

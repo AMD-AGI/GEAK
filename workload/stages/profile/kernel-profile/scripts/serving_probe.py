@@ -398,6 +398,10 @@ def traces_written(trace_dir, since_ts):
             suffix = os.path.basename(src)[len(tag):]
             if suffix and suffix[0].isdigit():
                 continue
+            if ".async_llm." in suffix:
+                # API-server trace (builds without profiler ignore_frontend): CPU events
+                # only, so it is not a rank and must not reach verify or the census.
+                continue
             if os.path.isfile(src) and os.path.getmtime(src) >= since_ts and not os.path.lexists(dst):
                 os.symlink(os.path.abspath(src), dst)
     out = []

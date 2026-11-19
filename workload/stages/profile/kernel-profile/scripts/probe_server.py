@@ -222,10 +222,13 @@ def command(cfg, mode, trace_root, watch_dir=None):
                     fields.update(f.name for f in dataclasses.fields(ProfilerConfig))
             except ImportError:
                 fields = set()
+            # ignore_frontend: builds that have it otherwise also trace the API-server
+            # process (`*.async_llm.*` files, CPU events only) into the same directory.
             for key, value in (("torch_profiler_dump_cuda_time_total", False),
                                ("torch_profiler_record_shapes", True),
                                ("torch_profiler_with_stack", True),
-                               ("detailed_trace_annotation", True)):
+                               ("detailed_trace_annotation", True),
+                               ("ignore_frontend", True)):
                 if key in fields:
                     prof.setdefault(key, value)
             prof.update(profiler="torch", torch_profiler_dir=trace_root)
@@ -307,6 +310,36 @@ def healthy(url):
         return False
 
 
+def vllm_server_info(logp):
+    """vLLM has no /get_server_info. Its engine log states the effective chunk limit and
+    graph capture sizes; return them under the keys plan_points.py reads, else None.
+
+    The V2 model runner captures decode graphs by request count. Otherwise
+    cudagraph_capture_sizes counts tokens, which equal requests only without speculation.
+    """
+    try:
+        text = open(logp, errors="replace").read()
+    except OSError:
+        return None
+    args, notes = {}, []
+    m = re.search(r"max_num_batched_tokens=(\d+)", text)
+    if m:
+        args["chunked_prefill_size"] = int(m.group(1))
+    m = re.search(r"'decode_cudagraph_capture_request_sizes': \[([\d, ]*)\]", text)
+    if m and m.group(1).strip():
+        args["cuda_graph_bs"] = [int(x) for x in m.group(1).split(",")]
+    else:
+        m = re.search(r"'cudagraph_capture_sizes': \[([\d, ]*)\]", text)
+        if m and m.group(1).strip() and "speculative_config=None" in text:
+            args["cuda_graph_bs"] = [int(x) for x in m.group(1).split(",")]
+        elif m:
+            notes.append("cudagraph_capture_sizes count tokens under speculative decoding; "
+                         "decode batch sizes are not stated")
+    if not args:
+        return None
+    return {"server_args": args, "source": "vllm engine log", "log": logp, "notes": notes}
+
+
 def process_group_active(pgid, proc_root="/proc"):
     """Zombies have released their GPU resources and cannot handle a signal."""
     if os.path.isdir(proc_root):
@@ -368,6 +401,8 @@ class Server:
                 info = json.loads(fh.read().decode())
         except Exception:
             pass
+        if info is None and self.cfg.get("framework") == "vllm":
+            info = vllm_server_info(logp)
         if info is not None:
             json.dump(info, open(os.path.join(self.run_dir, "server_info.json"), "w"), indent=1)
             json.dump(info, open(os.path.join(self.run_dir, "server_info.%s.json" % mode), "w"), indent=1)

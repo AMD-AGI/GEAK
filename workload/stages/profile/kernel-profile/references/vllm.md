@@ -46,6 +46,10 @@ and graph mode are left unknown rather than inferred from these records.
 with mixed steps, completed output tokens need an independent phase reconciliation.
 Pass the effective chunk limit and graph capture sizes from the installed server
 configuration to sampling; requested concurrency is not observed batch size.
+vLLM has no `/get_server_info`: `probe_server.py` reads both from the engine log into
+`server_info.json` (V2 runner decode graphs are request counts; V1 capture sizes count
+tokens and are used only without speculation). Copy the observation server's file to
+`evidence/server_info.json`.
 
 If an old baseline has only aggregate logs, its missing geometry cannot be restored
 by changing a parser flag. Reuse compatible recorded evidence or take a bounded,
@@ -68,6 +72,9 @@ worker observations when supplied, otherwise vLLM running-request and token
 counters. `/start_profile` receives `profile_prefix` and `max_iterations`;
 `/stop_profile` closes the window. Enable the torch profiler at server launch,
 including shape and detailed phase annotations on builds that expose them.
+Builds with `ignore_frontend` otherwise also trace the API server into the same
+directory (`*.async_llm.*`, CPU events only); the probe disables it and never links
+such a file as a rank.
 On builds without the per-request profiler fields, use the existing time-bounded
 vLLM serving adapter and explicitly account for that alternative capture scope.
 
