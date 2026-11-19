@@ -258,13 +258,15 @@ runs with now; absent when there is no server, e.g. a standalone kernel_workflow
    `raised:true` / `"call raised"` / `backend:"ERROR"`), **self-repair, up to 3 bounded attempts:**
    1. Read `harness_error` + the failing `note`/`trace` and the task's `meta.json` + **`unittest.py`**
       (the immutable oracle already encodes the CORRECT input construction + call signature — mirror it).
+      In a generated task (`unittest.py` starts with `# GEAK-GENERATED unittest.py` and only runs
+      `ut_runner.py`) that construction is in the immutable `cases.py`: read `cases.py` instead.
    2. Fix the cause. Common cases: (a) **symbolic dim** — resolve `"M"` from `meta.m_buckets` (dominant =
       largest bucket); (b) **wrong signature / quant op** — a block-scaled fp8 GEMM needs
       `fn(x, w, x_scale, w_scale, dtype=out)` with per-block scales, NOT a dense `A@Bᵀ` (op_bench.py now
       routes these to its blockscale path; if a different quant layout appears, write a corrected driver).
    3. **Write a corrected driver into `$EVAL_DIR`** (NEVER edit the shared `scripts/op_bench.py` from
       here, and NEVER edit the immutable `unittest.py`/`meta.json`): a small script that builds the case
-      exactly like `unittest.py._synth_case`, benches each `CANDIDATE_BACKENDS` callable, and writes the
+      exactly like `unittest.py._synth_case` (a generated task: like `cases.py`), benches each `CANDIDATE_BACKENDS` callable, and writes the
       same `opbench_result.json` shape. Re-run it (pin the GPU) and re-read the result.
    Only AFTER 3 failed repair attempts do you give up on measuring — and then return
    **`gate:"harness_error"`** (NOT `no_win`), with `reason` = the diagnosed harness fault + what you tried.

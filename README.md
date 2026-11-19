@@ -148,6 +148,19 @@ workload_kind=agentx_trace_replay (the canonical AgentX corpus, graded on P50 in
 isl/osl 114000/819 are the average shape to OPTIMIZE for, not a benchmark to reproduce.
 ```
 
+A deployment with its own serving flags, such as a TP4 mono-kernel decode, states them in the
+request. They are passed as `initial_extra_server_args` / `initial_extra_env`, and `ep` must be given
+with them:
+
+```
+use path_to_GEAK/e2e_workflow to optimize inference for /models/DeepSeek-V4.1-Flash on vllm, gpus 0-3 tp=4 ep=1,
+workload_kind=agentx_trace_replay. Serve with --monokernel (initial_extra_server_args) and
+env VLLM_ROCM_USE_AITER=1 (initial_extra_env). Focus on the decode mono kernel.
+```
+
+A kernel that only runs as N ranks on N GPUs (the mono kernel above runs as 4) is extracted as a
+multi-rank UT and optimized on a group of N cards leased from `gpus`, so give the run at least N.
+
 Check the box before starting — every AgentX prerequisite is otherwise invisible until a server has
 already been launched and warmed:
 

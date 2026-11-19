@@ -265,6 +265,7 @@ Return JSON:
   "physical_cu_count": 64,
   "source_files": ["<relative paths under workspace>"],
   "gpu_requirement": {"kind": "single", "gpus_per_job": 1, "evidence": ""},
+  "task_declaration": "<the JSON object that detect_gpu_requirement.py --declaration printed, verbatim: {required_gpu_count, ut_total_s, evidence}>",
   "baseline_frozen": true,
   "baseline_callable": "<module:attr of the frozen real online kernel, or '' if the pristine EVAL_DIR/baseline is the anchor>",
   "notes": "anything unusual about the layout"
