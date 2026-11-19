@@ -813,10 +813,10 @@ def _wrapper(*args, **kwargs):
                     s["regime_seen"].add(regime)
                     # The recorded output is computed from the REAL operands, so it is not
                     # an oracle for the reduced ones. Keep it as a descriptor and leave the
-                    # record explicitly unresolved: `regen_reference.py` materializes the
-                    # operands, runs the installed unmodified kernel and fills in the value.
-                    # Shipping the stale output would be a silent mismatch; refusing to ship
-                    # one is the whole point of the policy.
+                    # record explicitly unresolved: the file is a structural fixture, and a
+                    # UT takes its reference from the frozen baseline on its own seeded
+                    # inputs (harness_lib.baseline_random_outputs). Shipping the stale output
+                    # would be a silent mismatch; refusing to ship one is the whole point.
                     s["records"].append({
                         "sig": sig,
                         "regime": regime,

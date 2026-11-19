@@ -2,7 +2,7 @@
 """Select phase Top-K kernels whose whole-workload share exceeds a threshold.
 
 This computes scope only. It neither proves editability nor launches GPU work.
-Input is the kernel-extract ranking artifact, on one common device-time basis.
+Input is the kernel-profile ranking artifact, on one common device-time basis.
 """
 
 import argparse

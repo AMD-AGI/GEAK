@@ -16,15 +16,14 @@ tasks/<name>/
   kernel_src/             actual editable native/JIT/generated source
   baseline_overlay/       immutable baseline overlay configuration
   baseline_ref/           original hashes/source text, not imported as baseline
-  captures/               optional minimal structural fixtures or fallback oracles
+  fixtures/               optional minimal structural fixtures from profile (no outputs)
   run/                    declarations, raw traces, gate logs, results
 ```
 
 Copy `harness_lib.py`, `leg_runner.py` and `overlay_setup.py` from
-`$SHARED_TOOLS/` to the task unchanged. If a helper needs its sibling
-capture/trace utilities, copy those too. Record every vendored helper in
+`$SHARED_TOOLS/` to the task unchanged. Record every vendored helper in
 `meta.kernel_extraction.source_delivery_files` so the snapshot binds the harness.
-Freeze the tests/oracles when authored; candidate edits belong under `kernel_src/`.
+Freeze the tests when authored; candidate edits belong under `kernel_src/`.
 
 ## Metadata and adapters
 
@@ -67,7 +66,7 @@ modules/leaves are needed, use a tested local binding adapter and prove all
 bindings. The stock harness's single `candidate_bind` is not automatic support
 for arbitrary multi-module swapping.
 
-Record `meta.workload` using the observed case model from `SKILL.md`. Keep
+Record `meta.workload` using the observed case model from the [UT skill](../SKILL.md) §3. Keep
 evidence paths and full signatures in the manifest. Shapes reconstructed from
 median context or synthetic values are approximations, not captured joint
 distribution coverage. Match cache residency to deployment; the vendored timer
@@ -77,10 +76,9 @@ condition rather than treating defaults as measured deployment facts.
 ## Seeded inputs by default
 
 Build `cases.py` from a fixed case manifest: shape, dtype, stride/layout,
-quantization parameters, phase, seed and observed call weight. Use existing logs,
-trace metadata and verified source/configuration to establish that manifest. If
-needed, collect missing shape metadata once during extraction; UT execution must
-never invoke `capture_shapes.py`, a profiler or the serving model.
+quantization parameters, phase, seed and observed call weight, all taken from the
+profile handoff. Missing shape metadata is a request to profile; UT authoring and
+execution never invoke `capture_shapes.py`, a profiler or the serving model.
 
 Generate ordinary activations and weights directly with the supplied seeded
 `torch.Generator`. Preserve each operand's valid range and format: scales may need
@@ -91,42 +89,24 @@ Keep construction outside the timed region. Freeze the generator code and seeds
 so baseline/candidate processes reconstruct identical inputs on the pinned stack.
 
 Use `h.baseline_random_outputs(task, meta, seed=0, draws=...)` to obtain reference
-outputs in the isolated frozen-baseline process. It records outputs keyed by
-`sig|draw`; input tensors need not be saved. Build eager/reference cases from the
-same seeded factory, and pass the recorded outputs to `h.run_correctness` for the
-additional draws. Use matching seeds and draw counts on both sides (the shared
-`run_correctness` random gate uses seed 0). Graph replay still needs its normal
-boundary cases and in-place input refresh. A serving-captured `reference_io.pt`
-is optional; generated reference outputs are not captures from the model.
+outputs in the isolated frozen-baseline process. It returns outputs keyed by
+`sig|draw` and deletes its temporary file; neither inputs nor outputs persist. Build
+the eager cases from the same seeded factory with those baseline outputs as `ref`, and
+pass the recorded outputs to `h.run_correctness` for the additional draws. Use matching
+seeds and draw counts on both sides (the shared `run_correctness` random gate uses
+seed 0). Graph replay still needs its normal boundary cases and in-place input refresh.
+Do not introduce a `reference_io.pt`, suite-wide golden outputs or a second correctness
+runner.
 
 Record which inputs are generated and which are structural fixtures. For MoE
-routing, sparse indices, page tables and sequence state, first reuse existing
+routing, sparse indices, page tables and sequence state, first reuse handoff
 metadata or a validated reconstruction that preserves the observed work/access
-pattern. Use a minimal structural capture only when those are insufficient.
+pattern. Use a profile structural fixture only when those are insufficient; its
+recorded output is never a reference.
 Valid synthetic structures can test correctness, but random uniform routing can
 change expert occupancy and gather locality, so report its timing scope honestly.
 
-## Capture policy
-
-Use `CAPTURE_PERSIST_POLICY=structure_only` when capture is necessary: retain
-structural operands and reduce bulk float payloads to seeded descriptors. Integer
-and boolean operands are structural by default; declare additional float structural
-operands with `CAPTURE_STRUCTURAL_OPERANDS` / `meta.structural_operands`.
-
-A captured output was computed from the original values, so it is not a reference
-for regenerated random inputs. The reduced file is marked `oracle_status=needs_regen`:
-
-```bash
-python3 "$SKILL_ROOT/scripts/regen_reference.py" captures/reference_io.pt \
-    --out captures/reference_io.regen.pt
-python3 "$SKILL_ROOT/scripts/oracle_power.py" captures/reference_io.regen.pt --tol "$TOL"
-```
-
-This fallback persists reconstructed operands and baseline outputs. Prefer the
-seeded factory above when it avoids capture entirely. Never regenerate structural
-state through nondeterministic routing while pretending the inputs are unchanged.
-
-## Correctness and timing
+## Correctness qualification
 
 Use separate subprocesses for baseline and candidate. Import task helpers by
 explicit file path and remove the task directory from `sys.path` before importing
@@ -135,43 +115,16 @@ The shared leg runner already performs this isolation.
 
 0. **Before any verdict, prove the comparison can produce one.** Verify reproducible
    inputs, a tolerance supported by baseline self-noise, and effective numerical
-   negative controls. For a seeded task, run these checks on generated cases and
-   frozen-baseline outputs without collecting a serving oracle. The following
-   helper commands apply when their input formats match: `oracle_power.py` for a
-   saved capture and `kernel_self_noise.py` for a shape-by-M `_build_args` adapter.
+   negative controls, all on generated cases and frozen-baseline outputs.
 
-   ```bash
-   # (a) can the captured oracle reject anything?
-   python3 "$SKILL_ROOT/scripts/oracle_power.py" captures/reference_io.pt --tol "$TOL"
-   # (b) does the installed kernel reproduce itself, and are the inputs even stable?
-   python3 "$SKILL_ROOT/scripts/kernel_self_noise.py" --repeats 5 [--packed] \
-       --out "$TASK_DIR/run/self_noise.json"
-   ```
-
-   (a) A phase that runs entirely inside a CUDA graph fires python-level capture
-   hooks only during graph **capture**, when the buffers are placeholders. On a
-   real decode seam this recorded every float operand and the output as identically
-   zero while the integer index operand looked real — so "is the file all zero"
-   would have passed it, the control computed `0 * 0.5 == 0`, and the report said
-   `max_rel_err: 0.0`, which reads like a perfect pass rather than an empty one.
-   Capture during graph **replay** in steady state, or take a bounded eager
-   diagnostic leg and revalidate the timing in deployment graph mode.
-
-   If the capture turns out to carry no usable values, a reference generated by running
-   the installed, unmodified kernel is a legitimate substitute — say so in
-   `meta.oracle_coverage`, since gate 1 against it is then a determinism check rather
-   than a deployment-value check. **Persist the exact operands it was computed from
-   alongside the output.** Rebuilding them at UT time reintroduces (b) inside the
-   correctness gate, where it is much harder to see than in a probe.
-
-   (b) A tolerance below the installed kernel's own noise floor decides nothing.
+   A tolerance below the installed kernel's own noise floor decides nothing.
    Establish the floor with ONE set of args reused across repeats, and only after
-   phase 1 shows the args are reproducible: on this deployment
-   `aiter.fused_moe.moe_sorting` returns different routing metadata from
-   bit-identical inputs, so rebuilding args inside the repeat loop reports the
-   routing change as kernel nondeterminism. For packed sub-byte payloads
-   (MXFP4 values + exponent bytes) the only meaningful criterion is byte-exactness;
-   `rel_frobenius` over packed bytes is not a number about the computation.
+   the args are shown reproducible: on one deployment `aiter.fused_moe.moe_sorting`
+   returns different routing metadata from bit-identical inputs, so rebuilding args
+   inside the repeat loop reports the routing change as kernel nondeterminism. For
+   packed sub-byte payloads (MXFP4 values + exponent bytes) the only meaningful
+   criterion is byte-exactness; `rel_frobenius` over packed bytes is not a number
+   about the computation. Record the floor in `run/self_noise.json`.
 
 1. Run the frozen seeded/structural inputs through the baseline; verify output structure and full
    numerical/semantic contract. Reconstruct implicit state and all required glue.
@@ -194,23 +147,12 @@ The shared leg runner already performs this isolation.
    the intended native/JIT computation and produce a numerical/semantic
    mismatch. Import/build/launch failure does not satisfy this negative control.
    **Record the deviation the mutation actually produced and check it clears the
-   tolerance by a wide margin** — `oracle_power.py ... --tol T --control-rel-err
-   <observed>`. A control that "passed" without its deviation ever being measured
-   is not evidence of anything; see the zero-oracle case in step 0 below.
+   tolerance by a wide margin.** A control that "passed" without its deviation ever
+   being measured is not evidence of anything.
    Preserve the mutation and logs, restore pristine source, then rerun final
    normal checks before recording completion.
-7. `h.measure_legs(task, meta)` measures interleaved baseline/candidate subprocess
-   legs with the same mode and shared timer. By default it starts one baseline
-   process and one candidate process per round (and per GPU shard with `gpus=`),
-   each streaming all pending shapes; later rounds reverse side and shape order and
-   only re-time undecided shapes. Baseline and candidate never share an interpreter.
-   `process_mode="fresh"` restarts for every (shape, leg) -- keep it for A/A checks
-   of state carried between shapes (e.g. an autotune cache keyed without the varying
-   dimension), not as the routine path. Use
-   `h.serving_weighted_speedup(per_case, meta)` for the observed-call aggregate.
-   Print the aggregate as `GEAK_WEIGHTED_SPEEDUP=<value>` for downstream optimization;
-   retain per-case timings and unweighted geomean as diagnostics.
-   Every positive-mass signature must have finite timings on both sides.
+7. Timing is not part of qualification. `unittest.py --validation-mode correctness`
+   runs steps 1-6 only and records `performance_measured: false`.
 
 The shared tensor checker assumes independent returned outputs. If the actual
 serving contract permits persistent/in-place buffers, document that contract
@@ -220,11 +162,28 @@ silently present an incompatible generic tensor gate as passing.
 Write a single `python3 unittest.py` entry that orchestrates and combines these
 checks, emits per-gate and per-case evidence and exits nonzero on failure or
 incompleteness. A prototype with only replay or timing is not a completed UT.
+It accepts `--validation-mode correctness|performance` (bare entry: `performance`).
+Qualify with `correctness`.
+
+## Optimization interface
+
+The optimizer runs `unittest.py --validation-mode performance`: the correctness gates,
+then `h.measure_legs(task, meta)` and `h.serving_weighted_speedup(per_case, meta)`,
+printing `GEAK_WEIGHTED_SPEEDUP=<value>`; per-case timings and the unweighted geomean
+stay as diagnostics, and every positive-mass signature needs finite timings on both
+sides. `measure_legs` starts one baseline process and one candidate process per round
+(and per GPU shard with `gpus=`), each streaming all pending shapes through
+`timing_specs`/`make_timing_case`; later rounds reverse side and shape order and only
+re-time undecided shapes. Baseline and candidate never share an interpreter.
+`process_mode="fresh"` restarts for every (shape, leg) -- keep it for A/A checks of
+state carried between shapes (e.g. an autotune cache keyed without the varying
+dimension), not as the routine path.
 The collective case requires the real rank harness described in
 [collective UT](collective-ut.md); the single-process leg runner cannot test a
 multi-rank collective by itself.
 
 Freeze the source/test snapshot before GPU gates. The final `run/ut_result.json`
-must include the snapshot, target, exit code, completed gates and coverage.
+must include the snapshot, target, validation mode, exit code, completed gates,
+`performance_measured` and coverage.
 Generate leaf/source evidence as described in [source records](source-delivery-records.md).
 Keep all raw logs; JSON declarations alone do not establish execution truth.

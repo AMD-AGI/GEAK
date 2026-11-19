@@ -11,18 +11,14 @@ file/hash transport and preflight against the saved original task declaration `K
 
 Begin with a bootstrap: write a minimal case adapter and executable baseline
 replay, then pass one seeded case with valid structural metadata through each declared
-phase entry. Use a minimal captured case only where state cannot be reconstructed.
+phase entry. Use a profile structural fixture only where state cannot be reconstructed.
 Resolve concrete replay errors before a broader sweep. Continue in the same task directory with editable leaves, full cases,
 weights and all GPU gates. Save per-phase bootstrap results; they are an
 intermediate checkpoint, never a complete UT pass.
 
-Keep separate frozen-baseline reference outputs for each phase. If capture files
-are used, run selection with `--task-dir` pointing to the corresponding phase capture directory: selection
-promotes one oracle and recursively reclaims the other process-local captures
-below that directory. Running it against the whole joint task would discard
-the other phases. Preserve bootstrap inputs across selection/binding retries;
-fix markers using standalone replay and retire duplicates only after the
-retained or replacement inputs replay successfully.
+Keep separate frozen-baseline reference outputs for each phase, generated from the
+same seeds as that phase's cases. Preserve bootstrap inputs across selection/binding
+retries; fix markers using standalone replay.
 
 Deliver one task directory with one `python3 unittest.py` entry, one immutable
 case manifest and baseline, and editable implementations for every claimed
@@ -40,11 +36,11 @@ projection/RoPE/quantization/cache writes only when the requested boundary
 includes them. Do not drop required glue because it is below the Top-5/3% rule.
 
 Inspect implicit state getters as part of the boundary. A KV getter may launch
-a gather or conversion rather than just return a tensor. A bootstrap may use
-captured post-gather operands to establish replay, but final whole-call timing
+a gather or conversion rather than just return a tensor. A bootstrap may start
+from post-gather operands to establish replay, but final whole-call timing
 must execute the deployed getter work on reconstructed state. Do not replace
 it with a cached output while claiming the original callable's full cost.
-Reconstruct a paged buffer from captured ragged K/scales when possible and
+Reconstruct a paged buffer from recorded ragged K/scale metadata when possible and
 verify the native gather reproduces them; this does not require another model
 capture. Record any deliberately narrower boundary and its cost scope explicitly.
 
@@ -68,7 +64,7 @@ Ordinary fused MoE extraction retains its existing whole-op/per-case dispatch
 contract; it does not need an indexer-style joint declaration merely because
 its source contains multiple GEMM variants.
 Run `kernel_selection.py --device-kernel <anchor>` with repeated
-`--required-device-kernel <companion>` options for each phase's captures.
+`--required-device-kernel <companion>` options for each phase's diagnostic traces.
 The tool verifies every required member in every observed joint invocation and
 only considers a deeper callable a replacement if it contains the entire chain.
 Return each full verdict in `phase_selection_validations[]` with `regime`,
@@ -135,8 +131,8 @@ reporting success. Record all positive-mass signatures and any reconstructed
 inputs, sampled representatives or uncovered state. Missing requested cases
 remain failures/incomplete coverage, never disappear by renormalization.
 
-Time one invocation of the complete chain using the shared timer in deployment
-mode. Do not sum isolated score/top-k medians or mix separately measured
+In performance mode (run by the optimizer, not during UT qualification), time one
+invocation of the complete chain using the shared timer in deployment mode. Do not sum isolated score/top-k medians or mix separately measured
 speedups as a joint result. Return per-case baseline/candidate latency, per-phase
 folds and a combined `sum(baseline_ms*calls)/sum(candidate_ms*calls)` using
 one common call basis. Do not add joint and constituent costs to workload

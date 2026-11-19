@@ -3030,6 +3030,19 @@ class TestBaselineRandomOutputs(_LegTestCase):
         self.assertEqual(loaded, [(dest, "cpu")])          # CPU-side, so either leg can compare it
         self.assertEqual(list(got), ["decode|0"])
 
+    def test_the_baseline_outputs_do_not_outlive_the_call(self):
+        """No golden file persists in the task: the .pt only crosses the process boundary."""
+        self.torch.load = lambda path, map_location=None: {"decode|0": _T((1,), [1.0])}
+
+        def handler(cmd, env):
+            out = cmd[cmd.index("--out") + 1]
+            with open(out, "w") as fh:
+                fh.write("blob")
+            return _Proc(0, '{"out": "x", "n": 1}')
+        self._script(handler)
+        hl.baseline_random_outputs(self.task, self.meta)
+        self.assertFalse(os.path.exists(os.path.join(self.task, "_baseline_random.pt")))
+
 
 # --------------------------------------------------------------------------- #
 # The recorded-oracle arm of check_random_vs_baseline / run_correctness

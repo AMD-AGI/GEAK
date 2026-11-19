@@ -641,9 +641,9 @@ def reconstruct_captured(obj, device="cpu"):
         # file no longer holds, so there is nothing here to compare against. Raising is the
         # point -- a placeholder that reached a correctness gate would pass it vacuously.
         raise ValueError(
-            "this capture was taken with CAPTURE_PERSIST_POLICY=structure_only and its "
-            "output has not been regenerated. Run scripts/regen_reference.py against it "
-            "inside the serving container and point the task at the regenerated file.")
+            "this capture was taken with CAPTURE_PERSIST_POLICY=structure_only: it is a "
+            "structural fixture, not an oracle. Take the reference from the frozen baseline "
+            "on the same seeded inputs (baseline_random_outputs) instead.")
     if isinstance(obj, dict) and obj.get("__synth__"):
         raise ValueError(
             "a __synth__ operand descriptor reached reconstruct_captured. Materialize it "
@@ -1790,9 +1790,15 @@ def _summarize_pairs(sig, brows, orows):
 
 def baseline_random_outputs(task_dir, meta, *, seed=0, draws=0, timeout=3600):
     """Random-draw outputs recorded by the BASELINE leg in its own process, for
-    `check_random_vs_baseline(baseline_outputs=...)`. Same seed => same inputs on both sides."""
+    `check_random_vs_baseline(baseline_outputs=...)`. Same seed => same inputs on both sides.
+    The file only carries the outputs across the process boundary; it is removed once loaded, so
+    no golden output outlives the run that produced it."""
     task = os.path.abspath(task_dir)
     out = os.path.join(task, "_baseline_random.pt")
-    _run_leg(task, os.path.join(task, "baseline_overlay"), "oracle",
-             out=out, seed=seed, draws=draws, timeout=timeout)
-    return _torch().load(out, map_location="cpu")
+    try:
+        _run_leg(task, os.path.join(task, "baseline_overlay"), "oracle",
+                 out=out, seed=seed, draws=draws, timeout=timeout)
+        return _torch().load(out, map_location="cpu")
+    finally:
+        if os.path.exists(out):
+            os.remove(out)

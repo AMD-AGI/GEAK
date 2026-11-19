@@ -1,6 +1,6 @@
 # GLM AgentX example
 
-Use alongside [kernel-extract](../SKILL.md). This example maps
+Use alongside [kernel-profile](../../kernel-profile/SKILL.md) and [kernel-ut](../SKILL.md). This example maps
 GLM features to evidence needed by the general method; it supplies no default
 shapes, layer counts, multipliers, kernel names or performance thresholds.
 
@@ -8,7 +8,7 @@ shapes, layer counts, multipliers, kernel names or performance thresholds.
 |---|---|
 | Prefix caching | Newly executed query tokens, per-request context and cache-hit distribution |
 | Speculative decoding | Separate target/draft architectures, actual subphase boundaries, proposed/accepted tokens and graph-padded M |
-| MoE | Captured routing, packed weights/scales, preshuffling and the live fused-operation boundary |
+| MoE | Observed routing (expert occupancy), packed weights/scales, preshuffling and the live fused-operation boundary |
 | Sparse attention/indexer | Which layers execute or reuse indices; separate indexer, selection and attention launches in each active phase |
 | Shape-dependent dispatch | Per-shape kernels, full grids and call counts, including tails and eager fallbacks |
 
@@ -20,7 +20,7 @@ implementation, and a draft model need not use the target model's kernels.
 
 ## Reconciling a supplied GLM UT delivery
 
-Use the core skill's [selection coverage contract](selection-coverage.md).
+Use the profile skill's [selection coverage contract](../../kernel-profile/references/selection-coverage.md).
 The extraction target set is the union of PREFILL/DECODE Top-5 lists after
 filtering each by overall workload share >3%. Prior deliveries are discovery
 references; their full task lists do not override this rule.
@@ -53,7 +53,7 @@ stay unresolved until current evidence establishes a mapping or absence.
 
 If a UT matches device names, grids and outputs, still verify that its editable
 leaf executes: a copied dispatcher can import the installed implementation
-inside a branch. Apply the core skill's source-extraction checks and retain its
+inside a branch. Apply the UT skill's [source-extraction](source-extraction.md) checks and retain its
 frozen overlay baseline and observed-call weighting.
 
 Record the matching feature and current evidence in `kernel_workload.json` or

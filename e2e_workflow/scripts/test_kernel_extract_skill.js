@@ -66,19 +66,22 @@ for (const args of [
     const prompt = run.roleAgent(name, phase, 'Run the phase.', {WORKLOAD: run.workload});
     assert(prompt.includes(`PHASE=${phase}`));
     if (name === 'kernel_extractor') {
-      const skill = prompt.match(/Read (\S+kernel-extract\/SKILL.md)/)[1];
-      assert(fs.existsSync(skill), 'injected skill must ship at the referenced path');
+      const profile = prompt.match(/run (\S+kernel-profile\/SKILL.md)/)[1];
+      const ut = prompt.match(/then (\S+kernel-ut\/SKILL.md)/)[1];
+      for (const skill of [profile, ut]) assert(fs.existsSync(skill), 'injected skill must ship at the referenced path');
+      assert(prompt.indexOf(profile) < prompt.indexOf(ut), 'profile runs before UT');
       assert(!prompt.includes(`First Read ${root}/roles/kernel_extractor.md`));
-      assert(prompt.includes(`${path.dirname(skill)}/references/workflow-handoff.md`));
-      assert(prompt.includes('"SKILL_ROOT":' + JSON.stringify(path.dirname(skill))));
+      assert(prompt.includes(`${path.dirname(ut)}/references/workflow-handoff.md`));
+      assert(prompt.includes('"PROFILE_SKILL_ROOT":' + JSON.stringify(path.dirname(profile))));
+      assert(prompt.includes('"UT_SKILL_ROOT":' + JSON.stringify(path.dirname(ut))));
       assert(prompt.includes('"CAPTURE_PERSIST_POLICY":"structure_only"'));
       assert(prompt.includes('"SHARED_TOOLS":' + JSON.stringify(path.join(root, 'scripts'))));
       assert(prompt.includes('"PARSE_PROFILE_STRICT_PHASES":"1"'));
       assert(prompt.includes('"KERNEL_ENV_SKIP_ENUM_REAP":"1"'));
     } else {
-      const handoff = prompt.match(/Read (\S+kernel-extract\/references\/workflow-handoff.md)/)[1];
+      const handoff = prompt.match(/Read (\S+kernel-ut\/references\/workflow-handoff.md)/)[1];
       assert(fs.existsSync(handoff));
-      assert(!prompt.includes('kernel-extract/SKILL.md'), 'downstream roles load only the handoff');
+      assert(!/kernel-(profile|ut)\/SKILL.md/.test(prompt), 'downstream roles load only the handoff');
       assert(prompt.includes('do not repeat discovery, sampling or UT authoring'));
     }
   }
@@ -102,7 +105,7 @@ for (let [backend, specification] of [
   for (const [name, phase] of consumers) {
     const prompt = run.roleAgent(name, phase, '', {});
     assert(prompt.includes(name === 'kernel_extractor'
-      ? 'kernel-extract/SKILL.md' : 'kernel-extract/references/workflow-handoff.md'));
+      ? 'kernel-profile/SKILL.md' : 'kernel-ut/references/workflow-handoff.md'));
     if (name !== 'kernel_extractor') assert(prompt.includes(JSON.stringify(specification)));
     assert(prompt.includes(`BACKEND=${backend}`));
   }
@@ -167,19 +170,21 @@ console.log('PASS: AgentX-only activation across models and resumes; fixed-load 
 const override = make({workload_kind: 'agentx_trace_replay', capture_persist_policy: 'full'}, undefined);
 assert(override.roleAgent('kernel_extractor', 'prepare', '', {}).includes('"CAPTURE_PERSIST_POLICY":"full"'));
 
-// Verify instruction paths after moving common tools out of the skill package.
-const skillRoot = path.join(root, 'knowledge/kernel_extraction_skills/kernel-extract');
-const documents = [path.join(skillRoot, 'SKILL.md'),
-  ...fs.readdirSync(path.join(skillRoot, 'references')).filter(n => n.endsWith('.md'))
-    .map(n => path.join(skillRoot, 'references', n))];
-for (const file of documents) {
-  const text = fs.readFileSync(file, 'utf8');
-  for (const [, href] of text.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)) {
-    if (/^(https?:|#)/.test(href)) continue;
-    assert(fs.existsSync(path.resolve(path.dirname(file), href.split('#')[0])), `${file}: ${href}`);
-  }
-  for (const [, variable, name] of text.matchAll(/\$(SKILL_ROOT|SHARED_TOOLS)\/([\w./-]+\.(?:py|mjs|sh))/g)) {
-    assert(fs.existsSync(path.resolve(variable === 'SKILL_ROOT' ? skillRoot : path.join(root, 'scripts'), name)),
-      `${file}: ${variable}/${name}`);
+// Verify instruction paths after moving common tools out of the skill packages.
+for (const skillRoot of ['kernel-profile', 'kernel-ut'].map(
+  n => path.join(root, 'knowledge/kernel_extraction_skills', n))) {
+  const documents = [path.join(skillRoot, 'SKILL.md'),
+    ...fs.readdirSync(path.join(skillRoot, 'references')).filter(n => n.endsWith('.md'))
+      .map(n => path.join(skillRoot, 'references', n))];
+  for (const file of documents) {
+    const text = fs.readFileSync(file, 'utf8');
+    for (const [, href] of text.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)) {
+      if (/^(https?:|#)/.test(href)) continue;
+      assert(fs.existsSync(path.resolve(path.dirname(file), href.split('#')[0])), `${file}: ${href}`);
+    }
+    for (const [, variable, name] of text.matchAll(/\$(SKILL_ROOT|SHARED_TOOLS)\/([\w./-]+\.(?:py|mjs|sh))/g)) {
+      assert(fs.existsSync(path.resolve(variable === 'SKILL_ROOT' ? skillRoot : path.join(root, 'scripts'), name)),
+        `${file}: ${variable}/${name}`);
+    }
   }
 }

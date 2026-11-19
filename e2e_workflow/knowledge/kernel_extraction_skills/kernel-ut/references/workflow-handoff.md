@@ -1,17 +1,19 @@
 # GEAK workflow handoff
 
-This reference adapts the standalone extraction procedure to GEAK. The skill's
-SKILL.md, references and shared and skill-specific tools own discovery, sampling, source extraction,
-UT authoring and validation. The workflow supplies inputs and consumes finished
-UTs. Do not also execute the legacy `roles/kernel_extractor.md` procedure.
+This reference adapts the two extraction skills to GEAK.
+[kernel-profile](../../kernel-profile/SKILL.md) owns observation, sampling, capture and
+selection and ends with `profile_handoff.json`; [kernel-ut](../SKILL.md) owns task
+boundaries, source extraction, UT authoring and correctness qualification, reading only
+that handoff. The workflow supplies inputs and consumes finished UTs. Do not also execute
+the legacy `roles/kernel_extractor.md` procedure.
 
 ## Inputs and invocation
 
 | Workflow input | Use in the skill |
 |---|---|
-| `SKILL_ROOT` | Skill instructions and the additional extraction tools |
-| `SHARED_TOOLS` | Shared capture, trace, harness and delivery helpers; vendor task helpers from here |
-| `BASELINE_ITERATION_DIR` | vLLM worker observation JSONL from the baseline; see [vLLM](vllm.md) |
+| `PROFILE_SKILL_ROOT`, `UT_SKILL_ROOT` | The two skills; set `SKILL_ROOT` to the one being executed |
+| `SHARED_TOOLS` | Shared trace, harness and delivery helpers; vendor task helpers from here |
+| `BASELINE_ITERATION_DIR` | vLLM worker observation JSONL from the baseline; see [vLLM](../../kernel-profile/references/vllm.md) |
 | `WORKFLOW_DIR` | GEAK e2e directory; used only for the final handoff adapter |
 | `EVAL_DIR`, `EVIDENCE_DIR` | Allowed output root and this round's evidence directory |
 | `BASELINE_LOG`, `BASELINE_BENCH_DIR`, `BASELINE_SUMMARY` | Completed measured baseline evidence; exclude warmup/discarded intervals |
@@ -20,13 +22,14 @@ UTs. Do not also execute the legacy `roles/kernel_extractor.md` procedure.
 | `TASK`, `WORKLOAD` | User scope and replay specification |
 | `PREVIOUS_WORKLOAD_JSON`, `PREVIOUS_RANKING_JSON`, `PREVIOUS_UT_DELIVERY` | Reuse compatible evidence and passing tasks on resume/refresh |
 | `BUDGET`, `HEAD_BUDGET`, `REMAINING_MIN` | Scheduling limits; retain the complete selected inventory and explain deferred tasks |
-| `CAPTURE_PERSIST_POLICY` | Export into capture processes; defaults to `structure_only` for AgentX |
+| `CAPTURE_PERSIST_POLICY` | Export into a profile structural-fixture capture; `structure_only` for AgentX |
 
-`PHASE=prepare` executes all five skill stages in one invocation. Prefer seeded
-UT input factories from fixed workload metadata; do not collect numerical inputs
-or rerun shape capture inside the UT. `CAPTURE_PERSIST_POLICY` controls only the
-fallback captures that remain necessary. Write baseline
-and sampling evidence under `EVIDENCE_DIR` and tasks anywhere under `EVAL_DIR`.
+`PHASE=prepare` runs kernel-profile to a verified `profile_handoff.json`, then kernel-ut
+from that handoff, in one invocation. UT inputs come from seeded factories over handoff
+metadata; no numerical inputs or oracles are collected, and the UT never captures. If
+the UT lacks evidence, take it with a bounded profile capture and re-export the handoff.
+Write baseline and sampling evidence under `EVIDENCE_DIR` and tasks anywhere under
+`EVAL_DIR`.
 Preserve supplied UT references and each requested source boundary. Verify actual
 installed/container source and build resources before reporting source unavailable.
 Do not launch another full replay to obtain discovery evidence. Keep probes bounded
@@ -41,7 +44,9 @@ Tune stages; bounded trace sampling inside this skill still runs when needed.
 Downstream stages consume the prepared queues in saved order, subject to execution
 budgets. They do not nominate new kernels, apply another percentage threshold or
 author UTs. Cases, weights and source binding remain fixed; optimization runs the
-existing UT against changed candidate code and gates each integration with E2E A/B.
+existing UT (bare `unittest.py`, i.e. `--validation-mode performance`, which adds the
+timing legs that UT qualification skipped) against changed candidate code and gates each
+integration with E2E A/B.
 Head wins and completed milestones do not refresh extraction. Saved cost weights
 remain those measured during preparation, not measurements of the optimized stack.
 Queue exhaustion ends dispatch; undispatched tasks remain in carried state. Fast

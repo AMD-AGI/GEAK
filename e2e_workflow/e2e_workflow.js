@@ -1046,7 +1046,9 @@ const AGENTX_ENV = !AGENTX ? '' : [
 // Kernel extraction is enabled only by an AgentX workload; model/backend features select its
 // branches, never its activation.
 const KERNEL_EXTRACT_ON = !!MODEL_PATH && WORKLOAD_KIND === 'agentx_trace_replay';
-const KERNEL_EXTRACT_DIR = `${WORKFLOW_DIR}/knowledge/kernel_extraction_skills/kernel-extract`;
+// Two skills, one extractor: kernel-profile ends at profile_handoff.json, kernel-ut reads only that.
+const KERNEL_PROFILE_DIR = `${WORKFLOW_DIR}/knowledge/kernel_extraction_skills/kernel-profile`;
+const KERNEL_UT_DIR = `${WORKFLOW_DIR}/knowledge/kernel_extraction_skills/kernel-ut`;
 if (KERNEL_EXTRACT_ON) {
   WORKLOAD.kind = WORKLOAD_KIND;
   WORKLOAD.spec = WORKLOAD_SPEC;
@@ -1719,7 +1721,7 @@ function correctnessEnvBlock(role) {
 function kernelExtractBlock(role) {
   if (!KERNEL_EXTRACT_ON || !['system_architect', 'op_benchmarker'].includes(role)) return '';
   return `\n\n## AgentX prepared UTs\n` +
-    `Read ${KERNEL_EXTRACT_DIR}/references/workflow-handoff.md. Use the supplied prepared tasks ` +
+    `Read ${KERNEL_UT_DIR}/references/workflow-handoff.md. Use the supplied prepared tasks ` +
     `and saved workload/ranking evidence. Selection, cases, weights and source bindings are already ` +
     `validated; do not repeat discovery, sampling or UT authoring, or replace them with fixed ISL/OSL ` +
     `assumptions. Run the existing immutable UT against optimization candidates, then E2E A/B.\n` +
@@ -1744,14 +1746,15 @@ function roleAgent(role, phase, intro, inputs) {
     } : {}),
     ...inputs,
     ...(standaloneExtraction ? {
-      SKILL_ROOT: KERNEL_EXTRACT_DIR, SHARED_TOOLS: `${WORKFLOW_DIR}/scripts`, WORKFLOW_DIR,
+      PROFILE_SKILL_ROOT: KERNEL_PROFILE_DIR, UT_SKILL_ROOT: KERNEL_UT_DIR,
+      SHARED_TOOLS: `${WORKFLOW_DIR}/scripts`, WORKFLOW_DIR,
       PARSE_PROFILE_STRICT_PHASES: '1', KERNEL_ENV_SKIP_ENUM_REAP: '1',
       CAPTURE_PERSIST_POLICY, CAPTURE_STORAGE_ENV,
     } : {}),
   };
   const instruction = standaloneExtraction
-    ? `First Read ${KERNEL_EXTRACT_DIR}/SKILL.md and ${KERNEL_EXTRACT_DIR}/references/workflow-handoff.md.
-Use the complete extraction procedure and its shared and skill-specific tools. The handoff reference supplies only workflow inputs and output packaging.
+    ? `First Read ${KERNEL_UT_DIR}/references/workflow-handoff.md, then run ${KERNEL_PROFILE_DIR}/SKILL.md to a verified profile_handoff.json, then ${KERNEL_UT_DIR}/SKILL.md from that handoff.
+Use each skill's complete procedure and its shared and skill-specific tools, with SKILL_ROOT set to the skill being run. The handoff reference supplies only workflow inputs and output packaging.
 Do not load roles/kernel_extractor.md; it is the legacy procedure for other workloads.`
     : `First Read ${WORKFLOW_DIR}/roles/${role}.md and follow its instructions for PHASE=${phase}.
 Read any knowledge files it points you to under ${WORKFLOW_DIR}/knowledge/.`;
@@ -3528,16 +3531,18 @@ async function prepareAgentXKernels(round, throughput) {
     SKILL_DIR: WORKFLOW_DIR, ...TRACELENS_INPUTS, ...ANALYSIS_SKILL_INPUTS, ...KB_REF_INPUTS,
   };
   let reply = await safeAgent(roleAgent('kernel_extractor', 'prepare',
-    'Complete the kernel-extract skill from the saved baseline through executable, GPU-validated UTs. ' +
-    'Selection, task grouping and bootstrap replay are INTERNAL steps: save their artifacts and continue ' +
-    'to source extraction, UT authoring and validation in this invocation. Prefer fixed-seed input factories ' +
-    'from saved shape/layout metadata; UT execution must not start serving or capture shapes. ' +
+    'Complete kernel-profile and then kernel-ut from the saved baseline through executable, ' +
+    'correctness-qualified UTs. Selection, the profile handoff, task grouping and bootstrap replay are ' +
+    'INTERNAL steps: save their artifacts and continue to source extraction, UT authoring and validation ' +
+    'in this invocation. UT inputs are fixed-seed factories over the handoff metadata and references come ' +
+    'from the frozen baseline; UT execution must not start serving, capture or persist golden outputs. ' +
+    'Qualify with `unittest.py --validation-mode correctness`; timing runs in optimization. ' +
     'Capture only missing structural state needed for faithful cases. Do not return a candidate list ' +
     'before UTs have been attempted. Reuse compatible evidence and passing UTs. Never rerun the full ' +
     'AgentX baseline for discovery. Follow TASK scope and the default per-phase selection rule. ' +
     'Prove that edits to each opt GPU leaf affect candidate correctness while the frozen baseline passes; ' +
     'restore the clean source and rerun the UT. Keep failures and budget-deferred tasks in the delivery. ' +
-    'Read references/workflow-handoff.md in the skill. Pack with ' +
+    'Read kernel-ut/references/workflow-handoff.md. Pack with ' +
     '`agentx_kernel_preparation.mjs --emit-prepared` and return ONLY {delivery_path, prepared}: ' +
     'delivery_path names that file under EVAL_DIR, and prepared is that command\'s stdout envelope ' +
     'VERBATIM — the workflow cannot open the file, so an envelope you summarise or rebuild by hand ' +

@@ -61,7 +61,7 @@ selector. Required companions belong in the phase's `required_device_kernels`;
 if also listed in `extraction_members`, mark their `kernel_extraction.selected`
 as `false`. Their delivery does not make them additional selected targets.
 Declare joint phase boundaries on the owner as described in
-[joint indexer validation](joint-indexer-ut.md). Do not schedule the owner's
+[joint indexer validation](../../kernel-ut/references/joint-indexer-ut.md). Do not schedule the owner's
 leaves again in another task. Do not infer a grouping from shared callable
 names, sum overlapping member shares, or replace the owner's attributed cost
 with the full logical stage cost without evidence of editability.
