@@ -50,7 +50,7 @@ refused while time is left), `parity_threshold` 0.95, `max_recover_rounds` ceil(
 `max_no_improve` (port 6, else 2; climb rounds without progress), `progress_delta` (port −0.05, else
 `min_improve`; how far over the best candidate seen a round's winner must land to count as progress),
 `enabling_delta` (port −0.05, else 0; how far an `enabling_step` may sit below the track best and still
-be kept), `use_learned_kb` true, `kb_dir_cap` 1 and `kb_cold_direction` true (kernel-workflow's learned
+be kept), `prior_log` (an earlier run's insight log or final report when this run continues from its kept line), `use_learned_kb` true, `kb_dir_cap` 1 and `kb_cold_direction` true (kernel-workflow's learned
 cards for the planner, with its budget),
 `deadline_reserve_s` 1800, `round_time_cap_s` 3600, `evidence_reasks` 1, `evidence_audit` true,
 `token_reserve` 150000, `agent_timeout_ms` 3600000, `engineer_timeout_ms` 7200000, `eval_dir`,

@@ -60,6 +60,9 @@ const MAX_DIRECTIONS = Math.max(0, Math.floor(num(A.max_directions, 0)));
 // With a deadline, a tech_lead stop is refused while more than NO_STOP_S remain (MAX_FORCED_REPLANS times).
 const NO_STOP_S = Math.max(0, num(A.no_stop_s, 900));
 const MAX_FORCED_REPLANS = Math.max(1, Math.floor(num(A.max_forced_replans, 6)));
+// A continuation of an earlier run on the same kernel (whose kept line is this run's baseline):
+// that run's insight log / final report, read by the planner and the engineers like HISTORY.
+const PRIOR_LOG = String(A.prior_log || '').trim();
 // kernel_workflow/knowledge/learned/ for the planner, with kernel_lane.js's budget on how much of a
 // round it may steer: at most KB_DIR_CAP directions cite cards, one direction is profile-only.
 const USE_LEARNED_READ = String(A.use_learned_kb != null ? A.use_learned_kb : 'true') === 'true';
@@ -836,6 +839,8 @@ function planAddendum(stg) {
       'transcription-debt `suspect` (lost_pipeline -> layer 4, lost_layout -> layer 3, lost_RA -> layer 5; ' +
       `${refPath('references/method/recover.md')}), at most one direction per suspect, no deep_explore. If the debt is not ` +
       'attributed yet, one direction attributes it and repays the largest suspect.'] : []),
+    ...(PRIOR_LOG ? [`- PRIOR_RUN_LOG (${PRIOR_LOG}) is an earlier run on this kernel whose kept line is this run's baseline: ` +
+      'read its insights, ledger and every direction\'s verdict and lesson as part of HISTORY before planning.'] : []),
     'Return the plan_round JSON with `layer` on every direction (and `suspect` / `paired` where they apply).',
   ].join('\n');
 }
@@ -850,6 +855,7 @@ async function planRound(stg, left) {
     CUMULATIVE_SPEEDUP: accepted ? accepted.primary : 1, TRACK_BEST_VS_BASELINE: trackBest,
     CHAMPION_VS_BASELINE: CHAMP_PRIMARY, BASELINE_GEOMEAN_MS: bench.baseline_geomean_ms,
     SKILL_DIR: WORKFLOW_DIR, SKILL, PROFILE_SUMMARY: lastProfile, CURRENT_BEST_PER_CASE: bestPerCase,
+    ...(PRIOR_LOG ? { PRIOR_RUN_LOG: PRIOR_LOG } : {}),
     HISTORY: { insights: memory.insights, ledger: memory.ledger.slice(-20), rounds: history.slice(-12),
       bottleneck_now: memory.bottleneck_now, suggest_next: memory.suggest_next },
     GFX, DEVICE_TARGET: setup.device_target || '', PHYSICAL_CU_COUNT: setup.physical_cu_count || 0,
@@ -997,7 +1003,8 @@ while (!stoppedBy) {
     CHAMPION_VS_BASELINE: CHAMP_PRIMARY, PARITY_THRESHOLD, PARITY: parity,
     TRACK_BEST_VS_BASELINE: trackBest, ACCEPTED_VS_BASELINE: accepted ? accepted.primary : 1,
     BUDGET_JSON: budgetRes ? budgetRes.budget_json : '', LAST_PROFILE: lastProfile,
-    HISTORY: history.slice(-12), INSIGHTS: memory.insights, ...(roundEnd ? { ROUND_DEADLINE_EPOCH: roundEnd } : {}),
+    HISTORY: history.slice(-12), INSIGHTS: memory.insights, ...(PRIOR_LOG ? { PRIOR_RUN_LOG: PRIOR_LOG } : {}),
+    ...(roundEnd ? { ROUND_DEADLINE_EPOCH: roundEnd } : {}),
   };
 
   // --- Transcribe / Author: one direction, the anchor or the first Gluon kernel ---------------------

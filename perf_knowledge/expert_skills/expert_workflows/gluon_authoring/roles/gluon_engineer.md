@@ -38,8 +38,9 @@ field names the command you ran, its exit code and where its output is.
   `git -C "$TRACK" fetch -q "$WS" "refs/tags/$ROUND_TAG:refs/tags/$ROUND_TAG"`. Return the patch path as
   `patch_file` and `ROUND_TAG` as `track_tag`. The patch is relative to `BASE_TAG` (the frozen
   baseline), so verify can apply it to a clean copy of the canonical workspace.
-- Read `HISTORY` (every direction of the last rounds with its verified number, `claim` and `lesson`)
-  and `INSIGHTS` (tech_lead's memory) before editing; never retry a lever measured null on the same
+- Read `HISTORY` (every direction of the last rounds with its verified number, `claim` and `lesson`),
+  `INSIGHTS` (tech_lead's memory) and, when set, `PRIOR_RUN_LOG` (an earlier run whose kept line is this
+  run's baseline) before editing; never retry a lever measured null on the same
   body unless your `DIRECTION` pairs it with the prerequisite its lesson named.
 - Return `lesson`: one line on what this direction showed, for a null or negative result too. The next
   round's plan reads it.

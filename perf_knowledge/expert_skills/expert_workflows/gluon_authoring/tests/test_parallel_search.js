@@ -206,5 +206,15 @@ const three = [{ specialty: 'compute', layer: '7' }, { specialty: 'memory', laye
     const mem = x.calls.find(c => c.label === 'tech_lead:memory r1').prompt;
     ok(mem.includes(`Then Read ${WF_DIR}/roles/tech_lead.md`) && /PHASE=update_memory/.test(mem), 'tech_lead.md PHASE=update_memory');
   }
+  console.log('\n# 11. a continuation hands the earlier run\'s log to the planner and the engineers');
+  {
+    const x = await launch({ ...climb, budget: 1, prior_log: '/x/prior/insight_log.md' }, undefined, inc);
+    const plan = x.calls.find(c => c.label === 'tech_lead:plan r1').prompt;
+    const eng = x.calls.find(c => c.label === 'gluon_engineer:climb r1_d0').prompt;
+    ok(/PRIOR_RUN_LOG: \/x\/prior\/insight_log\.md/.test(plan) && /earlier run on this kernel/.test(plan), 'planner gets it');
+    ok(/PRIOR_RUN_LOG: \/x\/prior\/insight_log\.md/.test(eng), 'engineer gets it');
+    const y = await launch({ ...climb, budget: 1 }, undefined, inc);
+    ok(!/PRIOR_RUN_LOG/.test(y.calls.find(c => c.label === 'tech_lead:plan r1').prompt), 'absent unless given');
+  }
   done('parallel-search');
 })();
