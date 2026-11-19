@@ -4,7 +4,7 @@
 // written at the end (update_experience, citation ledger, experience store), storage reclaim per round.
 'use strict';
 
-const { launch, ok, done, inOrder, planReturn, WF_DIR } = require('./harness');
+const { launch, ok, done, inOrder, planReturn, engineerReturn, WF_DIR, SKILL } = require('./harness');
 
 const inc = { entry: 'incumbent' };
 const climb = { entry_mode: 'incumbent' };
@@ -111,6 +111,32 @@ const cand = { rank: 1, slug: 'k__gluon__gfx942', speedup: 1.3, patch_path: '/kb
     ok(r.length === 2 && /reclaim_eval_artifacts\.sh --eval-dir \/tmp\/eval\/gluon --keep-round 1/.test(r[0].prompt), 'one per round, scoped to EVAL_DIR/gluon', x.labels);
     const y = await launch({ ...climb, budget: 1, storage_reclaim: 'off' }, undefined, inc);
     ok(!y.labels.some(l => /storage:reclaim/.test(l)), 'storage_reclaim=off');
+  }
+  console.log('\n# 6. the archetype routes the workload reading (workloads/index.md keys)');
+  {
+    const x = await launch({ ...climb, budget: 1 }, (label, prompt) => {
+      if (label.startsWith('gluon_lead:budget')) return { command: 'python3 kt/hw_budget.py --workload fused_moe --json', exit_code: 0,
+        budget_json: '/x/b.json', workload: 'fused_moe', references_read: [...prompt.matchAll(/^\d+\. (\S+) — /gm)].map(m => m[1]) };
+      if (label === 'gluon_engineer:climb r1_d0') { const r = engineerReturn(prompt); r.references_read = r.references_read.filter(p => !p.endsWith('moe.md')); return r; }
+      return undefined;
+    }, inc);
+    const eng = x.calls.find(c => c.label === 'gluon_engineer:climb r1_d0').prompt;
+    ok(eng.includes(`${SKILL}/references/workloads/moe.md — the moe archetype page`), 'fused_moe -> moe.md in the required reading');
+    ok(x.labels.includes('gluon_engineer:evidence r1_d0 (reask 1)') && /moe\.md/.test(x.calls.find(c => c.label === 'gluon_engineer:evidence r1_d0 (reask 1)').prompt),
+      'skipping it is sent back by name', x.labels);
+    ok(/The moe archetype page\(s\)/.test(x.calls.find(c => c.label === 'tech_lead:plan r1').prompt) && x.result.workload === 'moe', 'the planner is pointed at it too');
+    const y = await launch({ ...climb, budget: 1 }, undefined, inc);
+    ok(y.result.workload === 'gemm', 'no budget archetype: analyze\'s kernel_type routes (gemm)', y.result.workload);
+  }
+
+  console.log('\n# 7. a guided run asks the planner to exercise named layers; gates unchanged');
+  {
+    const x = await launch({ ...climb, budget: 1, focus_layers: '4+,1.5' }, undefined, inc);
+    const plan = x.calls.find(c => c.label === 'tech_lead:plan r1').prompt;
+    ok(/GUIDED RUN: this run exercises layer\(s\) 4\+, 1\.5/.test(plan) && /inline asm needs its disassembly/.test(plan), 'addendum names the layers and keeps the gates');
+    ok(!/GUIDED RUN/.test((await launch({ ...climb, budget: 1 }, undefined, inc)).calls.find(c => c.label === 'tech_lead:plan r1').prompt), 'off by default');
+    const bad = await launch({ ...climb, focus_layers: '9' });
+    ok(/focus_layers must be/.test(bad.error || '') && bad.calls.length === 0, 'an unknown layer is refused before any agent', bad.error);
   }
   done('knowledge-loop');
 })();

@@ -186,6 +186,34 @@ const LAYER_REFS = {
   '7': ['references/tile-programming/low-precision.md', 'references/gluon/matrix-reference.md'],
 };
 const LAYERS = Object.keys(LAYER_REFS);
+// The workload page(s) for the archetype hw_budget.py was run with (workloads/index.md routes by the
+// same keys): required reading for recover and climb, beside the layer's own pages.
+const WORKLOAD_DOCS = {
+  gemm: ['references/workloads/gemm.md'],
+  moe: ['references/workloads/moe.md'],
+  attention: ['references/workloads/attention.md', 'references/workloads/flash-attention-structural-insights.md'],
+  attention_bwd: ['references/workloads/attention.md'],
+  linear_attention: ['references/workloads/linear-attention.md'],
+  norm: ['references/workloads/reduction-elementwise.md'],
+  reduction: ['references/workloads/reduction-elementwise.md'],
+  elementwise: ['references/workloads/reduction-elementwise.md'],
+  scan: ['references/workloads/reduction-elementwise.md'],
+  gather: ['references/workloads/reduction-elementwise.md'],
+  collective: ['references/workloads/collective.md'],
+};
+const WORKLOAD_ALIASES = { fused_moe: 'moe', grouped_gemm: 'moe', matmul: 'gemm', gemv: 'gemm', attn: 'attention',
+  fmha: 'attention', attn_bwd: 'attention_bwd', layernorm: 'norm', rmsnorm: 'norm', softmax: 'norm', gdn: 'linear_attention' };
+function workloadDocs(name) {
+  const k = String(name || '').trim().toLowerCase().replace(/[-\s]+/g, '_');
+  const key = WORKLOAD_DOCS[k] ? k : WORKLOAD_ALIASES[k] || Object.keys(WORKLOAD_DOCS).find(w => k.includes(w)) || '';
+  return { key, docs: key ? WORKLOAD_DOCS[key] : [] };
+}
+let WORKLOAD = { key: '', docs: [] };   // set after Budget
+// Guided feature runs: layers the planner should exercise whenever the profile gives them a target.
+const FOCUS_LAYERS = String(A.focus_layers || '').split(',').map(x => x.trim()).filter(Boolean);
+if (FOCUS_LAYERS.some(l => !LAYERS.includes(l))) {
+  throw new Error(`args.focus_layers must be a comma list of ${LAYERS.join(', ')}, got '${A.focus_layers}'`);
+}
 // Layers whose claim is about issue order or overlap: they owe instruction-level (ATT) evidence.
 const PIPELINE_LAYERS = new Set(['1.5', '4', '4+']);
 // A debt suspect is repaid at one layer (recover.md ## 3).
@@ -201,11 +229,15 @@ const refPath = (rel) => `${SKILL}/${rel}`;
 function requiredRefs(stage, layer) {
   const base = (STAGE_REFS[stage] || []).map(([rel]) => rel);
   const extra = layer && LAYER_REFS[layer] ? LAYER_REFS[layer] : [];
-  return [...new Set([...base, ...extra])];
+  const work = stage === 'climb' || stage === 'recover' ? WORKLOAD.docs : [];
+  return [...new Set([...base, ...work, ...extra])];
 }
 // The block that opens every method-stage prompt, before the role file is even named.
 function readingBlock(stage, layer) {
   const rows = (STAGE_REFS[stage] || []).map(([rel, what], i) => `${i + 1}. ${refPath(rel)} — ${what}`);
+  if (stage === 'climb' || stage === 'recover') {
+    for (const rel of WORKLOAD.docs) rows.push(`${rows.length + 1}. ${refPath(rel)} — the ${WORKLOAD.key} archetype page (its regimes, levers and gfx942 downgrades)`);
+  }
   if (layer && LAYER_REFS[layer]) {
     for (const rel of LAYER_REFS[layer]) rows.push(`${rows.length + 1}. ${refPath(rel)} — layer ${layer}`);
   }
@@ -739,6 +771,9 @@ if (!blocked) {
   }
   if (budgetMissing(budgetRes).length) caveats.push(`budget_missing: ${budgetMissing(budgetRes).join('; ')}`);
 }
+// The archetype the budget was priced for routes the workload reading; analyze's kernel_type is the fallback.
+WORKLOAD = workloadDocs(budgetRes && has(budgetRes.workload) ? budgetRes.workload : (analysis && analysis.kernel_type));
+if (WORKLOAD.key) log(`Workload archetype: ${WORKLOAD.key} (required reading: ${WORKLOAD.docs.join(', ')})`);
 
 // The champion is measured by verify_engineer under the same COMMANDMENT when it is not the frozen
 // baseline (e.g. the task ships the Gluon anchor and the plain champion only as its golden copy).
@@ -933,6 +968,12 @@ function planAddendum(stg) {
       `scheduling knob) is planned only after \`${SKILL}/scripts/probe_levers.py --all\` shows it is live on ${GFX}.`,
     ...(PRIOR_LOG ? [`- PRIOR_RUN_LOG (${PRIOR_LOG}) is an earlier run on this kernel whose kept line is this run's baseline: ` +
       'read its insights, ledger and every direction\'s verdict and lesson as part of HISTORY before planning.'] : []),
+    ...(WORKLOAD.key ? [`- The ${WORKLOAD.key} archetype page(s) (${WORKLOAD.docs.map(refPath).join(', ')}) name this ` +
+      'workload\'s regimes and levers and their gfx942 downgrades: read them before choosing.'] : []),
+    ...(FOCUS_LAYERS.length ? [`- GUIDED RUN: this run exercises layer(s) ${FOCUS_LAYERS.join(', ')}. Each round, plan at least ` +
+      'one direction on one of them whenever the profile gives it a target, and say in `reasoning` why not when it ' +
+      'does not. Their gates stay as they are (inline asm needs its disassembly; a scheduling-model or ' +
+      'version-gated knob needs probe_levers.py first); the gating order still decides what shares a round.'] : []),
     'Return the plan_round JSON with `layer` on every direction (and `suspect` / `paired` where they apply).',
   ].join('\n');
 }
@@ -1522,5 +1563,6 @@ return {
   validation_status: validation ? validation.validation_status : (FINAL_SRC ? 'not_validated' : 'no_candidate'),
   director_verified_speedup_geomean: finalSpeedup,
   analysis: analysis ? { kernel_type: analysis.kernel_type, kk_operator: KK_OPERATOR, kk_refs: KK_REFS } : null,
+  workload: WORKLOAD.key, focus_layers: FOCUS_LAYERS,
   warm_start, learned_card, kb_written, citations,
 };

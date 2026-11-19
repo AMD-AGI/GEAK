@@ -50,7 +50,7 @@ refused while time is left), `parity_threshold` 0.95, `max_recover_rounds` ceil(
 `max_no_improve` (port 6, else 2; climb rounds without progress), `progress_delta` (port −0.05, else
 `min_improve`; how far over the best candidate seen a round's winner must land to count as progress),
 `enabling_delta` (port −0.05, else 0; how far an `enabling_step` may sit below the track best and still
-be kept), `prior_log` (an earlier run's insight log or final report when this run continues from its kept line),
+be kept), `focus_layers` (a guided run: comma list of layers the planner exercises whenever the profile gives them a target; gates unchanged; default none), `prior_log` (an earlier run's insight log or final report when this run continues from its kept line),
 `warm_start` on, `update_experience` on, `box_quiet` true, `held_out` false, `kb_mode` store, `kb_remote` auto,
 `warm_start_min_speedup` 1.05, `perf_knowledge_dir`, `kb_artifacts_dir`, `kb_store_dir`, `storage_reclaim` on
 (kernel-workflow's knowledge loop, same defaults; an A/B run sets `warm_start=off` and `held_out=true` so neither arm
@@ -100,6 +100,13 @@ before each round — a workflow has no clock — and no round starts with less 
 truncates a run); token budget (`budget.remaining() < token_reserve`); `max_no_improve` climb rounds
 without progress (kernel_lane.js's rule: neither accepted nor `progress_delta` over the best candidate
 seen); G1 failure; transcribe/author failure; `parity_unreached`.
+
+## Workload reading
+
+The archetype `hw_budget.py` was run with (falling back to analyze's `kernel_type`) routes the workload
+page(s) of `skills/gluon_authoring/references/workloads/` into the required reading of every recover and
+climb direction and into the planner's addendum, by the same keys `workloads/index.md` uses (`moe` ->
+`moe.md`, `attention` -> `attention.md` + `flash-attention-structural-insights.md`, ...).
 
 ## Rounds, directions and the gating order
 

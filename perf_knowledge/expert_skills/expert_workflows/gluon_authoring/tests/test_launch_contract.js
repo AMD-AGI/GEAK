@@ -57,6 +57,14 @@ const src = fs.readFileSync(path.join(PKG, 'workflow.js'), 'utf8');
     for (const rel of rels) ok(fs.existsSync(path.join(SKILL, rel)), `exists: ${rel}`);
   }
 
+  console.log('\n# 4b. every workload page the archetype router names exists');
+  {
+    const block = src.match(/const WORKLOAD_DOCS = \{[\s\S]*?\n\};/);
+    const rels = [...new Set([...block[0].matchAll(/'(references\/workloads\/[^']+\.md)'/g)].map(m => m[1]))];
+    ok(rels.length >= 6, `${rels.length} workload pages`);
+    for (const rel of rels) ok(fs.existsSync(path.join(SKILL, rel)), `exists: ${rel}`);
+  }
+
   console.log('\n# 5. the script fits the workflow tool and kernel/e2e workflows do not refer to it');
   {
     const bytes = fs.statSync(path.join(PKG, 'workflow.js')).size;
