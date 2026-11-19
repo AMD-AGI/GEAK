@@ -17,6 +17,36 @@
 # (multinode.sh) moves BASH_SOURCE inside the function to the launcher's own file.
 _AGENTX_ADAPTER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# _agentx_aiperf_cmd AIPERF — fills the global array _AGENTX_AIPERF_CMD with the command that runs
+# AIPERF. A client environment built in one directory and renamed into another keeps the old
+# interpreter path in its console scripts (`#!<python>`, or pip's `#!/bin/sh` + `'''exec' <python>
+# "$0" "$@"` form for long paths), so they fail as "bad interpreter"; such a script runs with the
+# interpreter beside it. Any other AIPERF runs as itself.
+_agentx_aiperf_cmd() {
+  local _ap _l1="" _l2="" _ip="" _py
+  _AGENTX_AIPERF_CMD=("$1")
+  _ap="$(command -v "$1" 2>/dev/null)" || return 0
+  [ -f "$_ap" ] || return 0
+  { IFS= read -r _l1; IFS= read -r _l2; } < "$_ap" 2>/dev/null
+  case "$_l1" in
+    '#!/bin/sh'*)
+      case "$_l2" in "'''exec' "*)
+        _ip="${_l2#"'''exec' "}"
+        if [ "${_ip:0:1}" = '"' ]; then _ip="${_ip:1}"; _ip="${_ip%%\"*}"; else _ip="${_ip%%[[:space:]]*}"; fi ;;
+      esac ;;
+    '#!'*)
+      _ip="${_l1#??}"; _ip="${_ip#"${_ip%%[![:space:]]*}"}"; _ip="${_ip%%[[:space:]]*}" ;;
+  esac
+  case "$_ip" in /*) ;; *) return 0 ;; esac
+  [ -x "$_ip" ] && return 0
+  for _py in "${_ap%/*}/python3" "${_ap%/*}/python"; do
+    [ -x "$_py" ] || continue
+    echo ">>> agentx client: $_ap names a missing interpreter ($_ip); running it with $_py." >&2
+    _AGENTX_AIPERF_CMD=("$_py" "$_ap")
+    return 0
+  done
+}
+
 # _agentx_duration — the measured window for THIS leg.
 # Shared by the bench and by the profile-window placement below so the two can
 # never disagree about how long the replay actually runs.
@@ -239,8 +269,9 @@ adapter_bench() {
     echo "!!! agentx client: aiperf not found (set AIPERF_BIN)." >&2
     return 5
   fi
+  _agentx_aiperf_cmd "$aiperf"
 
-  "$aiperf" profile \
+  "${_AGENTX_AIPERF_CMD[@]}" profile \
     --scenario "$scenario" \
     --url "${BASE_URL:-http://127.0.0.1:${port}}" \
     --endpoint /v1/chat/completions \

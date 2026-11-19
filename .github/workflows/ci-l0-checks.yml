@@ -181,6 +181,7 @@ jobs:
             e2e_workflow/scripts/tests/test_vllm_adapter_profiler_config.py \
             e2e_workflow/scripts/tests/test_sglang_adapter_profile.py \
             e2e_workflow/scripts/tests/test_profile_env_shim.py \
+            e2e_workflow/scripts/tests/test_native_adapter_launch.py \
             scripts/tests/test_gpu_identity.py \
             e2e_workflow/scripts/tests/test_eikos_registry_lint.py \
             e2e_workflow/scripts/tests/test_eikos_decide.py \
