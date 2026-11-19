@@ -31,6 +31,7 @@ max relative error) instead of shape-only smoke checks. CUDA-event times and per
 lists, so `time_op` returns a median we chose. `time.perf_counter` is replaced on the module, so nothing
 ever sleeps or polls.
 """
+import collections
 import contextlib
 import importlib.util
 import io
@@ -515,6 +516,10 @@ class _Clock:
         self.i += 1
         return now
 
+    def monotonic(self):
+        """Stage diagnostics read this clock, never the scripted perf_counter samples."""
+        return 0.0
+
 
 def _wall_deltas(walls_ms):
     """Deltas that make the k-th timed sample measure walls_ms[k] (each sample reads the clock twice)."""
@@ -984,7 +989,10 @@ class TestTimeOpWall(_HarnessTestCase):
         def boom():
             raise RuntimeError("kernel launch failed")
         self.assertIsNone(hl.time_op(boom, warmup=1, repeats=1))
-        self.assertIsNone(hl.time_op(boom, warmup=1, repeats=1, detail=True))
+        # detail=True keeps the reason, so a leg can say WHY a bucket is untimeable
+        got = hl.time_op(boom, warmup=1, repeats=1, detail=True)
+        self.assertIsNone(got["ms"])
+        self.assertIn("kernel launch failed", got["error"])
 
     def test_an_unqueryable_device_makes_the_op_untimeable(self):
         # SOURCE GAP, pinned as-is: time_op guards its is_available() probe so a broken runtime
@@ -993,7 +1001,8 @@ class TestTimeOpWall(_HarnessTestCase):
         # and the bucket looks untimeable rather than wall-timed.
         self.stack.available_raises = True
         _, call = self._counting_call()
-        self.assertIsNone(hl.time_op(call, warmup=1, repeats=1, detail=True))
+        self.assertIsNone(hl.time_op(call, warmup=1, repeats=1))
+        self.assertIsNone(hl.time_op(call, warmup=1, repeats=1, detail=True)["ms"])
 
 
 class TestTimeOpEvents(_CudaTestCase):
@@ -1029,8 +1038,9 @@ class TestTimeOpEvents(_CudaTestCase):
         # One actual read before each sample's start event; the removed env switch cannot skip it.
         self.assertEqual(reads, [0, 3, 6])
         self.assertEqual(got["cache_condition"]["mode"], "read-evict")
-        # sync() before each sample, the post-warmup sync, and the host probe's own two
-        self.assertEqual(self.stack.syncs, 6)
+        # the post-allocation sync, sync() before each sample, the post-warmup sync, and the host
+        # probe's own two
+        self.assertEqual(self.stack.syncs, 7)
 
     def test_the_receipt_reports_which_cache_condition_produced_the_number(self):
         with _env(HARNESS_CACHE_FLUSH_MB="64"):
@@ -2419,6 +2429,13 @@ class _FakeSubprocess:
         return [c["cmd"][c["cmd"].index("--mode") + 1] for c in self.calls if "--mode" in c["cmd"]]
 
 
+def _timed_sigs(cmd):
+    """The sigs one `--mode time` leg was asked for: --bucket (fresh) or --sigs (batched sweep)."""
+    if "--sigs" in cmd:
+        return json.loads(cmd[cmd.index("--sigs") + 1])
+    return [cmd[cmd.index("--bucket") + 1]]
+
+
 class _LegTestCase(_HarnessTestCase):
     """A real task dir on disk (leg_runner.py / kernel_src) + a scripted subprocess."""
 
@@ -2464,13 +2481,9 @@ class _LegTestCase(_HarnessTestCase):
             if mode == "list":
                 return _Proc(0, json.dumps({"sigs": list(sigs)}))
             if mode == "time":
-                sig = cmd[cmd.index("--bucket") + 1]
-                got = timings.get(sig)
-                if got is None:
-                    return _Proc(0, json.dumps({"cases": []}))
-                ms = got[0] if is_base else got[1]
-                return _Proc(0, json.dumps({"cases": [{"sig": sig, "ms": ms, "regime": "decode",
-                                                       "m": 64}]}))
+                cases = [{"sig": sig, "ms": timings[sig][0 if is_base else 1], "regime": "decode",
+                          "m": 64} for sig in _timed_sigs(cmd) if sig in timings]
+                return _Proc(0, json.dumps({"cases": cases}))
             return _Proc(0, json.dumps({"out": self.flag_out, "n": 1}))
         self.flag_out = ""
         return self._script(handler)
@@ -2762,18 +2775,42 @@ class TestAssertLegsDiffer(_LegTestCase):
 
 
 class TestMeasureLegs(_LegTestCase):
-    def test_every_bucket_is_timed_in_a_fresh_subprocess_per_leg(self):
-        """A warm interpreter shares JIT/autotune state between legs and reports a fake 1.0x."""
+    def test_fresh_mode_times_every_bucket_in_a_fresh_subprocess_per_leg(self):
+        """The reference mode: a cold interpreter per (bucket, leg)."""
         self._legs()
-        per = hl.measure_legs(self.task, self.meta)
+        per = hl.measure_legs(self.task, self.meta, process_mode="fresh")
         self.assertEqual([c["sig"] for c in per], ["decode", "prefill"])
         self.assertEqual([c["speedup"] for c in per], [2.0, 2.0])
         self.assertEqual(per[0]["baseline_ms"], 2.0)
         self.assertEqual(per[0]["optimized_ms"], 1.0)
         self.assertEqual((per[0]["regime"], per[0]["m"]), ("decode", 64))
+        self.assertEqual({c["process_mode"] for c in per}, {"fresh"})
         # overlay build, 2x resolve, list, then one time-leg per (bucket, leg)
         self.assertEqual(self.sub.modes(), ["resolve", "resolve", "list",
                                             "time", "time", "time", "time"])
+        self.assertEqual([_timed_sigs(c["cmd"]) for c in self.sub.calls
+                          if "--mode" in c["cmd"] and "time" in c["cmd"]],
+                         [["decode"]] * 2 + [["prefill"]] * 2)
+
+    def test_batched_mode_streams_every_bucket_through_one_process_per_leg(self):
+        """The default. The two legs still never share an interpreter -- a warm interpreter shared
+        by baseline and candidate shares JIT/autotune state and reports a fake 1.0x."""
+        self._legs()
+        per = hl.measure_legs(self.task, self.meta)
+        self.assertEqual([c["sig"] for c in per], ["decode", "prefill"])
+        self.assertEqual([c["speedup"] for c in per], [2.0, 2.0])
+        self.assertEqual({c["process_mode"] for c in per}, {"batched"})
+        self.assertEqual(self.sub.modes(), ["resolve", "resolve", "list", "time", "time"])
+        legs = [c for c in self.sub.calls if "--mode" in c["cmd"] and "time" in c["cmd"]]
+        self.assertEqual([c["env"]["PYTHONPATH"].split(os.pathsep)[0] for c in legs],
+                         [self.base, self.cand])
+        self.assertEqual([_timed_sigs(c["cmd"]) for c in legs], [["decode", "prefill"]] * 2)
+        self.assertIn("process", per[0]["baseline_timing"]["diagnostics"][0])
+
+    def test_an_unknown_process_mode_is_refused(self):
+        self._legs()
+        with self.assertRaises(ValueError):
+            hl.measure_legs(self.task, self.meta, process_mode="warm")
 
     def test_measurement_is_refused_before_the_legs_are_proven_different(self):
         """assert_legs_differ runs BEFORE any timing."""
@@ -2808,8 +2845,9 @@ class TestMeasureLegsResolution(_LegTestCase):
     inside that noise, and 1.05x is precisely the size of win the direction fix exists to recover."""
 
     def _sequenced(self, seq, sigs=("decode",)):
-        """A leg server whose `time` answers come from a per-sig LIST, one entry consumed per pair."""
-        state = {s: 0 for s in sigs}
+        """A leg server whose `time` answers come from a per-sig LIST, one entry consumed per pair
+        (each leg consumes its own side of the n-th pair, whichever side runs first)."""
+        state = collections.Counter()
         order = []
 
         def handler(cmd, env):
@@ -2821,14 +2859,14 @@ class TestMeasureLegsResolution(_LegTestCase):
                 return _Proc(0, json.dumps(self.BASE_IDENT if is_base else self.CAND_IDENT))
             if mode == "list":
                 return _Proc(0, json.dumps({"sigs": list(sigs)}))
-            sig = cmd[cmd.index("--bucket") + 1]
-            order.append(("B" if is_base else "C", sig))
-            pair = seq[sig][min(state[sig], len(seq[sig]) - 1)]
-            if not is_base:
-                state[sig] += 1                      # a pair completes on the candidate leg
-            ms = pair[0] if is_base else pair[1]
-            return _Proc(0, json.dumps({"cases": [{"sig": sig, "ms": ms, "regime": "decode",
-                                                   "m": 64}]}))
+            cases = []
+            for sig in _timed_sigs(cmd):
+                order.append(("B" if is_base else "C", sig))
+                pair = seq[sig][min(state[sig, is_base], len(seq[sig]) - 1)]
+                state[sig, is_base] += 1
+                cases.append({"sig": sig, "ms": pair[0] if is_base else pair[1], "regime": "decode",
+                              "m": 64})
+            return _Proc(0, json.dumps({"cases": cases}))
         self._script(handler)
         return order
 
@@ -2857,8 +2895,21 @@ class TestMeasureLegsResolution(_LegTestCase):
     def test_the_legs_are_interleaved_rather_than_run_all_baseline_then_all_candidate(self):
         """B,B,B,C,C,C lets drift over the sweep accrue to the candidate; B,C,B,C makes it common-mode."""
         order = self._sequenced({"decode": [(1.02, 1.0)] * 3})
-        hl.measure_legs(self.task, self.meta)
+        hl.measure_legs(self.task, self.meta, process_mode="fresh")
         self.assertEqual([leg for leg, _ in order], ["B", "C", "B", "C", "B", "C"])
+
+    def test_a_batched_round_reverses_side_and_shape_order_and_drops_decided_buckets(self):
+        """One process per side per round; round 2 runs C before B and the shapes back to front, so
+        drift over a long sweep is not always charged to the same side or the same shapes."""
+        order = self._sequenced({"a": [(2.0, 1.0)], "b": [(1.02, 1.0)] * 3, "c": [(1.03, 1.0)] * 3},
+                                sigs=("a", "b", "c"))
+        per = hl.measure_legs(self.task, self.meta)
+        self.assertEqual(self.sub.modes().count("time"), 6)
+        self.assertEqual(order, [("B", "a"), ("B", "b"), ("B", "c"), ("C", "a"), ("C", "b"), ("C", "c"),
+                                 ("C", "c"), ("C", "b"), ("B", "c"), ("B", "b"),
+                                 ("B", "b"), ("B", "c"), ("C", "b"), ("C", "c")])
+        self.assertEqual([c["reps"] for c in per], [1, 3, 3])
+        self.assertEqual(per[1]["pair_order"], ["BC", "CB", "BC"])
 
     def test_the_reported_time_is_the_median_pair_not_the_first(self):
         """One unlucky cold process must not carry the bucket."""
@@ -2893,11 +2944,100 @@ class TestMeasureLegsResolution(_LegTestCase):
 
     def test_the_budget_is_per_bucket_not_shared(self):
         """A noisy decode bucket must not consume the reps a second bucket would have used."""
-        self._sequenced({"decode": [(1.02, 1.0)] * 3, "prefill": [(1.03, 1.0)] * 3},
-                        sigs=("decode", "prefill"))
-        per = hl.measure_legs(self.task, self.meta)
-        self.assertEqual([c["reps"] for c in per], [3, 3])
-        self.assertEqual(self.sub.modes().count("time"), 12)
+        for mode, processes in (("fresh", 12), ("batched", 6)):
+            with self.subTest(mode=mode):
+                self._sequenced({"decode": [(1.02, 1.0)] * 3, "prefill": [(1.03, 1.0)] * 3},
+                                sigs=("decode", "prefill"))
+                per = hl.measure_legs(self.task, self.meta, process_mode=mode)
+                self.assertEqual([c["reps"] for c in per], [3, 3])
+                self.assertEqual(self.sub.modes().count("time"), processes)
+
+
+class TestMeasureLegsBatched(unittest.TestCase):
+    """The batched sweep's bookkeeping: resume, GPU shards and what a sweep may answer."""
+
+    def _measure(self, leg, **kwargs):
+        with patch.object(hl, "build_candidate_overlay", return_value=("base", "cand")), \
+             patch.object(hl, "assert_legs_differ"), patch.object(hl, "_run_leg", side_effect=leg):
+            return hl.measure_legs("/fixture", {}, **kwargs)
+
+    def test_done_buckets_are_returned_untouched_and_only_new_ones_are_emitted(self):
+        calls, emitted = [], []
+
+        def leg(task, overlay, mode, **kw):
+            if mode == "list":
+                return {"sigs": ["a", "b", "done"]}
+            calls.append((overlay, list(kw["sigs"])))
+            return {"cases": [{"sig": s, "ms": 2.0 if overlay == "base" else 1.0} for s in kw["sigs"]]}
+        done = {"done": {"sig": "done", "speedup": 3.0, "process_mode": "batched"}}
+        per = self._measure(leg, on_bucket=emitted.append, done=done)
+        self.assertEqual(calls, [("base", ["a", "b"]), ("cand", ["a", "b"])])
+        self.assertEqual([r["sig"] for r in per], ["a", "b", "done"])
+        self.assertEqual(per[2]["speedup"], 3.0)
+        self.assertEqual([r["sig"] for r in emitted], ["a", "b"])
+
+    def test_a_bucket_done_in_another_process_mode_is_measured_again(self):
+        seen = []
+
+        def leg(task, overlay, mode, **kw):
+            if mode == "list":
+                return {"sigs": ["a"]}
+            seen.append(overlay)
+            return {"cases": [{"sig": "a", "ms": 1.0}]}
+        per = self._measure(leg, max_reps=1, done={"a": {"sig": "a", "process_mode": "fresh"}})
+        self.assertEqual(seen, ["base", "cand"])
+        self.assertEqual(per[0]["process_mode"], "batched")
+
+    def test_gpu_shards_split_the_buckets_and_keep_each_pair_on_one_device(self):
+        seen = []
+
+        def leg(task, overlay, mode, **kw):
+            if mode == "list":
+                return {"sigs": ["a", "b", "c"]}
+            seen.append((kw["env_extra"]["HIP_VISIBLE_DEVICES"], overlay, tuple(kw["sigs"])))
+            return {"cases": [{"sig": s, "ms": 1.0} for s in kw["sigs"]]}
+        per = self._measure(leg, gpus=[0, 1], max_reps=1)
+        self.assertEqual([r["sig"] for r in per], ["a", "b", "c"])
+        self.assertEqual(sorted(seen), [("0", "base", ("a", "c")), ("0", "cand", ("a", "c")),
+                                        ("1", "base", ("b",)), ("1", "cand", ("b",))])
+
+    def test_a_failing_gpu_shard_reaches_the_caller_in_both_modes(self):
+        def leg(task, overlay, mode, **kw):
+            if mode == "list":
+                return {"sigs": ["a", "b"]}
+            if kw["env_extra"]["HIP_VISIBLE_DEVICES"] == "1":
+                raise RuntimeError("worker failed")
+            return {"cases": [{"sig": s, "ms": 1.0} for s in kw.get("sigs") or [kw["bucket"]]]}
+        for mode in ("batched", "fresh"):
+            with self.subTest(mode=mode), self.assertRaisesRegex(RuntimeError, "worker failed"):
+                self._measure(leg, gpus=[0, 1], max_reps=1, process_mode=mode)
+
+    def test_a_sweep_that_duplicates_or_adds_a_case_is_refused(self):
+        for cases in ([{"sig": "a", "ms": 1.0}] * 2, [{"sig": "a", "ms": 1.0}, {"sig": "z", "ms": 1.0}]):
+            with self.subTest(cases=cases):
+                def leg(task, overlay, mode, **kw):
+                    return {"sigs": ["a"]} if mode == "list" else {"cases": cases}
+                with self.assertRaisesRegex(RuntimeError, "duplicated or added"):
+                    self._measure(leg)
+
+    def test_duplicate_listed_sigs_are_refused(self):
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            self._measure(lambda task, overlay, mode, **kw: {"sigs": ["a", "a"]})
+
+    def test_a_case_missing_on_one_leg_is_skipped_and_an_untimed_one_reads_null(self):
+        def leg(task, overlay, mode, **kw):
+            if mode == "list":
+                return {"sigs": ["gone", "untimed", "ok"]}
+            rows = [{"sig": "untimed", "ms": None, "error": "RuntimeError: boom"},
+                    {"sig": "ok", "ms": 2.0 if overlay == "base" else 1.0}]
+            if overlay == "base":
+                rows.append({"sig": "gone", "ms": 1.0})
+            return {"cases": rows}
+        per = self._measure(leg)
+        self.assertEqual([r["sig"] for r in per], ["untimed", "ok"])
+        self.assertIsNone(per[0]["speedup"])
+        self.assertEqual(per[0]["reps"], 1)                    # an untimeable bucket buys no more pairs
+        self.assertEqual(per[1]["speedup"], 2.0)
 
 
 class TestBaselineRandomOutputs(_LegTestCase):

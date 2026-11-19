@@ -164,6 +164,9 @@ Each case has a unique `sig`, observed `regime` and finite nonnegative
 `effective_calls` on one consistent basis. Aggregate as
 `sum(baseline_ms * calls) / sum(candidate_ms * calls)`; no fixed-load fallback
 or weighted geometric mean. A near-1x unmodified extraction is expected.
+`measure_legs` defaults to one timing process per leg per round streaming every
+shape; author metadata-only `timing_specs` plus a one-shape `make_timing_case`
+so no process preallocates every shape's tensors.
 
 ## 5. Validate and deliver
 

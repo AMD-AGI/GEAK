@@ -48,8 +48,12 @@ negative-control checks in separate untimed diagnostic processes.
 
 - `call(args)` invokes the declared entry under the ambient overlay and returns
   the complete output, including auxiliary tensors and in-place outputs.
-- `timing_cases(h, meta)` yields `{sig, regime, args}` and optional `m` for every
-  declared timing case. Construct actual operands before the timed call.
+- `timing_specs(h, meta)` returns metadata only (`{sig, regime}` and optional `m`)
+  for every declared timing case, and `make_timing_case(spec)` builds ONE case's
+  `{sig, regime, m, args}` with actual operands before the timed call. The leg
+  runner lists sigs without allocating anything and builds one shape at a time.
+  A task with only `timing_cases(h, meta)` still works, but every requested
+  shape's operands are then built up front in each timing process.
 - `random_shapes(h, meta)` yields `{sig, regime, make_inputs}`; the factory
   accepts a seeded torch Generator and varies values at the fixed served shapes.
   Preserve required routing semantics and the observed work/access pattern; reuse
@@ -196,7 +200,13 @@ The shared leg runner already performs this isolation.
    Preserve the mutation and logs, restore pristine source, then rerun final
    normal checks before recording completion.
 7. `h.measure_legs(task, meta)` measures interleaved baseline/candidate subprocess
-   legs with the same mode and shared timer. Use
+   legs with the same mode and shared timer. By default it starts one baseline
+   process and one candidate process per round (and per GPU shard with `gpus=`),
+   each streaming all pending shapes; later rounds reverse side and shape order and
+   only re-time undecided shapes. Baseline and candidate never share an interpreter.
+   `process_mode="fresh"` restarts for every (shape, leg) -- keep it for A/A checks
+   of state carried between shapes (e.g. an autotune cache keyed without the varying
+   dimension), not as the routine path. Use
    `h.serving_weighted_speedup(per_case, meta)` for the observed-call aggregate.
    Print the aggregate as `GEAK_WEIGHTED_SPEEDUP=<value>` for downstream optimization;
    retain per-case timings and unweighted geomean as diagnostics.
