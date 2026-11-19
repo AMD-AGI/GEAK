@@ -2,8 +2,8 @@
 
 Take an **explicit-tile Gluon** kernel to peak on AMD CDNA — gfx950 (CDNA4, MI350X/MI355X) as the main
 line, gfx942 (CDNA3, MI300X/MI325X) as the downgrade. The method is not a decision tree: you **measure the
-budget, measure where the cycles go, and close the largest gap you can attribute** — one change per round,
-verified.
+budget, measure where the cycles go, and close the largest gap you can attribute** — one change per step, the best step
+per direction verified.
 
 This is a **deep-dig back end**. It does not tune plain source and it does not search in breadth. It starts
 from a measured, sha-pinned bundle — a `plain_champion` produced by the plain-Triton front end

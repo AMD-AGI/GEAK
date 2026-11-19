@@ -109,7 +109,7 @@ from measurement.
 deterministic — parallel arms measure the same layouts and share the same bug — and the climb is
 stateful: what to try next comes from the IR and profile of the anchor just built. So the workflow's
 `gluon_engineer` (the role the method files call the deep_engineer) works one tagged track workspace,
-one attributable round after another; bounded measurements (a timing, a knob probe, an anomaly check)
+one attributable step after another (a direction searches its target and returns its best step); bounded measurements (a timing, a knob probe, an anomaly check)
 are its own, under `gpu_lock.sh` (`references/method/records.md ## 9. Experiment / hypothesis-test
 contract`).
 
@@ -435,8 +435,13 @@ effects, and a screen pass needs a delta beyond the measured noise band and the 
 ### 6. Climb — one coupled layer per round, depth only
 
 ```text
-per round:  profile -> analyze -> edit -> verify.   ONE attributable change, ONE layer, vs champion_ms.
+per round:  profile -> analyze -> edit -> verify.   ONE layer per direction, vs champion_ms.
+per step:   ONE attributable change -> correctness -> screen; the direction returns its best step.
 ```
+
+Before a direction is recorded negative, the **ceiling probe** (remove or stub the work it targets, time
+it) says whether the mechanism or the axis failed: a failed mechanism on an axis with headroom leaves the
+axis open (`references/method/climb.md ## Before a negative: the ceiling probe`).
 
 **No sweep, no branch** — both are the front end's. Preserve the inherited config and structure; a suspect
 one is a `resweep_request` / `structure_suspect` with evidence. The layer order is the Backbone in

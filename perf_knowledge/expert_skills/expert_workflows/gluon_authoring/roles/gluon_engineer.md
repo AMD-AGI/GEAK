@@ -53,24 +53,59 @@ field names the command you ran, its exit code and where its output is.
   `bash $WORKFLOW_DIR/scripts/gpu_lock.sh $GPU_ID <cmd>`. Never set `HIP_VISIBLE_DEVICES`. Exit 86 /
   `GEAK_SOURCE_INVALID` means discard that invocation's output.
 - If `ROUND_DEADLINE_EPOCH` is set, return before it (`date +%s`), with what you have.
-- Correctness first: run the COMMANDMENT correctness command on the candidate and report
-  `correctness`; scan for non-finite outputs (a tolerance check cannot fail on NaN). Do not run the
-  COMMANDMENT's full benchmark yourself: your screen is G4, and `verify_engineer` measures the
-  candidate with the frozen commands right after you return.
+- Correctness first: run the COMMANDMENT correctness command on every step you time and on the
+  candidate you return, and report `correctness`; scan for non-finite outputs (a tolerance check
+  cannot fail on NaN). Your timings are screening (see `## Searching inside a direction`);
+  `verify_engineer` measures the returned candidate with the frozen commands right after you return.
 - Two comparators on every number: `CHAMPION_VS_BASELINE` converts a speedup vs the frozen baseline
   into one vs the champion. `vs_anchor` alone is never a result.
 - No config sweep, no branch, no `num_warps` change on a transcribed kernel: a suspect config is a
   `resweep_request` and a suspect structure is a `structure_suspect` (path to the evidence) in your
   return; tech_lead may turn it into a deep_explore direction, and the workflow carries it to the
-  close. A tile or warp re-cut happens only inside a deep_explore direction.
+  close. A tile or warp re-cut happens only inside a deep_explore direction. A second code path chosen
+  by problem size is written only when `DIRECTION` plans one (a shape-regime direction), with
+  `edge_shapes` on both sides of the switch point.
 - **`METHOD_STRICTNESS=advisory`** (recover, climb, integrate) relaxes the method, never the
   measurement. The reading list is a recommendation (record what you used in `references_read`);
   ATT is recommended where the claim is about issue order or overlap; a paired direction owes only
-  `pair_screen.outcome`; a direction may bundle related changes (say which piece did what in
-  `round.md` when you know); and shape-regime specialization (a code path chosen by problem size),
-  a launch-parameter or tile change, or a small screened sweep is an ordinary direction. What does
+  `pair_screen.outcome`; a step may bundle related changes (say which piece did what in
+  `round.md` when you know); and a launch-parameter or tile change, or a small screened sweep, is
+  an ordinary direction. What does
   not relax: COMMANDMENT correctness on every case, `edge_shapes` whenever masks, indexing, a tile or
-  loop bounds change, G3, G4, the round's `gluon_profile.py` re-profile, your own workspace, Gluon.
+  loop bounds change, and on a win or enabling candidate G3, G4 and the `gluon_profile.py`
+  re-profile; your own workspace; Gluon.
+
+## Searching inside a direction (recover, climb)
+
+Your job is the fastest correct candidate the direction's target allows, not a test of the one
+mechanism the plan named. The plan's mechanism is the first thing to try.
+
+- **Steps.** A step is one change you can attribute (so the next step knows what moved), then
+  COMMANDMENT correctness, then a timing on your `GPU_ID`: the COMMANDMENT's quick BENCHMARK
+  command run in your workspace (`cd "$WS"`), or `ab_bench.py` with your adapter (`--permute` once the delta
+  is near the noise band). Commit every step in your workspace; keep the best one tagged
+  `ROUND_TAG` and its `best_patch.diff` current from the moment it beats `TRACK_START`, so a
+  timeout still returns it. Spend the direction's time on steps; the gates below run once, on the
+  candidate you return.
+- **Variations.** When a step moves the right number but not enough, vary it (depth, width, order,
+  which operand) before you drop it. Before you edit, decide how many steps the mechanism gets:
+  a few for a knob-shaped one, more for a structural one (`climb.md ## A direction matures over rounds`).
+- **Pivot.** After about 8 steps with no gain on the planned mechanism, take another mechanism on
+  the same target that the evidence supports (`climb.md ## Fallback ladder`, rung 1, and
+  `## Levers that are not a layer's headline`). The `layer` you return is the one the returned
+  candidate changes. If the gain came from the pivot, say so in `pivot` (planned -> taken, one line).
+- **Before a `negative`: the ceiling probe** (`climb.md ## Before a negative: the ceiling probe`).
+  Remove or stub the work the direction targets (the rest of the kernel unchanged; the output may
+  be wrong, it is a timing, never a candidate), time it against `TRACK_START`, and return
+  `ceiling`: `command`, `exit_code`, `removed`, `headroom_pct`, `output_path` and `verdict`
+  (`headroom_remains` when removing the work buys more than the noise band: the mechanism failed,
+  not the axis; `no_headroom` otherwise). If no part can be removed in isolation,
+  `verdict: "not_applicable"` with the `reason`.
+- **What you owe.** A `win` or `enabling` candidate owes every gate below on that candidate. A
+  climb `negative` owes `layer`, `ceiling`, `lesson` (with the condition it depends on) and, if it has
+  one, the best step as `patch_file` / `track_tag` (verify measures it; if verify puts it above the
+  kept line you are asked for the gates of a win on that same tag, so keep its artifacts).
+  Return `steps_tried`.
 
 ## The gates (field names are what you return)
 
@@ -158,15 +193,17 @@ the gate.
 
 ## PHASE=climb
 
-`climb.md`: re-profile the candidate with `gluon_profile.py ... --compare LAST_PROFILE` into
-`OUTPUT_DIR/profile` and return it as `profile_dir`, the exact call as `profile_command`; work the
-coupled layer `DIRECTION.layer` names (if the evidence contradicts it, say so in `round.md` and take the
-layer the evidence supports; return the one you worked), read that layer's references (listed in your
-prompt; open them before editing), make one attributable change, and land it on three
-pieces of evidence: budget consistent, profile delta (`compare.md`), IR/asm signal. Return `layer`, `hypothesis`, the
-gates, `claim` (`win` | `enabling` | `negative`) and `enabling_step: true` only for a change that buys
-headroom a later layer spends (`climb.md ## A direction matures over rounds`). Inline asm needs its
-gate (`references/pitfalls/negative-patterns.md`): `inline_asm: true` plus `disassembly_ref`.
+`climb.md`: start from `LAST_PROFILE` (the kept line's profile) and the target `DIRECTION` names;
+work the coupled layer `DIRECTION.layer` names (if the evidence contradicts it, say so in `round.md` and
+take the layer the evidence supports; return the one the candidate changes), read that layer's
+references (listed in your prompt; open them before editing), and search (`## Searching inside a
+direction`). Land the candidate you return on three pieces of evidence: budget consistent, profile
+delta, IR/asm signal — re-profile it with `gluon_profile.py ... --compare LAST_PROFILE` into
+`OUTPUT_DIR/profile`, return that as `profile_dir` and the exact call as `profile_command`. Return
+`layer`, `hypothesis`, the gates, `claim` (`win` | `enabling` | `negative`) and `enabling_step: true`
+only for a change that buys headroom a later layer spends (`climb.md ## A direction matures over
+rounds`). Inline asm needs its gate (`references/pitfalls/negative-patterns.md`): `inline_asm: true`
+plus `disassembly_ref`.
 
 - **Paired direction** (`DIRECTION.paired: true`): the change is a prerequisite plus the lever it makes
   legal or profitable (e.g. a second LDS buffer for one operand + moving the barrier it frees). Commit
@@ -177,8 +214,8 @@ gate (`references/pitfalls/negative-patterns.md`): `inline_asm: true` plus `disa
   A prerequisite that wins alone is a result, and the lever's failure on top of it is the lesson.
 - **deep_explore** (`DIRECTION.specialty`): broad authority over one coherent Gluon rewrite (re-tile,
   layout, pipeline structure) with your own measure → profile → rewrite loop toward `DIRECTION.prompt`'s
-  target; it runs alone in its round. The returned candidate still owes every climb gate, with `layer`
-  the primary layer it changes. A re-tile owes its occupancy arithmetic: `probe.py` on the old and new
+  target; it runs alone in its round. A returned win or enabling candidate owes every climb gate, with
+  `layer` the primary layer it changes; a negative owes the ceiling probe like any climb direction. A re-tile owes its occupancy arithmetic: `probe.py` on the old and new
   tile (both limiters, workgroups per CU) in `round.md`, and `edge_shapes` (the tile moved every mask).
 
 ## PHASE=integrate
@@ -228,6 +265,10 @@ Return (`conclusion: "no_improvement"` with no tag when nothing beats `BEST_INDI
  "edge_shapes": {"command": "python3 $SKILL/scripts/edge_shapes.py ...", "exit_code": 0, "json_path": "...", "baseline": "...", "shared_limitation": ""},
  "pair_screen": {"prerequisite_json": "...", "prerequisite_delta_pct": 0.0, "pair_json": "...", "pair_delta_pct": 0.0, "outcome": "pair|prerequisite|neither"},
  "inline_asm": false, "disassembly_ref": "", "enabling_step": false, "claim": "win",
+ "steps_tried": 9, "pivot": "planned <mechanism> -> taken <mechanism>",
+ "ceiling": {"command": "...", "exit_code": 0, "removed": "...", "headroom_pct": 6.5, "output_path": "...",
+             "verdict": "headroom_remains|no_headroom|not_applicable", "reason": ""},
  "lesson": "...", "resweep_request": "", "structure_suspect": "", "notes": "..."}
 ```
-Leave out the gate objects a stage does not use; never fill one you did not run.
+Leave out the gate objects a stage or claim does not use (a climb `negative` returns `ceiling` and no
+profile / G3 / G4 / ATT / pair objects); never fill one you did not run.

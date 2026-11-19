@@ -24,7 +24,9 @@ names the layer, the reading behind the edit, and the evidence the round owes.
 ## Stage-Climb: one search kind, and it is depth
 
 ```text
-per round:  profile -> analyze -> edit -> verify.  ONE attributable change, ONE layer.
+per step:       analyze -> edit (ONE attributable change) -> correctness -> screen timing.
+per direction:  steps on one target until the best step stops improving; the best step is the
+                candidate, re-profiled and gated once, then verified.
             this IS `## 3. The round loop`, and it is the ONLY search this pack runs.
 ```
 
@@ -39,9 +41,10 @@ coupled chain must be one paired direction instead of two, is [`orchestration.md
 while it climbs explicit layout, memory-path, pipeline, and register controls.
 
 *Under the gluon_authoring expert workflow with `method_strictness=advisory`, a small screened
-launch/tile change and a shape-regime code path (chosen by problem size) are ordinary directions,
-provided every case verifies and the boundary-shape check passes; the default (`strict`) keeps the
-rule above.*
+launch/tile change is an ordinary direction, provided every case verifies and the boundary-shape check
+passes; the default (`strict`) keeps the rule above. In both modes a shape-regime code path (a second
+path chosen by problem size) is not an engineer's improvisation but a direction tech_lead plans
+(`## Levers that are not a layer's headline`).*
 
 **WHICH layer, and in what order, is `## Layer Backbone` below** — what each layer decides, the reference
 page that owns its mechanisms, the gating order, and the three pieces of evidence a layer is landed on.
@@ -221,8 +224,10 @@ bound-class reasoning you already do unaided; **these you do not**. Deep detail:
 
 ## 3. The round loop
 
-Each round: **profile → analyze → edit → verify.** One change you can attribute. If you cannot say what
-you expect to move and which number will show it, you are not ready to edit.
+Each round: **profile → analyze → edit → verify.** Inside a direction the edit is a sequence of steps,
+each one change you can attribute, each checked for correctness and screened; the best step is what the
+round verifies. If you cannot say what you expect a step to move and which number will show it, you are
+not ready to edit.
 
 **Every decision this skill makes is profile-guided.** The required instrument set is
 [`profile.md`](profile.md) `### 3.1 Required evidence — the four dials, every round`, and the four groups
@@ -335,13 +340,51 @@ sanction, a build/version switch, an oracle/data/repo gate, a wrong result with 
 continue any other open work. Run the cheapest falsifying probe **first**: "assumed infeasible" is not an
 acceptable terminal state ([`index.md`](index.md) `## Non-Negotiable Rules`).
 
+## Before a negative: the ceiling probe
+
+A failed mechanism says nothing about its target. "The prescribed change lost, so this resource is not
+the bound" is the most expensive sentence in a climb: it closes an axis that may still hold the next win,
+and later rounds read the closed axis from HISTORY and never return to it.
+
+So, before a direction is recorded `negative`, **bound the target**: remove or stub the work it targets
+(the loads, the conversion, the barrier, the epilogue pass, the metadata path; everything else
+unchanged), time that variant against the kept line, and read the difference.
+
+| ceiling | what it means | record |
+| --- | --- | --- |
+| removing the work buys more than the noise band | the target costs time; this mechanism did not recover it | `headroom_remains`: the axis stays open, the lesson names the mechanism that failed |
+| removing the work buys nothing | the target is hidden under something else | `no_headroom`: the axis is closed **for this body** (`## A verdict belongs to the body that measured it`) |
+
+The stub is a timing instrument and never a candidate: its output may be wrong, and it is never tagged.
+When the headroom is real, split it further before choosing the next mechanism: remove half of the
+target's work at a time (one operand of two, one of several loads), and the part that carries the
+headroom is usually where the cost hides — work that every warp repeats, a load that waits on another,
+an ordering that serializes. When nothing can be removed in isolation, say so; the ceiling is
+`not_applicable` with the reason, and the negative carries less weight.
+
+## Levers that are not a layer's headline
+
+Each layer page leads with its main mechanism. These sit between layers and are the ones a planned
+search most often never tries:
+
+| lever | where it lives | the reading that points to it |
+| --- | --- | --- |
+| statement and issue order inside the loop: which load is issued first, where a conversion or a scale multiply sits relative to the matrix ops | layer 4 (source-level reordering into the dependency shadow) / 4+ | stall hotspots on a wait whose producer could have been issued earlier; matrix-op gaps that line up with a dependent VALU chain |
+| work every warp repeats: a value loaded or computed by all warps when one would do, because the layout replicates it | layer 3 / 2 (a layout that gives each warp only what it uses) | load or VALU count per tile that scales with the warp count rather than with the data |
+| per-load cache policy | layer 2 | streamed data evicting reused data, or the reverse (L2 hit rate against the reuse the access pattern implies) |
+| shape-regime specialization: a second code path, chosen by problem size, for a regime the main path serves badly | planned by tech_lead as its own direction; owes `edge_shapes` on both sides of the switch point | per-case speedups that split by size class: one regime gains, another is flat or loses |
+
+None of these is a recipe. Each is a place to look when the headline mechanism of a layer is exhausted
+and the ceiling probe says the target still has headroom.
+
 ## Self-monitoring
 
 Track these yourself; they tell you which rung of the ladder you are on.
 
 | signal | what it means | response |
 | --- | --- | --- |
-| **stall** — several steps, no net improvement | the mechanism is not moving the bucket it targets | rung 1: switch mechanism |
+| **stall** — several steps, no net improvement | the mechanism is not moving the bucket it targets | rung 1: switch mechanism (about 8 steps on the planned one, then pivot within the direction) |
+| **about to record a negative** | a mechanism failed; the target is unmeasured | run the ceiling probe first |
 | **soft ceiling** — ~3 profiles within 1% | this layer has converged | rung 2: close it with evidence, move on |
 | **crash-loop** — same error ≥3× | the edit strategy is wrong, not the lever | roll back, re-read the source, change strategy |
 | **resource cliff** — a large regression at one config step | usually register/LDS pressure crossing a threshold | retry once with a relief step before recording negative |

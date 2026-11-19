@@ -160,7 +160,8 @@ const STAGE_REFS = {
     ['references/tile-programming/pipeline.md', 'the hand-written pipeline order (lost_pipeline)'],
   ],
   climb: [
-    ['references/method/climb.md', '## Layer Backbone; ## 2. Reversed-intuition traps; ## 3. The round loop'],
+    ['references/method/climb.md', '## Layer Backbone; ## 2. Reversed-intuition traps; ## 3. The round loop; ' +
+      '## Before a negative: the ceiling probe; ## Levers that are not a layer\'s headline'],
     ['references/method/profile.md', '## 3.1 Required evidence — the four dials, every round'],
     ['references/method/benchmark-hygiene.md', '## The binding rule: GEAK\'s frozen task contract owns acceptance'],
   ],
@@ -214,7 +215,8 @@ const FOCUS_LAYERS = String(A.focus_layers || '').split(',').map(x => x.trim()).
 // How much of the METHOD the code enforces in recover/climb/integrate. strict (default): the reading list,
 // ATT for the pipeline layers and both pair screens are gates, and the role's one-change / no-branch
 // rules hold. advisory: those become recommendations the direction records, a direction may bundle
-// related changes, and shape-regime specialization or a launch/tile change is an ordinary direction.
+// related changes, and a launch/tile change is an ordinary direction. (Shape-regime specialization is a
+// planned direction in both modes; a climb `negative` owes ceiling + lesson, not the gates, in both.)
 // Correctness and measurement never relax: verify, edge_shapes, G3, G4, the re-profile, isolation.
 const METHOD_STRICTNESS = String(A.method_strictness || 'strict').trim().toLowerCase();
 if (!['strict', 'advisory'].includes(METHOD_STRICTNESS)) {
@@ -397,6 +399,12 @@ const ROUND_SCHEMA = obj({
     pair_json: { type: 'string' }, pair_delta_pct: { type: ['number', 'null'] },
     outcome: { type: 'string', enum: ['pair', 'prerequisite', 'neither'] },
   }),
+  ceiling: obj({
+    command: { type: 'string' }, exit_code: { type: ['number', 'null'] }, output_path: { type: 'string' },
+    removed: { type: 'string' }, headroom_pct: { type: ['number', 'null'] },
+    verdict: { type: 'string', enum: ['headroom_remains', 'no_headroom', 'not_applicable'] }, reason: { type: 'string' },
+  }),
+  steps_tried: { type: 'number' }, pivot: { type: 'string' },
   inline_asm: { type: 'boolean' }, disassembly_ref: { type: 'string' },
   enabling_step: { type: 'boolean' }, claim: { type: 'string' }, lesson: { type: 'string' },
   resweep_request: { type: 'string' }, structure_suspect: { type: 'string' }, notes: { type: 'string' },
@@ -539,9 +547,28 @@ function attMissing(a, r) {
   if (a.status === 'unavailable') return (a.reason || '').trim().length >= 20 ? [] : ['att.reason (why ATT is unavailable, e.g. capture.json att_state=decoder_absent)'];
   return ['att.status'];
 }
+// The ceiling probe a climb direction runs before it claims `negative` (climb.md ## Before a negative:
+// the ceiling probe): the work the direction targets removed or stubbed, the rest kept, timed against
+// TRACK_START. It says whether the axis had anything to give, which the failed mechanism cannot.
+function ceilingMissing(c) {
+  if (!c || typeof c !== 'object') return ['ceiling (the targeted work removed or stubbed and timed vs TRACK_START, before claiming negative)'];
+  if (c.verdict === 'not_applicable') return (c.reason || '').trim().length >= 20 ? [] : ['ceiling.reason (why no part of the kernel can be removed to bound this axis)'];
+  const out = [];
+  if (!['headroom_remains', 'no_headroom'].includes(c.verdict)) out.push('ceiling.verdict (headroom_remains | no_headroom | not_applicable)');
+  if (!has(c.command) || !isNum(c.exit_code)) out.push('ceiling.command and exit_code (the timing of the stubbed variant)');
+  if (!has(c.removed)) out.push('ceiling.removed (what the stub takes out)');
+  if (!isNum(c.headroom_pct)) out.push('ceiling.headroom_pct (stubbed vs TRACK_START)');
+  if (!has(c.output_path)) out.push('ceiling.output_path');
+  return out;
+}
+// A climb direction whose search found nothing better owes its search record, not the gates of a
+// candidate nobody keeps: ceiling + lesson. ctx.full asks for the full gates again (a `negative` that
+// verify measured above the kept line is a candidate after all).
+const lightNegative = (stage, r, ctx) => stage === 'climb' && !!r && r.claim === 'negative' && !(ctx && ctx.full);
 function missingEvidence(stage, r, ctx) {
   if (!r) return ['the whole return'];
   const out = [];
+  const light = lightNegative(stage, r, ctx);
   const layer = stage === 'recover' ? (SUSPECT_LAYER[r.suspect] || r.layer) : r.layer;
   if (r.stage !== stage) out.push(`stage=${stage}`);
   out.push(...readsCover(stage, stage === 'climb' || stage === 'recover' ? layer : null, r.references_read));
@@ -568,15 +595,20 @@ function missingEvidence(stage, r, ctx) {
   }
   if (stage === 'climb') {
     if (!LAYERS.includes(String(r.layer))) out.push(`layer (one of ${LAYERS.join(', ')})`);
-    if (!has(r.profile_dir)) out.push('profile_dir (this round\'s re-profile)');
-    if (!/gluon_profile\.py/.test(r.profile_command || '')) out.push('profile_command (the gluon_profile.py call behind profile_dir, with --compare LAST_PROFILE)');
-    out.push(...g3Missing(r.g3_occupancy), ...g4Missing(r.g4_screen));
-    if (PIPELINE_LAYERS.has(String(r.layer)) && !ADVISORY) out.push(...attMissing(r.att, r));
-    if (r.inline_asm && !has(r.disassembly_ref)) out.push('disassembly_ref (inline asm is accepted on the disassembly)');
+    if (light) {
+      out.push(...ceilingMissing(r.ceiling));
+      if (!has(r.lesson)) out.push('lesson (what the search showed, with the condition it depends on)');
+    } else {
+      if (!has(r.profile_dir)) out.push('profile_dir (this round\'s re-profile)');
+      if (!/gluon_profile\.py/.test(r.profile_command || '')) out.push('profile_command (the gluon_profile.py call behind profile_dir, with --compare LAST_PROFILE)');
+      out.push(...g3Missing(r.g3_occupancy), ...g4Missing(r.g4_screen));
+      if (PIPELINE_LAYERS.has(String(r.layer)) && !ADVISORY) out.push(...attMissing(r.att, r));
+      if (r.inline_asm && !has(r.disassembly_ref)) out.push('disassembly_ref (inline asm is accepted on the disassembly)');
+    }
     if (ctx.entry === 'incumbent' && r.parity_gate && r.parity_gate.mode === 'gate') out.push('parity_gate.mode=diagnostic (an incumbent has no parity gate)');
   }
   // A paired direction (a prerequisite + the lever it makes legal) shows that the pair, not one half, is the win.
-  if (!r.no_change && ((ctx.direction && ctx.direction.paired) || r.paired === true)) out.push(...pairMissing(r.pair_screen));
+  if (!r.no_change && !light && ((ctx.direction && ctx.direction.paired) || r.paired === true)) out.push(...pairMissing(r.pair_screen));
   return out;
 }
 // Boundary-shape correctness (edge_shapes.py): required where masks are authored (transcribe,
@@ -858,9 +890,11 @@ function evidenceTail(stg, d) {
   if (stg === 'author') lines.push('- correctness of the first Gluon kernel; g3_occupancy: probe.py measure, BOTH limiters', '- edge_shapes: edge_shapes.py on the kernel (exit 3 = boundary shapes it does not handle; say which in shared_limitation)');
   if (stg === 'recover' || stg === 'climb') lines.push('- edge_shapes (when the change touches masks, index arithmetic, tile or loop bounds): edge_shapes.py with TRACK_START as --baseline; exit 1 rejects the candidate');
   if (stg === 'recover') lines.push('- parity_gate: parity_gate.py run as the gate (mode=gate), exit code, ratio, suspects', '- for a repayment: suspect, g3_occupancy, g4_screen (ab_bench.py --permute --json), and ATT when the suspect is lost_pipeline', '- a gate-only direction (nothing left to repay or nothing attributable) sets no_change=true');
-  if (stg === 'climb') lines.push(`- layer (one of ${LAYERS.join(', ')}), profile_dir + profile_command (gluon_profile.py ... --compare LAST_PROFILE)`, '- g3_occupancy: probe.py measure, BOTH limiters (a missing one as null + missing_reason)', '- g4_screen: ab_bench.py --module <adapter> --permute --json', ADVISORY ? `- att (recommended when the claim is about issue order or overlap): ${ATT_CMD}` : `- att for layers ${[...PIPELINE_LAYERS].join('/')}: ${ATT_CMD} with state ok, or status=unavailable with the reason`, '- inline asm rounds: disassembly_ref');
+  if (stg === 'climb') lines.push('- search this direction for its fastest correct candidate (role: ## Searching inside a direction); return the best step, `steps_tried`, and `pivot` when the win came from another mechanism than the one planned',
+    `- claim win | enabling (the best step beats TRACK_START, or buys headroom a later layer spends) -- gates on THAT candidate: layer (one of ${LAYERS.join(', ')}), profile_dir + profile_command (gluon_profile.py ... --compare LAST_PROFILE)`, '  - g3_occupancy: probe.py measure, BOTH limiters (a missing one as null + missing_reason)', '  - g4_screen: ab_bench.py --module <adapter> --permute --json', ADVISORY ? `  - att (recommended when the claim is about issue order or overlap): ${ATT_CMD}` : `  - att for layers ${[...PIPELINE_LAYERS].join('/')}: ${ATT_CMD} with state ok, or status=unavailable with the reason`, '  - inline asm rounds: disassembly_ref',
+    '- claim negative (no step beat TRACK_START): layer, `ceiling` (the targeted work removed or stubbed, timed vs TRACK_START: verdict headroom_remains | no_headroom) and `lesson`; the gates above are not owed, but if verify measures your returned candidate above the kept line you will be asked for them');
   if (d && d.paired) lines.push(ADVISORY ? '- pair_screen.outcome: pair | prerequisite | neither (the half the candidate is; the two screens are recommended)'
-    : '- pair_screen: ab_bench.py --permute of the prerequisite alone and of the pair, each vs TRACK_START (prerequisite_json, prerequisite_delta_pct, pair_json, pair_delta_pct)');
+    : '- pair_screen (a win / enabling candidate): ab_bench.py --permute of the prerequisite alone and of the pair, each vs TRACK_START (prerequisite_json, prerequisite_delta_pct, pair_json, pair_delta_pct)');
   if (d && d.planned) lines.push('- lesson: one line on what this direction showed, for a null or negative result too (the next plan reads it)');
   return lines.join('\n');
 }
@@ -892,37 +926,47 @@ async function runDirection(d, stg, roundInputs, engTimeout) {
     { ...inputs, ...extra }, { stage: stg, tail: tail || evidenceTail(stg, d) });
   let r = await agentT(engPrompt({}), { phase: ph, label: `gluon_engineer:${stg} ${d.id}`, schema: ROUND_SCHEMA }, engTimeout);
   const ctx = { entry: ENTRY, direction: d.planned ? d : null };
-  // Completeness, then (optionally) an independent artifact audit; each gap is sent back by name.
-  let missing = missingEvidence(stg, r, ctx);
+  // Completeness, then (optionally) an independent artifact audit; each gap is sent back by name. A
+  // light `negative` (lightNegative) is not audited: it cites no gate artifact, and nothing of it is kept.
   let audit = null;
-  for (let k = 0; ; k++) {
-    if (!missing.length && EVIDENCE_AUDIT && r && !(ADVISORY && stg === 'climb' && r.claim === 'negative')) {
-      audit = await agentT(
-        rolePrompt('evidence_auditor', pkgRole('evidence_auditor'), 'audit', 'Check that the cited evidence exists and says what the round claims.', {
-          EVIDENCE: r, STAGE: stg, GFX, SKILL, KT, OUTPUT_DIR: d.out, TRACK, ROUND_TAG: d.id,
-        }, { stage: 'audit' }),
-        { phase: ph, label: `evidence_audit ${d.id}`, effort: 'low', schema: AUDIT_SCHEMA });
-      if (audit && audit.ok === false) {
-        missing = (audit.findings || []).map(f => `audit: ${f}`);
-        if (!missing.length) missing = ['audit: failed without naming a finding; re-check every cited artifact'];
+  async function complete(cx, firstAsk, labelTag) {
+    let missing = missingEvidence(stg, r, cx);
+    for (let k = 0; ; k++) {
+      if (!missing.length && EVIDENCE_AUDIT && r && !lightNegative(stg, r, cx)) {
+        audit = await agentT(
+          rolePrompt('evidence_auditor', pkgRole('evidence_auditor'), 'audit', 'Check that the cited evidence exists and says what the round claims.', {
+            EVIDENCE: r, STAGE: stg, GFX, SKILL, KT, OUTPUT_DIR: d.out, TRACK, ROUND_TAG: d.id,
+          }, { stage: 'audit' }),
+          { phase: ph, label: `evidence_audit ${d.id}${labelTag}`, effort: 'low', schema: AUDIT_SCHEMA });
+        if (audit && audit.ok === false) {
+          missing = (audit.findings || []).map(f => `audit: ${f}`);
+          if (!missing.length) missing = ['audit: failed without naming a finding; re-check every cited artifact'];
+        }
+        if (!audit) missing = [];   // a lost audit never blocks a complete round; the gap is logged
+        if (!audit) log(`  [audit] ${d.id}: auditor returned nothing; structural check stands.`);
       }
-      if (!audit) missing = [];   // a lost audit never blocks a complete round; the gap is logged
-      if (!audit) log(`  [audit] ${d.id}: auditor returned nothing; structural check stands.`);
+      if (!missing.length || k >= Math.max(EVIDENCE_REASKS, firstAsk ? 1 : 0)) return missing;
+      log(`${d.id}: evidence incomplete (${missing.join('; ')}); asking for exactly that.`);
+      const prev = r;
+      r = await agentT(engPrompt({ PREVIOUS_RETURN: prev, MISSING: missing },
+        (k === 0 && firstAsk ? `${firstAsk} ` : '') +
+        'Complete exactly the MISSING items for the candidate already tagged ROUND_TAG in your workspace (do NOT start a ' +
+        'new edit, do NOT move ROUND_TAG unless an item requires it, and fetch it into TRACK again if you do). Return the ' +
+        'whole object with the gaps filled.'),
+      { phase: ph, label: `gluon_engineer:evidence ${d.id}${labelTag} (reask ${k + 1})`, schema: ROUND_SCHEMA }, engTimeout);
+      missing = missingEvidence(stg, r, cx);
     }
-    if (!missing.length || k >= EVIDENCE_REASKS) break;
-    log(`${d.id}: evidence incomplete (${missing.join('; ')}); asking for exactly that.`);
-    const prev = r;
-    r = await agentT(engPrompt({ PREVIOUS_RETURN: prev, MISSING: missing },
-      'Complete exactly the MISSING items for the candidate already tagged ROUND_TAG in your workspace (do NOT start a ' +
-      'new edit, do NOT move ROUND_TAG unless an item requires it, and fetch it into TRACK again if you do). Return the ' +
-      'whole object with the gaps filled.'),
-    { phase: ph, label: `gluon_engineer:evidence ${d.id} (reask ${k + 1})`, schema: ROUND_SCHEMA }, engTimeout);
-    missing = missingEvidence(stg, r, ctx);
   }
-  const row = { round: inputs.ROUND, id: d.id, stage: stg, specialty: d.specialty || '', title: d.title || '',
+  let missing = await complete(ctx, '', '');
+  const mkRow = () => ({ round: inputs.ROUND, id: d.id, stage: stg, specialty: d.specialty || '', title: d.title || '',
     layer: r ? (stg === 'recover' ? (SUSPECT_LAYER[r.suspect] || r.layer || '') : (r.layer || '')) : (d.layer || ''),
     claim: r ? r.claim || '' : '', lesson: r ? r.lesson || '' : '', status: '', vs_baseline: null, vs_champion: null,
-    kept: false, accepted: false, learned_refs: d.planned && Array.isArray(d.learned_refs) ? d.learned_refs : [] };
+    kept: false, accepted: false, learned_refs: d.planned && Array.isArray(d.learned_refs) ? d.learned_refs : [],
+    ...(r && r.ceiling && r.ceiling.verdict ? { ceiling: { verdict: r.ceiling.verdict, headroom_pct: r.ceiling.headroom_pct,
+      removed: r.ceiling.removed || '' } } : {}),
+    ...(r && has(r.pivot) ? { pivot: r.pivot } : {}),
+    ...(r && isNum(r.steps_tried) ? { steps_tried: r.steps_tried } : {}) });
+  let row = mkRow();
   if (r && has(r.resweep_request)) requests.push({ round: inputs.ROUND, id: d.id, kind: 'resweep_request', ref: r.resweep_request });
   if (r && has(r.structure_suspect)) requests.push({ round: inputs.ROUND, id: d.id, kind: 'structure_suspect', ref: r.structure_suspect });
   if (r && r.edge_shapes && r.edge_shapes.exit_code === 3 && !caveats.some(c => c.startsWith('boundary_limitation'))) {
@@ -947,6 +991,22 @@ async function runDirection(d, stg, roundInputs, engTimeout) {
       { phase: ph, label: anchorAsIs ? `verify ${d.id} (anchor as is)` : `verify ${d.id}`, schema: VERIFY_SCHEMA });
     p = ver && says(ver.correctness, 'pass') ? primary(ver) : 0;
   }
+  // Evidence follows the candidate, not the claim: a light `negative` that verify measured above the kept
+  // line could be kept or integrated, so it owes every gate of a win before it may be (same candidate,
+  // same tag; verify's number stands, since the gates do not change the code).
+  if (p > 0 && lightNegative(stg, r, ctx) && (p > trackBest || r.enabling_step === true)) {
+    log(`${d.id}: claimed negative but verified ${p.toFixed(3)}x over the kept line ${trackBest.toFixed(3)}x; asking for the full evidence.`);
+    const full = { ...ctx, full: true };
+    missing = await complete(full, `verify measured your returned candidate at ${p.toFixed(3)}x of the baseline, above the ` +
+      `kept line (${trackBest.toFixed(3)}x): it is a candidate after all. Set claim to win (or enabling) and return the gates a win owes.`, ' (promoted)');
+    row = mkRow();
+    if (missing.length) {
+      rejected++;
+      row.status = 'rejected_missing_evidence'; row.missing = missing; row.vs_baseline = p;
+      log(`${d.id} REJECTED after promotion: ${missing.join('; ')}. Track stays at ${roundInputs.TRACK_START}.`);
+      return { d, r, row, ver, p: 0, rejected: true, measured, anchorAsIs };
+    }
+  }
   row.status = ver ? String(ver.status || '') : (measured ? 'not_verified' : 'not_measured');
   row.vs_baseline = p || null;
   row.vs_champion = p ? vsChampion(p) : null;
@@ -970,6 +1030,16 @@ function planAddendum(stg) {
       'prerequisite, or when a prerequisite costs a resource (registers, LDS) the lever needs.',
     '- HISTORY.rounds lists every direction with its verified number, `claim` and `lesson`, null and rejected ones included: ' +
       'do not re-issue a lever measured null on the same body unless its lesson names what was missing, and then pair it.',
+    '- Each direction is a search, not one edit: its engineer tries several steps and returns the best (`steps_tried`; ' +
+      '`pivot` when the gain came from another mechanism than the one you named). Name the target and the mechanism you ' +
+      'expect, but the target is what the direction owns. A `negative` carries `ceiling`, the targeted work removed or ' +
+      'stubbed and timed: `headroom_remains` means the MECHANISM failed, not the axis -- the axis stays open, re-plan it ' +
+      'with a different mechanism (its lesson says what was tried); `no_headroom` closes the axis for this body.',
+    `- Levers that sit across layers and are easy to leave unplanned (${refPath('references/method/climb.md')} ## Levers ` +
+      'that are not a layer\'s headline): statement and issue order inside the loop (4/4+); work every warp repeats ' +
+      'because a layout replicates it (3/2); per-load cache policy (2); and shape-regime specialization -- a second code ' +
+      'path chosen by problem size for a regime the main path serves badly -- planned as its own direction ' +
+      '(specialty algorithm, `layer` of its main change), owing edge_shapes on both sides of the switch point.',
     '- A verdict holds for the body it was measured on. When a kept change moves the binding occupancy limiter, the ' +
       'register budget or the bottleneck class (compare.md), re-issue the directions HISTORY marked rival or null whose ' +
       'lesson depended on what moved; a rival of one kept line can stack on the next.',
@@ -994,9 +1064,8 @@ function planAddendum(stg) {
     ...(WORKLOAD.key ? [`- The ${WORKLOAD.key} archetype page(s) (${WORKLOAD.docs.map(refPath).join(', ')}) name this ` +
       'workload\'s regimes and levers and their gfx942 downgrades: read them before choosing.'] : []),
     ...(ADVISORY ? ['- METHOD_STRICTNESS=advisory: a direction may bundle related changes (the integrate step and verify ' +
-      'judge the result); shape-regime specialization (a code path chosen by problem size), a launch or tile ' +
-      'change and a small screened sweep are ordinary directions, provided every case verifies and edge_shapes ' +
-      'passes; deep_explore stays for ground-up rewrites.'] : []),
+      'judge the result); a launch or tile change and a small screened sweep are ordinary directions, provided ' +
+      'every case verifies and edge_shapes passes; deep_explore stays for ground-up rewrites.'] : []),
     ...(FOCUS_LAYERS.length ? [`- GUIDED RUN: this run exercises layer(s) ${FOCUS_LAYERS.join(', ')}. Each round, plan at least ` +
       'one direction on one of them whenever the profile gives it a target, and say in `reasoning` why not when it ' +
       'does not. Their gates stay as they are (inline asm needs its disassembly; a scheduling-model or ' +
@@ -1409,7 +1478,8 @@ while (!stoppedBy) {
       EVAL_DIR, ROUND: round, SKILL_DIR: WORKFLOW_DIR,
       ROUND_RESULTS: results.map(x => ({ id: x.d.id, title: x.d.title, specialty: x.d.specialty, layer: x.row.layer,
         expected: x.d.expected_speedup, claimed_screen_pct: x.r && x.r.g4_screen ? x.r.g4_screen.delta_pct : null,
-        verified: x.p, status: x.row.status, claim: x.row.claim, lesson: x.row.lesson, notes: x.r ? x.r.notes || '' : '' })),
+        verified: x.p, status: x.row.status, claim: x.row.claim, lesson: x.row.lesson, notes: x.r ? x.r.notes || '' : '',
+        ...(x.row.ceiling ? { ceiling: x.row.ceiling } : {}), ...(x.row.pivot ? { pivot: x.row.pivot } : {}) })),
       INTEGRATE: integ ? { conclusion: integ.row.claim, status: integ.row.status, verified: integ.p, combos_tried: integ.row.combos } : null,
       WINNER: winner ? { source: winner.d.id, geomean: winner.p } : null, IMPROVED: improved,
       REPROFILE_SHIFT: keep ? lastProfile : '', PRIOR_HISTORY: { insights: memory.insights, ledger: memory.ledger },

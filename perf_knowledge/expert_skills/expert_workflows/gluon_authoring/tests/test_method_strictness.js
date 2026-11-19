@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // method_strictness=advisory relaxes the METHOD in recover/climb/integrate (reading list, ATT for the
-// pipeline layers, both pair screens, audit of a negative direction, one-change / no-branch rules) and
-// never the measurement (verify, edge_shapes, G3, G4, the re-profile). strict is the default.
+// pipeline layers, both pair screens, one-change / no-branch rules) and never the measurement (verify,
+// edge_shapes, G3, G4, the re-profile of a win). strict is the default. What a climb `negative` owes
+// (ceiling + lesson, no audit) is the same in both modes: test_direction_search.js.
 'use strict';
 
 const { launch, ok, done, engineerReturn, planReturn, goodEdge } = require('./harness');
@@ -36,10 +37,8 @@ const strict = { entry_mode: 'incumbent', budget: 1 };
     ok(b.result.rounds[0].missing.some(m => /pair_screen\.outcome/.test(m)), 'but the outcome is still owed', b.result.rounds[0]);
   }
   {
-    const a = await launch(adv, (label, prompt) => /^gluon_engineer:/.test(label) ? engineerReturn(prompt, { claim: 'negative' }) : undefined, inc);
-    ok(!a.labels.some(l => /^evidence_audit/.test(l)), 'a negative direction is not audited');
     const b = await launch(adv, undefined, inc);
-    ok(b.labels.includes('evidence_audit r1_d0'), 'a claimed win still is');
+    ok(b.labels.includes('evidence_audit r1_d0'), 'a claimed win is still audited');
   }
 
   console.log('\n# 2. what advisory never relaxes');

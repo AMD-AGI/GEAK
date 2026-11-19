@@ -157,7 +157,7 @@ levers that would each pay arrive one round apart, and a lever whose halves only
 measured half at a time and closed as null. Several directions from one checkpoint find the independent
 levers in the same round, the integrate step tells which of them stack, and a paired direction keeps a
 coupled lever whole. The sequential discipline still holds inside each direction: one engineer, one
-layer, one attributable change, every gate.
+layer, one attributable change per step, every gate on the step it returns.
 
 **Bounded experiments are the deep_engineer's own work.** A timing across shapes, a knob / tile probe, a
 Tier-0 / A1–A4 anomaly check — self-contained measurements that do not advance the coupled backbone — are run

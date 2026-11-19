@@ -108,11 +108,28 @@ seen); G1 failure; transcribe/author failure; `parity_unreached`.
 | reading list (recover / climb / integrate) | gate: re-asked, then rejected | recommended; record what was used |
 | ATT on layers 1.5 / 4 / 4+ | gate | recommended where the claim is about issue order or overlap |
 | paired direction | both permuted screens + outcome | outcome only |
-| artifact audit | every direction | every direction except one that claims `negative` |
-| one change per direction; no branch / sweep; tile change only in deep_explore | role rules | a direction may bundle related changes; shape-regime code paths, launch/tile changes and small screened sweeps are ordinary directions |
-| verify, `edge_shapes`, G3, G4, the `gluon_profile.py` re-profile, isolation, Gluon, `probe_levers.py` before a version-gated construct | **always** | **always** |
+| one change per step; no branch / sweep; tile change only in deep_explore | role rules | a step may bundle related changes; launch/tile changes and small screened sweeps are ordinary directions |
+| verify, `edge_shapes`, isolation, Gluon, `probe_levers.py` before a version-gated construct; G3, G4 and the `gluon_profile.py` re-profile on every win / enabling candidate | **always** | **always** |
 
 Entry, budget, transcribe and close keep their checks in both modes.
+
+## Search inside a direction, and what a negative owes
+
+Both modes. A recover or climb direction is a search, as in kernel_lane.js's engineer: one attributable
+change per step, correctness and a screen timing per step, about 8 steps on the planned mechanism before
+a pivot to another mechanism on the same target, and the best step returned (`steps_tried`, `pivot`).
+The gates follow the candidate, not the claim:
+
+| the returned candidate | owes | audit |
+| --- | --- | --- |
+| `win` / `enabling` | every gate of the stage (re-profile, G3, G4, ATT where required, pair screen, `edge_shapes` when masks move) | yes |
+| climb `negative` | `layer`, `ceiling` (the targeted work removed or stubbed and timed vs `TRACK_START`: `headroom_remains` / `no_headroom`, or `not_applicable` with a reason), `lesson` | no |
+| a `negative` that verify measures above the kept line | promoted: every gate of a win on the same tag, asked once; rejected if still missing | yes |
+
+`ceiling` reaches the planner through HISTORY and update_memory: `headroom_remains` keeps the axis open
+for a different mechanism, `no_headroom` closes it for that body. Shape-regime specialization (a second
+code path chosen by problem size) is a direction tech_lead plans, in both modes, owing `edge_shapes` on
+both sides of the switch point.
 
 ## Workload reading
 
