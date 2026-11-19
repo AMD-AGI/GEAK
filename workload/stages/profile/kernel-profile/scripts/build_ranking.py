@@ -45,7 +45,9 @@ def kind(name):
     n = name.lower()
     if name in NON_KERNEL:
         return "non_kernel_accounting"
-    if n.startswith("memcpy") or n.startswith("memset"):
+    # __amd_rocclr_*: the HIP runtime's own blit and stream-op kernels (copyBuffer,
+    # fillBuffer, streamOpsWait/Write) -- runtime-generated, with no source to extract.
+    if n.startswith("memcpy") or n.startswith("memset") or n.startswith("__amd_rocclr_"):
         return "memory"
     if any(t in n for t in ("cross_device_reduce", "allreduce", "all_reduce", "quickreduce",
                             "allgather", "all_gather", "reduce_scatter", "nccl", "rccl")):

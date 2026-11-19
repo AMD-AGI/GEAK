@@ -328,5 +328,14 @@ class VllmProfileTest(unittest.TestCase):
         self.assertEqual(run_points.flag_value(["--x=3"], "--x"), "3")
 
 
+    def test_hip_runtime_kernels_have_no_source_to_select(self):
+        # DBO prefill on vLLM 0.33: __amd_rocclr_streamOpsWait.kd was 4.6% and was selected
+        import build_ranking
+        for name in ("__amd_rocclr_streamOpsWait.kd", "__amd_rocclr_copyBuffer.kd",
+                     "Memcpy HtoD (Host -> Device)"):
+            self.assertEqual(build_ranking.kind(name), "memory")
+        self.assertEqual(build_ranking.kind("kernel_gemm1_mxfp4_h6144_i768.kd"), "compute")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -55,7 +55,8 @@ from source_map import common_seam  # noqa: E402
 
 FAMILIES_DIR = os.path.join(STAGES, "ut", "kernel-ut", "ut_contracts", "families")
 EXCLUDE_KINDS = {
-    "memory": "device copy/memset: no kernel source to extract or edit",
+    "memory": "device copy/memset or HIP runtime blit/stream-op kernel: no kernel source "
+              "to extract or edit",
 }
 
 
