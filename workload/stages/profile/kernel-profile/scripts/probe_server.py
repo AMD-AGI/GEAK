@@ -514,12 +514,15 @@ def evidence_requested(cmd):
     if not os.path.exists(req):
         return False
     r = json.load(open(req))
-    got = os.path.join(ev, "evidence", "shapes", r["point"] + "@eager.json")
-    if not os.path.exists(got):
-        return True
-    # an earlier window may have been taken for fewer kernels (a narrower selection)
-    d = json.load(open(got))
-    return bool(set(r.get("kernels") or []) - set(d.get("requested") or d.get("kernels", {})))
+    for w in r.get("windows") or [{"point": r["point"], "kernels": r.get("kernels")}]:
+        got = os.path.join(ev, "evidence", "shapes", w["point"] + "@eager.json")
+        if not os.path.exists(got):
+            return True
+        # an earlier window may have been taken for fewer kernels (a narrower selection)
+        d = json.load(open(got))
+        if set(w.get("kernels") or []) - set(d.get("requested") or d.get("kernels", {})):
+            return True
+    return False
 
 
 def cmd_run(a, cfg):

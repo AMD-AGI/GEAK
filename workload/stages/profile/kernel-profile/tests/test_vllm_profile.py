@@ -337,5 +337,16 @@ class VllmProfileTest(unittest.TestCase):
         self.assertEqual(build_ranking.kind("kernel_gemm1_mxfp4_h6144_i768.kd"), "compute")
 
 
+    def test_eager_windows_cover_kernels_replayed_only_at_larger_batches(self):
+        import run_points
+        dec = [{"point_id": "b1"}, {"point_id": "b1b"}, {"point_id": "b2"}]
+        replayed = {"attn": ["b1", "b1b", "b2"], "oneshot_ar": ["b1", "b1b"],
+                    "moe_id_rows": ["b2"]}
+        got = run_points.eager_windows(dec, replayed, set(replayed))
+        self.assertEqual(got, [{"point": "b1", "kernels": ["attn", "oneshot_ar"]},
+                               {"point": "b2", "kernels": ["moe_id_rows"]}])
+        self.assertEqual(run_points.eager_windows(dec, replayed, {"moe_id_rows"}, {"b2"}), [])
+
+
 if __name__ == "__main__":
     unittest.main()

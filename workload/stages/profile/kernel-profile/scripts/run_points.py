@@ -357,12 +357,37 @@ def main():
     return 0 if timeline["status"] == "ok" else 1
 
 
+def eager_windows(dec, replayed, missing, taken=()):
+    """Decode points whose eager windows together launch every missing kernel: each time
+    the point that covers most of the rest, ties to the smaller batch. A kernel graph-
+    replayed only at batch 2 (vLLM DSpark: the id-rows MoE GEMMs) is absent from a batch-1
+    window. Points that already have a window (`taken`) are not reused: a second window
+    would overwrite its manifest."""
+    windows, left = [], set(missing)
+    order = [p["point_id"] for p in dec if p["point_id"] not in taken]
+    while left:
+        best = max(order, key=lambda pid: (len(left & {k for k, ps in replayed.items()
+                                                      if pid in ps}), -order.index(pid)))
+        got = sorted(k for k in left if best in replayed.get(k, []))
+        if not got:
+            break
+        windows.append({"point": best, "kernels": got})
+        left -= set(got)
+    return windows
+
+
 def eager_evidence(a, ev, plan, py, log, timeline):
-    """One decode window on the eager server, for frames and launching ops only. Its
-    census lives apart (evidence/census_eager) and never enters the ledger: under eager
+    """Decode windows on the eager server, for frames and launching ops only. Their
+    censuses live apart (evidence/census_eager) and never enter the ledger: under eager
     launch every rank spins in the all-reduce, so its costs are not the deployment's."""
     req = json.load(open(os.path.join(ev, "evidence", "eager_evidence_request.json")))
-    pid, tag = req["point"], req["point"] + "@eager"
+    windows = req.get("windows") or [{"point": req["point"], "kernels": req["kernels"]}]
+    for w in windows:
+        eager_window(a, ev, plan, py, log, timeline, w["point"], w["kernels"])
+
+
+def eager_window(a, ev, plan, py, log, timeline, pid, kernels):
+    tag = pid + "@eager"
     pt = next(p for p in plan["points"] if p["point_id"] == pid)
     trace_dir = os.path.join(a.trace_root, tag)
     os.makedirs(trace_dir, exist_ok=True)
@@ -380,14 +405,15 @@ def eager_evidence(a, ev, plan, py, log, timeline):
              [py, os.path.join(HERE, "kernel_shapes.py"), "--trace-dir", trace_dir, "--phase",
               "DECODE", "--census", cpath, "--point-id", tag, "--out",
               os.path.join(ev, "evidence", "shapes", tag + ".json")]
-             + [x for k in req["kernels"] for x in ("--kernel", k)]]
+             + [x for k in kernels for x in ("--kernel", k)]]
     for cmd in steps if rc == 0 else []:
         rc, t2, msg = run(cmd, log)
         took += t2
         if rc:
             break
-    timeline["eager_evidence"] = {"point": pid, "rc": rc, "wall_s": took,
-                                  "message": msg.splitlines()[-1] if msg else ""}
+    timeline.setdefault("eager_evidence_windows", []).append(
+        {"point": pid, "rc": rc, "wall_s": took, "message": msg.splitlines()[-1] if msg else ""})
+    timeline["eager_evidence"] = timeline["eager_evidence_windows"][0]
     print("[%s] eager evidence window %s: rc=%d in %.0fs" % (now(), tag, rc, took), flush=True)
 
 
@@ -547,20 +573,26 @@ def evidence(a, ev, censuses, points, sel, py, log, timeline, run_steps):
             for k in json.load(open(f)).get("graph_replayed_kernels", []):
                 replayed.setdefault(k, []).append(pid)
     serial_evidence(a, ev, phase, shapes_dir, censuses, cand, py, log, timeline)
-    covered = set()
+    covered, taken = set(), set()
     for f in os.listdir(shapes_dir):
         if f.endswith("@eager.json"):
+            taken.add(f[:-len("@eager.json")])
             d = json.load(open(os.path.join(shapes_dir, f)))
             covered |= set(d.get("requested") or d.get("kernels", {}))
     if set(replayed) - covered:
         dec = sorted((p for p in points if p["phase"] == "DECODE" and p["point_id"] in censuses),
                      key=lambda p: p.get("batch_size") or 0)
-        json.dump({"point": dec[0]["point_id"], "kernels": sorted(replayed),
+        windows = eager_windows(dec, replayed, set(replayed) - covered, taken)
+    if set(replayed) - covered and not windows:
+        timeline["eager_evidence_unavailable"] = sorted(set(replayed) - covered)
+    elif set(replayed) - covered:
+        json.dump({"point": windows[0]["point"], "kernels": sorted(replayed), "windows": windows,
                    "why": "graph-replayed decode launches name no op and no source frame"},
                   open(req, "w"), indent=1)
         timeline["eager_evidence_needed"] = sorted(replayed)
-        print("[%s] %d decode kernel(s) are graph-replayed: requested one eager evidence "
-              "window at %s (%s)" % (now(), len(replayed), dec[0]["point_id"], req), flush=True)
+        print("[%s] %d decode kernel(s) are graph-replayed: requested %d eager evidence "
+              "window(s) at %s (%s)" % (now(), len(replayed), len(windows),
+                                        ", ".join(w["point"] for w in windows), req), flush=True)
     timeline["post"]["kernel_shapes"] = {"rc": 1 if bad else 0, "wall_s": round(time.time() - t0, 1),
                                          "failed_points": bad}
     print("[%s] kernel_shapes %d point(s) in %.0fs%s" % (now(), len(res), time.time() - t0,
