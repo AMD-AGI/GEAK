@@ -35,6 +35,7 @@ All calls follow the [invocation contract](stages/CONTRACT.md#direct-module-call
 | --- | --- |
 | `SKILL.md` | Entry into the campaign |
 | `brain/` | Persistent controller, starting route and evidence-guided planning |
+| `brain/experience/` | [Experience use](brain/experience/README.md), case index and raw evidence catalogue |
 | `stages/` | Module contracts and interchangeable implementations |
 | `config/` | Scenarios and defaults; campaign variants stay with their evidence |
 | `run.py`, `engine/core/` | [Sequential driver and protocol](engine/core/README.md) |

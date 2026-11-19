@@ -29,7 +29,7 @@ preserve the inputs and evidence of in-flight calls.
 1. Reread the selected mode, if any, and current user steering alongside new reports,
    running work and accepted/rejected evidence. Choose a call that can improve the result
    or resolve an uncertainty that changes the plan; consult
-   [experience](experience.md). Missing evidence can justify a bounded probe, not a claim
+   [experience](experience/README.md). Missing evidence can justify a bounded probe, not a claim
    that the opportunity is absent.
 2. Write `PLAN.md` under the [module contract](../stages/CONTRACT.md). Reuse qualified
    inputs; investigate missing prerequisites or observed defects within the affected call,
