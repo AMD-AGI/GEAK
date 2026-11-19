@@ -368,6 +368,7 @@ function singleGpu(name, phase = 'extract') {
   console.log('\n# serial HeadKernel leases a whole group for a multi-GPU head');
   const headsMap = between('  const heads = headQueue.slice(0, HEAD_BUDGET)', '  if (DEEP) {');
   const serial = between('  const headPool = ', '  } // end default head track');
+  const authorPlan = between('function headAuthorPlan(', '\n}\n') + '\n}\n';
   async function headTrack(headQueue, GPU_LIST) {
     const agents = [], lanes = [];
     const e = { headQueue, GPU_LIST, HEAD_BUDGET: headQueue.length, KERNEL_EXTRACT_ON: true, FAST_MODE: false,
@@ -385,7 +386,7 @@ function singleGpu(name, phase = 'extract') {
       safeAgent: async (p) => { agents.push(p); return { gate: 'author_recommended', author_plan: [{ language: 'hip', route: 'rewrite' }] }; },
       fastBoundedWorkflow: async (ref, args, label) => { lanes.push({ label, args }); return { final_weighted: 0.9, final_patch: '' }; } };
     await new AsyncFunction('env', `let {${Object.keys(e).join(',')}} = env;\n${singleNode}\n${reuse}\n${helpers}
-      ${headsMap}\n${serial}`)(e);
+      ${authorPlan}\n${headsMap}\n${serial}`)(e);
     return { agents, lanes };
   }
   const h4 = multiRank('mono_head', 'extract_op');

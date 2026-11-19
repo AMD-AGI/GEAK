@@ -25,11 +25,11 @@ const fnSrc = (name) => {
   const at = src.indexOf(`function ${name}(`);
   return at === -1 ? '' : src.slice(at, src.indexOf('\n}\n', at) + 2);
 };
-const helpersSrc = ['makeSem', 'gpuNeed', 'multiGpuLaneArgs'].map(fnSrc);
+const helpersSrc = ['makeSem', 'gpuNeed', 'multiGpuLaneArgs', 'headAuthorPlan'].map(fnSrc);
 const start = src.indexOf('  const headPool = ');
 const end = src.indexOf('const { ext, isDominant, headCands } = p;', start);
 ok(helpersSrc.every(Boolean) && start !== -1 && end > start,
-  'the default head track, makeSem, gpuNeed and multiGpuLaneArgs located in e2e_workflow.js');
+  'the default head track, makeSem, gpuNeed, multiGpuLaneArgs and headAuthorPlan located in e2e_workflow.js');
 
 const FREE = [
   'KERNEL_EXTRACT_ON', 'ABLATION_ARM', 'GPU_LIST', 'heads', 'FAST_MODE', 'FAST_DEADLINE_HIT',
