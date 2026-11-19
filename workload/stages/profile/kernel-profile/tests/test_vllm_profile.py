@@ -284,5 +284,49 @@ class VllmProfileTest(unittest.TestCase):
         self.assertEqual((n, coll), (6, {}))
 
 
+    def test_profiler_traces_threads_started_after_the_window_opens(self):
+        # --enable-dbo runs each prefill micro-batch in a new thread: no host ops without this
+        started = []
+        class TorchProfilerWrapper:
+            def __init__(self):
+                self._profiler_kwargs = {"record_shapes": True}
+            def _start(self):
+                started.append(dict(self._profiler_kwargs))
+        module = types.SimpleNamespace(TorchProfilerWrapper=TorchProfilerWrapper)
+        prof = types.ModuleType("torch._C._profiler")
+        prof._ExperimentalConfig = lambda **kw: kw
+        with patch.dict(sys.modules, {"torch": types.ModuleType("torch"),
+                                      "torch._C": types.ModuleType("torch._C"),
+                                      "torch._C._profiler": prof}):
+            observer.patch_profiler(module)
+            observer.patch_profiler(module)
+        TorchProfilerWrapper()._start()
+        self.assertEqual(started[0]["experimental_config"], {"profile_all_threads": True})
+        with patch.dict(os.environ, {"GEAK_PROFILE_ALL_THREADS": "1"}, clear=True):
+            self.assertEqual(set(observer.wanted()), {observer.PROFILER_MODULE})
+
+    def test_frameless_prefill_kernels_request_a_serial_window(self):
+        import run_points
+        shapes = self.root / "shapes"
+        shapes.mkdir()
+        bare = {"resolved_by": "external_id", "host_op": "akr::moe", "py_frames": [],
+                "graph_replayed": False}
+        framed = dict(bare, py_frames=["vllm/models/x.py(1): forward"])
+        kern = lambda *samples: {"variants": [{"samples": list(samples)}]}
+        (shapes / "pf.json").write_text(json.dumps({"kernels": {
+            "moe_prefill": kern(bare), "norm": kern(framed), "unwanted": kern(bare)}}))
+        (shapes / "de.json").write_text(json.dumps({"kernels": {"graphed": kern(
+            dict(bare, graph_replayed=True))}}))
+        phase = {"pf": "PREFILL", "de": "DECODE"}
+        wanted = {"moe_prefill", "norm", "graphed"}
+        self.assertEqual(run_points.frameless_prefill_kernels(str(shapes), phase, wanted),
+                         ["moe_prefill"])
+        (shapes / "pf2@serial.json").write_text(json.dumps({"kernels": {"moe_prefill": kern(framed)}}))
+        self.assertEqual(run_points.frameless_prefill_kernels(str(shapes), phase, wanted), [])
+        cmd = ["vllm", "serve", "m", "--enable-dbo", "--dbo-prefill-token-threshold", "16384"]
+        self.assertEqual(run_points.flag_value(cmd, "--dbo-prefill-token-threshold"), "16384")
+        self.assertEqual(run_points.flag_value(["--x=3"], "--x"), "3")
+
+
 if __name__ == "__main__":
     unittest.main()

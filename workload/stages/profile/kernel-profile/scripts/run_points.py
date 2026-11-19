@@ -131,7 +131,9 @@ def main():
             if st.get("iteration_log_dir"):
                 a.probe_arg += ["--iteration-log-dir", st["iteration_log_dir"]]
         server_capture = st.get("decode_capture")
+        a.server_command = st.get("command") or []
     else:
+        a.server_command = []
         server_capture = None
     if not (a.base_url and a.trace_root and a.expect_files):
         ap.error("--base-url, --trace-root and --expect-files (or --server-state) are required")
@@ -389,6 +391,105 @@ def eager_evidence(a, ev, plan, py, log, timeline):
     print("[%s] eager evidence window %s: rc=%d in %.0fs" % (now(), tag, rc, took), flush=True)
 
 
+def flag_value(cmd, flag):
+    for i, x in enumerate(cmd):
+        if x == flag and i + 1 < len(cmd):
+            return cmd[i + 1]
+        if x.startswith(flag + "="):
+            return x.split("=", 1)[1]
+    return None
+
+
+def frameless_prefill_kernels(shapes_dir, phase, wanted):
+    """Candidate kernels launched in PREFILL whose samples, in every manifest, carry no
+    Python frame and were not graph-replayed: launched from a thread the profiler's Python
+    tracer never saw."""
+    seen, framed = set(), set()
+    for f in sorted(os.listdir(shapes_dir)):
+        pid = f[:-len(".json")]
+        try:
+            d = json.load(open(os.path.join(shapes_dir, f)))
+        except (OSError, ValueError):
+            continue
+        for k, v in (d.get("kernels") or {}).items():
+            samples = [r for var in v.get("variants", []) for r in var.get("samples", [])]
+            if any(r.get("py_frames") for r in samples):
+                framed.add(k)
+            elif (phase.get(pid) == "PREFILL" and k in wanted
+                  and not any(r.get("graph_replayed") for r in samples)):
+                seen.add(k)
+    return sorted(seen - framed)
+
+
+def serial_evidence(a, ev, phase, shapes_dir, censuses, cand, py, log, timeline):
+    """vLLM --enable-dbo runs a prefill of at least --dbo-prefill-token-threshold tokens as
+    micro-batches, each in a thread started for that step. The profiler records no Python
+    frames for those threads, so the prefill kernels have no source (MiniMax-M3.1-Flash,
+    vLLM 0.33: the MoE and indexer prefill kernels). One extra window on the same server, at
+    the largest observed single-sequence prefill below the threshold, runs the forward on
+    the worker thread. Like the eager window it supplies frames and launching ops only: its
+    census stays in evidence/census_serial and never enters the ledger."""
+    try:
+        wanted = {r.get("id") or r.get("name") for r in json.load(open(cand))["targets"]}
+    except (OSError, ValueError, KeyError):
+        return
+    missing = frameless_prefill_kernels(shapes_dir, phase, wanted)
+    if not missing:
+        return
+    cmd = a.server_command
+    limit = flag_value(cmd, "--dbo-prefill-token-threshold")
+    if "--enable-dbo" not in cmd or not limit:
+        timeline["frameless_prefill_kernels"] = {"kernels": missing, "evidence": None,
+                                                 "why": "no serial-prefill window is known "
+                                                        "for this server"}
+        return
+    plan = json.load(open(os.path.join(ev, "sampling_plan.json")))
+    cells = [c["point"] for c in plan.get("captures", []) + plan.get("unselected", [])
+             if c["point"]["phase"] == "PREFILL" and c["partition"][2] == 1
+             and c["point"].get("new_tokens", 0) < int(limit)]
+    if not cells:
+        timeline["frameless_prefill_kernels"] = {"kernels": missing, "evidence": None,
+                                                 "why": "no observed prefill below %s" % limit}
+        return
+    pt = dict(max(cells, key=lambda p: p["new_tokens"]))
+    pid, tag = pt["point_id"], pt["point_id"] + "@serial"
+    shapes = os.path.join(shapes_dir, tag + ".json")
+    if os.path.exists(shapes) and set(missing) <= set(json.load(open(shapes)).get("requested", [])):
+        return
+    points = os.path.join(ev, "evidence", "serial_evidence_points.json")
+    json.dump({"contract": "serial prefill evidence window (frames only)",
+               "context_tolerance": plan.get("context_tolerance"), "points": [pt]},
+              open(points, "w"), indent=1)
+    trace_dir = os.path.join(a.trace_root, tag)
+    os.makedirs(trace_dir, exist_ok=True)
+    out = os.path.join(ev, "evidence", "probe", tag + ".json")
+    t0 = time.time()
+    rc, _t, msg = run([py, os.path.join(HERE, "serving_probe.py"), "--points", points,
+                       "--point-id", pid, "--base-url", a.base_url, "--trace-dir", trace_dir,
+                       "--server-trace-dir", os.path.join(a.server_trace_root or a.trace_root, tag),
+                       "--expect-files", str(a.expect_files), "--out", out] + a.probe_arg, log)
+    cdir = os.path.join(ev, "evidence", "census_serial")
+    os.makedirs(cdir, exist_ok=True)
+    cpath = os.path.join(cdir, pid + ".json")
+    steps = [[py, os.path.join(HERE, "point_census.py"), "--trace-dir", trace_dir, "--phase",
+              "PREFILL", "--point-id", tag, "--planned-shape", str(pt["new_tokens"]),
+              "--out", cpath],
+             [py, os.path.join(HERE, "kernel_shapes.py"), "--trace-dir", trace_dir, "--phase",
+              "PREFILL", "--census", cpath, "--point-id", tag, "--out", shapes]
+             + [x for k in missing for x in ("--kernel", k)]]
+    for step in steps if rc == 0 else []:
+        rc, _t, msg = run(step, log)
+        if rc:
+            break
+    timeline["frameless_prefill_kernels"] = {
+        "kernels": missing, "evidence": tag, "rc": rc, "dbo_prefill_token_threshold": int(limit),
+        "new_tokens": pt["new_tokens"], "wall_s": round(time.time() - t0, 1),
+        "message": msg.splitlines()[-1] if msg else ""}
+    print("[%s] %d prefill kernel(s) had no frames (micro-batch threads): serial evidence "
+          "window %s at %d tokens: rc=%d" % (now(), len(missing), tag, pt["new_tokens"], rc),
+          flush=True)
+
+
 def same_targets(shapes_file, targets_file):
     """A manifest was made for exactly these kernels (it lists what it was asked for)."""
     try:
@@ -445,6 +546,7 @@ def evidence(a, ev, censuses, points, sel, py, log, timeline, run_steps):
         if phase[pid] == "DECODE" and os.path.exists(f):
             for k in json.load(open(f)).get("graph_replayed_kernels", []):
                 replayed.setdefault(k, []).append(pid)
+    serial_evidence(a, ev, phase, shapes_dir, censuses, cand, py, log, timeline)
     covered = set()
     for f in os.listdir(shapes_dir):
         if f.endswith("@eager.json"):

@@ -1,4 +1,5 @@
-"""Prepend this directory to PYTHONPATH and set GEAK_ITERATION_LOG_DIR to observe vLLM."""
+"""Prepend this directory to PYTHONPATH and set GEAK_ITERATION_LOG_DIR to observe vLLM
+(and GEAK_PROFILE_ALL_THREADS=1 to trace host ops on every thread)."""
 import importlib.util
 import os
 import sys

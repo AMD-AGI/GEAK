@@ -259,6 +259,8 @@ def command(cfg, mode, trace_root, watch_dir=None):
         env["COMPILE_WATCH_FRAMES"] = str(cfg.get("compile_watch_frames", 12))
     if framework == "vllm":
         env.setdefault("GEAK_ITERATION_LOG_DIR", os.path.join(os.path.dirname(trace_root), "iterations"))
+        # host ops of threads started after a window opens (--enable-dbo micro-batches)
+        env.setdefault("GEAK_PROFILE_ALL_THREADS", "1")
         observer = os.path.join(os.path.dirname(__file__), "vllm_observer")
         env["PYTHONPATH"] = observer + (":" + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     return cmd, env
@@ -318,7 +320,8 @@ def vllm_server_info(logp):
     cudagraph_capture_sizes counts tokens, which equal requests only without speculation.
     """
     try:
-        text = open(logp, errors="replace").read()
+        with open(logp, errors="replace") as fh:
+            text = fh.read()
     except OSError:
         return None
     args, notes = {}, []

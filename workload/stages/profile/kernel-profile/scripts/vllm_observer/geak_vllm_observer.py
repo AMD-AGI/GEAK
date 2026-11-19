@@ -76,9 +76,50 @@ def patch_worker(module):
     worker.annotate_profile = observe
 
 
+PROFILER_MODULE = "vllm.profiler.wrapper"
+
+
+def patch_profiler(module):
+    """Trace every host thread. vLLM's dual-batch overlap (--enable-dbo) runs each
+    micro-batch in a thread started per step; torch's profiler records host ops only on
+    threads that existed at its start, so those prefill launches had no op, no operand
+    shapes and no frames (MiniMax-M3.1-Flash, vLLM 0.33). profile_all_threads restores
+    their ops and shapes; their Python frames stay unrecorded."""
+    wrapper = getattr(module, "TorchProfilerWrapper", None)
+    original = getattr(wrapper, "_start", None)
+    if original is None or getattr(original, "_geak_all_threads", False):
+        return
+    try:
+        from torch._C._profiler import _ExperimentalConfig
+        config = _ExperimentalConfig(profile_all_threads=True)
+    except (ImportError, TypeError) as exc:
+        print("GEAK: torch profiler cannot trace all threads (%s); launches from threads "
+              "started after the window opens keep no host op" % exc, file=sys.stderr)
+        return
+
+    @functools.wraps(original)
+    def start(self, *args, **kwargs):
+        self._profiler_kwargs.setdefault("experimental_config", config)
+        return original(self, *args, **kwargs)
+
+    start._geak_all_threads = True
+    wrapper._start = start
+
+
+
+def wanted():
+    want = {}
+    if os.environ.get("GEAK_ITERATION_LOG_DIR"):
+        want[MODULE] = patch_worker
+    if os.environ.get("GEAK_PROFILE_ALL_THREADS") == "1":
+        want[PROFILER_MODULE] = patch_profiler
+    return want
+
+
 class WorkerObserver(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname != MODULE:
+        patch = wanted().get(fullname)
+        if patch is None:
             return None
         spec = importlib.machinery.PathFinder.find_spec(fullname, path)
         if spec is None or spec.loader is None:
@@ -92,16 +133,17 @@ class WorkerObserver(importlib.abc.MetaPathFinder):
 
             def exec_module(self, module):
                 original.exec_module(module)
-                patch_worker(module)
+                patch(module)
 
         spec.loader = Loader()
         return spec
 
 
 def install():
-    if not os.environ.get("GEAK_ITERATION_LOG_DIR"):
-        return
-    if MODULE in sys.modules:
-        patch_worker(sys.modules[MODULE])
-    elif not any(isinstance(finder, WorkerObserver) for finder in sys.meta_path):
+    want = wanted()
+    for name, patch in want.items():
+        if name in sys.modules:
+            patch(sys.modules[name])
+    if (set(want) - set(sys.modules)
+            and not any(isinstance(finder, WorkerObserver) for finder in sys.meta_path)):
         sys.meta_path.insert(0, WorkerObserver())
