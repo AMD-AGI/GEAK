@@ -401,6 +401,10 @@ jobs:
       # then A/Bs serially in head order; fixed ISL/OSL stays serial. No GPU, no model.
       - name: AgentX parallel head lanes regression
         run: node e2e_workflow/scripts/test_agentx_parallel_head_lanes.js
+      # The last lane batch of an AgentX search spends the window less its A/Bs instead of handing it
+      # back to Finalize; every other lane keeps the ordinary deadline. No GPU, no model.
+      - name: AgentX window lanes regression
+        run: node e2e_workflow/scripts/test_agentx_window_lanes.js
       # The final phase measures on GPUs the search may still hold: the tuning window and the
       # run_reaper.py fence ahead of Finalize and Validate. No GPU, no model.
       - name: final-phase GPU handover regression

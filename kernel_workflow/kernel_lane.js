@@ -2241,6 +2241,9 @@ async function stopAfterTimeout(r, label, dir, phaseName) {
 //   DEADLINE_EPOCH  unix seconds after which NO new optimization round may start.
 //   NO_STOP_S       while more than this many seconds remain, the TechLead may not end the run on
 //                   its own convergence gates; it gets exactly one forced re-plan.
+//   ROUND_TAIL_S    seconds a round in flight at the deadline may run past it before the caller
+//                   needs the lane back. Set, a round starts only if the longest finished round
+//                   would end within it. Absent, any round may start before the deadline.
 // In CODE and not in the caller's prose because the prose version was measured: a "fixed 4h window
 // per kernel" comparison whose window had no implementation anywhere realised 1.55h to 15.22h, a
 // 9.81x spread, and the comparison it existed to make was void. The loop below is
@@ -2258,6 +2261,19 @@ const NO_STOP_S = Math.max(0, parseInt(A.no_stop_s != null ? A.no_stop_s : 900, 
 // Not 1: the refusal must scale with the window, or a long budget is handed back early.
 // Not unbounded: a role that truly cannot name a direction would spend the window planning.
 const MAX_FORCED_REPLANS = Math.max(1, parseInt(A.max_forced_replans != null ? A.max_forced_replans : 6, 10));
+const ROUND_TAIL_S = (() => {
+  const v = parseInt(A.round_tail_s != null ? A.round_tail_s : -1, 10);
+  return Number.isFinite(v) && v >= 0 ? v : null;
+})();
+let longestRoundS = 0;
+let preRoundLeftS = null;
+// Takes each pre-round clock read: the gap between two reads is the round between them. True when a
+// round started now would outlast ROUND_TAIL_S past the deadline at the longest finished round's pace.
+function roundWouldOutlastTail(leftS) {
+  if (Number.isFinite(leftS) && preRoundLeftS != null) longestRoundS = Math.max(longestRoundS, preRoundLeftS - leftS);
+  preRoundLeftS = Number.isFinite(leftS) ? leftS : null;
+  return ROUND_TAIL_S != null && Number.isFinite(leftS) && leftS + ROUND_TAIL_S < longestRoundS;
+}
 const CLOCK_SCHEMA = { type: 'object', properties: { epoch: { type: 'number' } },
                        required: ['epoch'], additionalProperties: true };
 let deadlineHit = false;
@@ -3201,6 +3217,13 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE && round <
   if (left <= 0) {
     deadlineHit = true;
     log(`WALL-CLOCK DEADLINE reached after ${round} round(s) (budget used ${dispatched}/${BUDGET}) — ` +
+        `starting no further rounds; going straight to report + validation.`);
+    break;
+  }
+  if (roundWouldOutlastTail(left)) {
+    deadlineHit = true;
+    log(`WALL-CLOCK DEADLINE: ${(left / 60).toFixed(0)} min left plus the ${(ROUND_TAIL_S / 60).toFixed(0)} min tail ` +
+        `is under the longest round (${(longestRoundS / 60).toFixed(0)} min) after ${round} round(s) — ` +
         `starting no further rounds; going straight to report + validation.`);
     break;
   }

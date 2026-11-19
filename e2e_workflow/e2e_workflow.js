@@ -3214,9 +3214,9 @@ if (FAST_MODE && typeof setTimeout === 'function' && FAST_HEAD_DEADLINE_MS > 0) 
 // implementation cap (ABL_NESTED_CAP_MS, set by the head loop; null = none) and the trace-replay
 // reserve bound. On expiry it resolves null, which callers treat as "no kernel".
 let ABL_NESTED_CAP_MS = null;
-async function fastBoundedWorkflow(ref, wfArgs, label) {
+async function fastBoundedWorkflow(ref, wfArgs, label, windowAbs = 0) {
   if (laneWindowShort(`nested kernel workflow ${label || ''}`)) return null;
-  wfArgs = { ...wfArgs, ...(await laneDeadlineArgs(label, 'HeadKernel')) };
+  wfArgs = { ...wfArgs, ...(await laneDeadlineArgs(label, 'HeadKernel', windowAbs)) };
   // noteKernelKB returns `r` unchanged, so the caller's null-guards are untouched.
   const p = workflow(ref, laneArgs(wfArgs)).then((r) => noteKernelKB(r, label));
   const ablCap = ABL('B4') && ABL_NESTED_CAP_MS != null ? ABL_NESTED_CAP_MS : null;
@@ -3233,9 +3233,9 @@ async function fastBoundedWorkflow(ref, wfArgs, label) {
   });
 }
 // Milestone lanes: the trace-replay reserve bound alone.
-async function reserveBoundedWorkflow(ref, wfArgs, label) {
+async function reserveBoundedWorkflow(ref, wfArgs, label, windowAbs = 0) {
   if (laneWindowShort(`nested kernel workflow ${label || ''}`)) return null;
-  wfArgs = { ...wfArgs, ...(await laneDeadlineArgs(label, 'Milestone')) };
+  wfArgs = { ...wfArgs, ...(await laneDeadlineArgs(label, 'Milestone', windowAbs)) };
   const p = workflow(ref, laneArgs(wfArgs)).then((r) => noteKernelKB(r, label));
   const capMs = laneReserveCapMs();
   if (typeof setTimeout !== 'function' || !(capMs > 0)) return p;
@@ -3367,14 +3367,31 @@ async function epochNow(phaseName) {
   if (t0 == null) EPOCH_AT_T0 = null;
   return t0 == null ? null : t0 + Math.floor(ELAPSED_MS / 1000);
 }
-async function laneDeadlineArgs(label, phaseName) {
+// A window lane (windowAbs > 0: nothing is queued behind its batch, which has windowAbs A/Bs to run
+// after it) is the run's last search work. It runs rounds until the window less those A/Bs and one
+// round; its direction budget and plateau cap are sized not to bind first, and its TechLead stops are
+// refused (up to the lane's max_forced_replans) until one round is left, so the window is spent on the
+// search rather than handed back. Rounds can outlast AGENTX_LANE_ROUND_S, and a lane still running
+// at the final reserve is abandoned with its result, so the lane starts no round that its longest
+// finished round says would outlast that one round past its deadline (round_tail_s). Under two
+// rounds of window, it is an ordinary lane.
+async function laneDeadlineArgs(label, phaseName, windowAbs = 0) {
   if (!agentxGuardsOn()) return {};
-  const stopInS = Math.floor((searchWindowMs() - agentxLaneTailMs()) / 1000);
+  const windowStopS = windowAbs > 0
+    ? Math.floor((searchWindowMs() - windowAbs * agentxAbMs(2) - AGENTX_LANE_ROUND_S * 1000) / 1000) : 0;
+  const windowRounds = Math.floor(windowStopS / AGENTX_LANE_ROUND_S);
+  const stopInS = windowRounds >= 2 ? windowStopS : Math.floor((searchWindowMs() - agentxLaneTailMs()) / 1000);
   if (!(stopInS > 0)) return {};
   const now = await epochNow(phaseName);
   if (now == null) {
     log(`  [time-budget] ${label}: wall clock unreadable, no round deadline.`);
     return {};
+  }
+  if (windowRounds >= 2) {
+    log(`  [time-budget] ${label}: window lane, rounds until ~${Math.round(stopInS / 60)}min ` +
+      `(${windowAbs} A/B(s) and one round before the final reserve).`);
+    return { deadline_epoch: now + stopInS, no_stop_s: AGENTX_LANE_ROUND_S, round_tail_s: AGENTX_LANE_ROUND_S,
+      budget: windowRounds * KERNEL_BUDGET, max_no_improve: windowRounds };
   }
   log(`  [time-budget] ${label}: no new round after ~${Math.round(stopInS / 60)}min ` +
     `(${Math.round(agentxLaneTailMs() / 60000)}min before the final reserve).`);
@@ -5842,6 +5859,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     const n = gpuNeed(h);
     return headPool.with(n, (g) => fn(g[0], n === 1 ? null : g));
   };
+  // A/Bs owed after the parallel heads' lanes when nothing is queued behind them (window lanes).
+  let headWindowAbs = 0;
   // Budget guard: start no new head op after a dispatch deadline (FAST_DEADLINE_HIT in fast mode;
   // TIME_DEADLINE_HIT in all modes when time_budget_s is set).
   const dispatchHead = (h) => {
@@ -5993,7 +6012,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
               `kernel MUST fit at the same mem-fraction the accepted config uses. ` + GRAPH_REQ + (TASK || ''),
             apply_to_original: 'false',
             ...multiGpuLaneArgs(h, ext, group),
-          }, `${h.short_name}:${lang}`);
+          }, `${h.short_name}:${lang}`, headWindowAbs);
         } catch (e) { al = { authored: false, validation_status: 'error', reason: String(e) }; }
         // A lane that could not record a baseline will not record one on a retry either: the UT is
         // the same, so is its run time. In GEAK #606 each such retry cost another 60+ min.
@@ -6054,6 +6073,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
   if (headPool) {
     const live = [];
     for (const h of heads) { if (!dispatchHead(h)) break; live.push(h); }
+    if (!headQueue.length && !(want('kernel') && kernelQueue.length)) headWindowAbs = live.length;
     log(`  [heads] ${live.length} head(s) at once on GPUs {${GPU_LIST.join(',')}}, one lease per bake-off or author lane; their A/Bs follow serially, in head order.`);
     const got = await parallel(live.map((h) => () => prepareHead(h)));
     prepared = new Map(live.map((h, i) => [h, got[i]]));
@@ -6269,6 +6289,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
   // AgentX selection inventories more work than this execution budget can run.
   // Preserve undispatched eligible candidates in carried state for resume.
   if (KERNEL_EXTRACT_ON) kernelQueue = planCands.slice(cands.length);
+  const mileWindowAbs = KERNEL_EXTRACT_ON && !kernelQueue.length ? cands.length : 0;
   dispatched += cands.length;
   log(`Milestone ${milestone}: ${cands.length} kernel candidate(s) [${cands.map(c => c.short_name).join(', ')}], dispatched ${dispatched}/${BUDGET} (floor ${MIN_KERNEL_TASKS})`);
 
@@ -6302,7 +6323,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
           (c.lane_retried ? ' (Retry after a kernel-lane error.)' : ''),
         apply_to_original: 'false',
         ...multiGpuLaneArgs(c, ext, g),
-      }, String(c.short_name || ext.op_kind || 'milestone'));
+      }, String(c.short_name || ext.op_kind || 'milestone'), mileWindowAbs);
       if (r == null && IS_AGENTX) {
         return { c, skip: true, paused: true, reason: 'kernel lane not run to completion before the final reserve' };
       }

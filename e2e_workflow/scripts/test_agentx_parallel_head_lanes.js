@@ -40,7 +40,7 @@ const FREE = [
   'ablCandId', 'ABL_IMPL_MS', 'ABL', 'ablHeadReady', 'ABL_PREP_MS', 'ablDraw', 'ABL_AUDIT_P', 'ablEvent',
   'ABL_AUDIT_MS', 'laneWindowShort', 'A', 'fastBoundedWorkflow', 'KERNEL_WF_SCRIPT', 'KERNEL_KNOWLEDGE_DIR',
   'USE_EXPERT_SKILLS', 'EXPERT_SKILLS_DIR', 'KB_ARGS', 'FP8_MMA', 'GRAPH_REQ', 'TASK', 'parallel', '__integrate',
-  'engineGpu', 'engineWorkload', 'engineRegimes',
+  'engineGpu', 'engineWorkload', 'engineRegimes', 'want', 'kernelQueue',
 ];
 const body = `${helpersSrc.join('')}
 let headDispatched = 0, ABL_NESTED_CAP_MS = null;
@@ -55,7 +55,8 @@ const EIGHT = ['0', '1', '2', '3', '4', '5', '6', '7'];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function run({ extractOn = true, arm = '', gpus = EIGHT, nHeads = 3, langs = ['triton', 'hip'],
-  deadline = false, refuse = () => false, transient = () => false, ranks = {} } = {}) {
+  deadline = false, refuse = () => false, transient = () => false, ranks = {},
+  restHeads = 1, kernelTasks = 0, wantKernel = true } = {}) {
   const events = [], logs = [], lanes = [], bakes = [], integrated = [], clash = [];
   const busy = new Map();
   let inFlight = 0, maxInFlight = 0, cardsBusy = 0, maxCards = 0;
@@ -83,7 +84,10 @@ async function run({ extractOn = true, arm = '', gpus = EIGHT, nHeads = 3, langs
     KERNEL_EXTRACT_ON: extractOn, ABLATION_ARM: arm, GPU_LIST: gpus, heads,
     FAST_MODE: false, FAST_DEADLINE_HIT: false, TIME_DEADLINE_HIT: deadline,
     log: (m) => logs.push(m),
-    headQueue: heads.map((h) => ({ prepared_ut: h.prepared_ut })).concat([{ prepared_ut: 'rest' }]),
+    headQueue: heads.map((h) => ({ prepared_ut: h.prepared_ut }))
+      .concat(Array.from({ length: restHeads }, () => ({ prepared_ut: 'rest' }))),
+    want: (p) => p !== 'kernel' || wantKernel,
+    kernelQueue: Array.from({ length: kernelTasks }, (_, i) => ({ short_name: `k${i}` })),
     ELAPSED_MS: 0,
     extractWithBaseline: async (role, task, desc, inputs) => {
       events.push(`extract ${inputs.KERNEL.short_name}`);
@@ -104,9 +108,9 @@ async function run({ extractOn = true, arm = '', gpus = EIGHT, nHeads = 3, langs
     ablDraw: () => 1, ABL_AUDIT_P: 0, ablEvent: () => {}, ABL_AUDIT_MS: 0,
     laneWindowShort: (what) => refuse(what),
     A: {},
-    fastBoundedWorkflow: async (ref, args, label) => {
+    fastBoundedWorkflow: async (ref, args, label, windowAbs) => {
       const attempt = lanes.filter((l) => l.label === label).length + 1;
-      lanes.push({ label, gpu: args.gpu_ids, args, attempt });
+      lanes.push({ label, gpu: args.gpu_ids, args, attempt, windowAbs });
       await hold(args.gpu_ids, `lane ${label}#${attempt}`, 20);
       return transient(label, attempt) ? { authored: false, validation_status: 'error', reason: 'died' }
         : { authored: true, final_weighted: 1.25, final_patch: `patch ${label}`, eval_dir: `/k/${label}` };
@@ -206,6 +210,18 @@ const laneArgs = (r, label) => {
   const late = await run({ deadline: true });
   ok(late.headDispatched === 0 && late.lanes.length === 0 && late.bakes.length === 0 && late.integrated.length === 0
     && late.logs.some((m) => m.includes('dispatch deadline reached')), 'past the dispatch deadline no head starts');
+
+  console.log('\n# window lanes: the last search work owns the window, less one A/B per head');
+  ok(par.lanes.every((l) => l.windowAbs === 0), 'a head left in the queue keeps every lane ordinary');
+  const last = await run({ restHeads: 0 });
+  ok(last.lanes.length === 6 && last.lanes.every((l) => l.windowAbs === 3),
+    'with nothing queued behind them, every lane of the three heads is a window lane owing three A/Bs');
+  const queued = await run({ restHeads: 0, kernelTasks: 2 });
+  ok(queued.lanes.every((l) => l.windowAbs === 0), 'prepared kernel tasks still queued keep the lanes ordinary');
+  const headsOnly = await run({ restHeads: 0, kernelTasks: 2, wantKernel: false });
+  ok(headsOnly.lanes.every((l) => l.windowAbs === 3), 'a queue for a phase that will not run does not count');
+  const serialLast = await run({ restHeads: 0, arm: 'A1' });
+  ok(serialLast.lanes.every((l) => !l.windowAbs), 'the serial loop never makes window lanes');
 
   if (failures) { console.error(`\nFAILED (${failures})`); process.exit(1); }
   console.log('\nall checks passed');
