@@ -83,6 +83,9 @@ const MIN_IMPROVE = (() => {
   const v = parseFloat(A.min_improve != null ? A.min_improve : 0.02);
   return Number.isFinite(v) && v >= 0 ? v : 0.02;
 })();
+// `min_improve: 'noise'` measures the commit gate instead (COMMIT_IMPROVE, after the benchmark setup):
+// a winner commits once it clears the task's own A/A noise, never needing more than the 2% above.
+const MIN_IMPROVE_FROM_NOISE = String(A.min_improve).trim() === 'noise';
 // Minimum verified speedup for a candidate to enter the round's candidate list (default 1.0 = only a
 // candidate that beats the baseline is worth looking at). A knob for the same reason MIN_IMPROVE is:
 // a transcription (plain Triton -> Gluon/TileLang/HIP) lands BELOW the comparator by construction, and
@@ -534,6 +537,9 @@ const BENCH_SCHEMA = obj({
   baseline_weighted_total_ms: { type: 'number' },
   weights_provenance: { type: 'string' }, // e.g. "trace" | "regime" | "regime_floor" | "prior" | "caller" | "mixed"
   reliable: { type: 'boolean' }, notes: { type: 'string' },
+  // The PRIMARY speedup each baseline run printed for the unmodified workspace against the frozen
+  // baseline (an A/A measurement, ~1.0). Absent when the harness prints no such speedup.
+  baseline_self_speedups: { type: 'array', items: { type: 'number' } },
 }, ['commandment_path', 'baseline_per_case', 'baseline_geomean_ms']);
 
 const PROFILE_SCHEMA = obj({
@@ -2489,6 +2495,17 @@ if (!bench || !bench.baseline_per_case) {
 const BASELINE_PER_CASE = bench.baseline_per_case;
 const BASELINE_GEOMEAN_MS = bench.baseline_geomean_ms;
 log(`Benchmark done. ${bench.num_test_cases || BASELINE_PER_CASE.length} cases, baseline geomean ${BASELINE_GEOMEAN_MS} ms, reliable=${bench.reliable}`);
+// The task's noise floor: the largest deviation from 1.0 in the setup's A/A runs, read only under
+// `min_improve: 'noise'`. Fewer than two runs, or a floor of 0, cannot resolve a gain: MIN_IMPROVE stays.
+const SELF_SPEEDUPS = (Array.isArray(bench.baseline_self_speedups) ? bench.baseline_self_speedups : [])
+  .map(Number).filter((v) => Number.isFinite(v) && v > 0);
+const NOISE_FLOOR = SELF_SPEEDUPS.length >= 2 ? Math.max(...SELF_SPEEDUPS.map((v) => Math.abs(v - 1))) : 0;
+const COMMIT_IMPROVE = MIN_IMPROVE_FROM_NOISE && NOISE_FLOOR > 0 ? Math.min(MIN_IMPROVE, NOISE_FLOOR) : MIN_IMPROVE;
+if (MIN_IMPROVE_FROM_NOISE) {
+  const why = NOISE_FLOOR > 0 ? `A/A noise ${(NOISE_FLOOR * 100).toFixed(2)}% over ${SELF_SPEEDUPS.length} baseline runs`
+    : SELF_SPEEDUPS.length >= 2 ? 'the A/A runs show no deviation' : 'fewer than two A/A runs recorded';
+  log(`  [commit-gate] ${why}; a round winner commits above +${(COMMIT_IMPROVE * 100).toFixed(2)}% over the incumbent.`);
+}
 
 // ===========================================================================
 // PHASE: Baseline profile (Profile Engineer)
@@ -3253,7 +3270,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
 
   candidates.sort((a, b) => b.geomean - a.geomean);
   const winner = candidates[0] || null;
-  const improved = !!(winner && winner.geomean > cumulative * (1 + MIN_IMPROVE));
+  const improved = !!(winner && winner.geomean > cumulative * (1 + COMMIT_IMPROVE));
   // Separate question from `improved`: is the SEARCH advancing, not did it beat the incumbent. The
   // `bestSeen > 0` guard keeps round 1 deciding on `improved` alone; from then on bestSeen >= cumulative
   // at the default floor, so at the default PROGRESS_DELTA this implies `improved` and changes nothing.
@@ -3654,7 +3671,7 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`;
         cited_then_verified: r.ver && Number.isFinite(r.ver.verified_geomean)
           ? r.ver.verified_geomean : null,
         // `winner` is only the best candidate OF THIS ROUND; `improved` is whether it beat the
-        // incumbent by MIN_IMPROVE. Crediting on `winner` alone let a 1.5x round winner confirm a
+        // incumbent by COMMIT_IMPROVE. Crediting on `winner` alone let a 1.5x round winner confirm a
         // card while the committed best already sat at 2x — a confirmation for advancing nothing,
         // which is precisely what the three-state scoring was written to avoid. Require both.
         became_winner: !!(winner && winner.id === r.d.id && improved),

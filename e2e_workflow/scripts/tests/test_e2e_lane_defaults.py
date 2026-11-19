@@ -50,6 +50,14 @@ check("gfx1201 disables the E2E learned-card corpus",
       and "E2E_LEARNED_KB: E2E_LEARNED_KB_ENABLED ? 'on' : 'off'" in s,
       "every role prompt must receive one architecture-gated switch")
 
+LANE_ARGS = s[s.index("const laneArgs = (wfArgs) =>"):]
+LANE_ARGS = LANE_ARGS[:LANE_ARGS.index("\n  return out;\n};\n")]
+NOISE_GATE = "...(IS_AGENTX ? { min_improve: 'noise' } : {}),"
+check("a trace replay's lanes commit above the measured noise; other runs keep the lane's own gate",
+      NOISE_GATE in LANE_ARGS and LANE_ARGS.index(NOISE_GATE) < LANE_ARGS.index("...wfArgs,")
+      and LANE_ARGS.count("min_improve") == 1,
+      "laneArgs must ask for min_improve 'noise' on AgentX only, before the per-call args")
+
 check("RDNA4 matrix-core guidance is WMMA, not hard-coded MFMA",
       "const MATRIX_CORE_NAME = GPU_FAMILY.matrixCore" in s
       and "one fp8 MFMA" not in s,
