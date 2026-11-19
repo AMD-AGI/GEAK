@@ -43,7 +43,11 @@ import sys
 from collections import defaultdict
 
 FRAME_RE = re.compile(r"^(?P<path>.+?\.py)\((?P<line>\d+)\): (?P<func>.+)$")
-DEFAULT_PACKAGES = ("sglang", "sgl_kernel", "aiter", "vllm", "flashinfer", "flash_mla")
+# amd_kernels: the AMD kernel library vLLM's ROCm builds call (MiniMax-M3.1 image), the way
+# sglang calls aiter. Without it every one of its entries collapsed into the calling vLLM
+# function (`sp_prefill_akr.forward`: a whole prefill over all layers as one "operator").
+DEFAULT_PACKAGES = ("sglang", "sgl_kernel", "aiter", "vllm", "flashinfer", "flash_mla",
+                    "amd_kernels")
 # Plumbing between a callable and its launch: never a useful seam.
 # Model code: a frame here is a call site, not an operator entry.
 MODEL_TREE = re.compile(r"^(sglang/srt/|vllm/model_executor/|vllm/models/|vllm/v1/|vllm/worker/|"
@@ -53,7 +57,7 @@ GENERIC_ENTRY = re.compile(r"(^|/)aiter/jit/core\.py$")
 MODULE_RE = re.compile(r"^nn\.Module: (?P<cls>[A-Za-z_][A-Za-z0-9_]*?)(_\d+)?$")
 PLUMBING = re.compile(r"(^|/)(torch/_ops\.py|torch_guard\.py|triton/runtime/|"
                       r"torch/nn/modules/module\.py|torch/utils/_contextlib\.py|"
-                      r"torch/_dynamo/|torch/_library/)")
+                      r"torch/_dynamo/|torch/_library/|amd_kernels/warm_up\.py)")
 
 
 _PKG_PARENTS = {}

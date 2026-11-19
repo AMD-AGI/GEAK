@@ -348,5 +348,17 @@ class VllmProfileTest(unittest.TestCase):
         self.assertEqual(run_points.eager_windows(dec, replayed, {"moe_id_rows"}, {"b2"}), [])
 
 
+    def test_amd_kernels_entries_are_operators_not_their_vllm_callers(self):
+        import source_map
+        frames = ["amd_kernels/moe/mxfp4_h6144_i768_e128_top4/chain.py(88): _launch",
+                  "amd_kernels/moe/mxfp4_h6144_i768_e128_top4/chain.py(40): mxfp4_moe",
+                  "amd_kernels/warm_up.py(158): call",
+                  "vllm/models/minimax_m3/amd/sp_prefill_akr.py(245): forward",
+                  "nn.Module: MiniMaxM3Model_0"]
+        entry, cls = source_map.op_of_sample(frames, source_map.DEFAULT_PACKAGES)
+        self.assertEqual(entry[2], "mxfp4_moe")
+        self.assertEqual(cls, "MiniMaxM3Model")
+
+
 if __name__ == "__main__":
     unittest.main()
