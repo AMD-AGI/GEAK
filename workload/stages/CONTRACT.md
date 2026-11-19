@@ -9,8 +9,9 @@ add another only for a distinct need. A module is not a position in an execution
 
 Each invocation's `PLAN.md` names the question, module and implementation path, input
 identities, scope, output directory, constraints, resource/time budget and decisive
-evidence. State which decision the call should inform and which prerequisites it actually
-consumes. The task and explicit plan govern scope, including over implementation defaults.
+evidence. State which request or observation prompted the call, which decision it should
+inform and which prerequisites it actually consumes. The task and explicit plan govern
+scope, including over implementation defaults.
 
 Invoke the skill or tool with those inputs and a separate candidate/output directory.
 A source snapshot is not the complete input contract: preserve declared data and fixture
@@ -20,11 +21,14 @@ For ongoing work, return its location, progress/blockers and affected input iden
 so the controller can respond before completion.
 
 Return native receipts/logs and `REPORT.md` with status, findings, changed artifacts and
-uncertainty, including failures. Distinguish a measured negative result from missing
-evidence or execution failure; identify reusable evidence, affected work and what would
-unblock the missing delivery. Brain chooses the next call. Keep receipts attributable to
-their invocation, source and harness; preserve them before reuse. Repair presentation from
-matching evidence, never by inventing missing facts.
+uncertainty, including failures. Answer the plan's question: what was tested or ruled out,
+what bottleneck/opportunity remains, and which decision or next question/module it supports.
+Report actual progress and preparation/search/validation costs where observed; unknown
+costs remain unknown. Distinguish a measured negative result from missing evidence or
+execution failure; identify reusable evidence, affected work and what would unblock the
+missing delivery. Suggestions are evidence for Brain, which chooses the next call.
+Keep receipts attributable to their invocation, source and harness; preserve them before
+reuse. Repair presentation from matching evidence, never by inventing missing facts.
 
 Use the validation owner for the claim: a diagnostic observation, qualified UT,
 cold-verified kernel and serving comparison are different deliveries. Changing a method

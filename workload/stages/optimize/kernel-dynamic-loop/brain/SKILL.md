@@ -20,7 +20,7 @@ receipts own results and the worker owns accounting. Reuse qualified inputs.
 1. Read new and partial reports alongside running work and current steering. Rank useful
    questions by plausible effect on the native objective, observed bottlenecks, remaining
    headroom and cost through verification and delivery. Use the workload's
-   [experience guidance](../../../../brain/experience.md) within this task's scope;
+   [experience guidance](../../../../brain/experience/README.md) within this task's scope;
    a missing historical match does not exclude an opportunity.
 2. Choose a module and then its implementation under the
    [call contract](../stages/CONTRACT.md). Write a bounded `PLAN.md` stating what evidence

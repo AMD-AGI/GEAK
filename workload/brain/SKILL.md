@@ -29,7 +29,7 @@ preserve the inputs and evidence of in-flight calls.
 1. Reread the selected mode, if any, and current user steering alongside new reports,
    running work and accepted/rejected evidence. Choose a call that can improve the result
    or resolve an uncertainty that changes the plan; consult
-   [experience](experience.md). Missing evidence can justify a bounded probe, not a claim
+   [experience](experience/README.md). Missing evidence can justify a bounded probe, not a claim
    that the opportunity is absent.
 2. Write `PLAN.md` under the [module contract](../stages/CONTRACT.md). Reuse qualified
    inputs; investigate missing prerequisites or observed defects within the affected call,
@@ -39,9 +39,12 @@ preserve the inputs and evidence of in-flight calls.
    and retain asynchronous handles. Dispatch ready independent work on disjoint measurement
    resources as its native delivery permits. Inspect progress, valid measurements and
    remaining budget; a heartbeat alone is insufficient.
-4. Read native receipts and `REPORT.md`, including partial reports. Reconcile their input
-   versions, update open work, then adopt, reject, repair, investigate or wait. Preserve
-   failed and superseded calls; stale evidence cannot qualify a replacement.
+4. Read native receipts and `REPORT.md`, including partial reports. State what they answer
+   or leave unresolved in the plan's question. Reconcile input versions, observed costs and
+   remaining opportunities; record the next bounded action or justified wait/stop in
+   `STATE.md`, then write `PLAN.md` for a chosen call. Preserve failed and superseded calls;
+   stale evidence cannot qualify a replacement. Call termination alone does not rule out
+   an untested opportunity.
 
 Act on new evidence while other calls run. An implementation failure leaves a capability
 gap to resolve, not a closed optimization path. Choose bounded repair, another suitable
@@ -71,9 +74,11 @@ Reconcile inner and outer execution limits before dispatch; a larger outer allow
 does not extend an implementation's phase deadline.
 Reallocate from new evidence while preserving explicit task commitments; compare policies
 from the same starting state and total resource allowance.
-After truncation, reprice from observed whole-method costs and verify what the native
-method can resume; retained files alone do not make a checkpoint. A local limit returns
-to Reasoning, including verification and delivery in the next budget.
+After truncation or an input/runtime change, reprice from matching observed whole-method
+costs, including preparation before search and completion after it. Verify what the native
+method can resume; retained files alone do not make a checkpoint. Resolve the cause of a
+no-search return before repeating it. A local limit returns to Reasoning, including
+verification and delivery in the next budget.
 
 Only native evidence under the task's comparison and quality criteria admits a replacement.
 Adoption updates the verified candidate; rejection keeps the reference. Neither ends the
