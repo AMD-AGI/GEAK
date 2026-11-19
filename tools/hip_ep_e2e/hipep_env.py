@@ -19,6 +19,7 @@ import glob
 import hashlib
 import json
 import os
+import shlex
 import subprocess
 import time
 
@@ -147,6 +148,51 @@ def fresh(path):
     if os.path.exists(path):
         os.remove(path)
     return path
+
+
+def export_tree(src, dest, paths):
+    """Copy `paths` as committed at the hip-ep checkout's HEAD (the release tag) into dest.
+    Never the working tree: build_kernels.sh applies each candidate's overlay to it."""
+    os.makedirs(dest, exist_ok=True)
+    tar = subprocess.run(["git", "-C", src, "archive", "--format=tar", "HEAD", *paths],
+                         capture_output=True, check=True).stdout
+    subprocess.run(["tar", "x", "-C", dest], input=tar, check=True)
+
+
+def autotune(op):
+    """An op's autotune dir in the hip-ep tree: its update_lut.py, sweep sources and lut/."""
+    return f"{K}/hip/autotune/{op}"
+
+
+def product_command(build, obj):
+    """The release build's compile command for one object, via `ninja -t commands`.
+    The build dir is configured for one arch (build_kernels.sh), so it has one target."""
+    dirs = glob.glob(os.path.join(build, K, "CMakeFiles", "custom_kernels_*.dir"))
+    if len(dirs) != 1:
+        raise RuntimeError(f"{build} has {len(dirs)} custom_kernels_<arch> targets; expected one")
+    obj_dir = os.path.relpath(dirs[0], build)
+    out = subprocess.run(["ninja", "-C", build, "-t", "commands", f"{obj_dir}/{obj}"],
+                         capture_output=True, text=True, check=True).stdout
+    return out.strip().splitlines()[-1]
+
+
+def compile_flags(command):
+    """(compiler, flags) of a compile command, without includes, deps, I/O or language."""
+    argv = shlex.split(command)
+    compiler, rest, flags = argv[0], argv[1:], []
+    skip_next = {"-o", "-MT", "-MF", "-isystem", "-x", "-I"}
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        if a in skip_next:
+            i += 2
+            continue
+        if a in ("-c", "-MD") or a.startswith("-I") or not a.startswith("-"):
+            i += 1
+            continue
+        flags.append(a)
+        i += 1
+    return compiler, flags
 
 
 def write_json(path, obj):

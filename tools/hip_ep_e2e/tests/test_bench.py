@@ -6,6 +6,7 @@ the gfx1151 box, not here.
     python3 -m pytest tools/hip_ep_e2e/tests/test_bench.py
 """
 import argparse
+import json
 import os
 import sys
 
@@ -123,6 +124,17 @@ def test_gate_missing_length_raises():
         bench.gate(BASE, cand, N)
 
 
+def test_noise_band_is_per_metric_with_a_one_percent_floor():
+    aa = {"per_len": {1024: {"ttft_gain": 0.002, "decode_delta": 0.001},
+                      2048: {"ttft_gain": -0.004, "decode_delta": -0.003}}}
+    assert bench.noise_band(aa) == pytest.approx({"ttft": 0.01, "decode": 0.01})
+    aa["per_len"][2048]["ttft_gain"] = -0.017
+    aa["per_len"][1024]["decode_delta"] = 0.012
+    assert bench.noise_band(aa) == pytest.approx({"ttft": 0.017, "decode": 0.012})
+
+
+# -- run order ------------------------------------------------------------------
+
 def test_abba_order():
     assert bench.run_order(2) == [("a", "b"), ("b", "a")]
     assert bench.run_order(3) == [("a", "b"), ("b", "a"), ("a", "b")]
@@ -170,3 +182,19 @@ def test_a_run_of_the_wrong_length_raises(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="prompt has 128 tokens, expected about 1024"):
         bench.run_once(env, "m", 1024, 16, 1, str(tmp_path / "r.log"))
     assert bench.run_once(env, "m", 128, 16, 1, str(tmp_path / "r.log"))["ttft_us_p50"] > 0
+
+
+def test_the_band_comes_from_the_aa_file(tmp_path, monkeypatch):
+    cand = _runs({1024: [1975e3, 1975e3], 2048: [3950e3, 3950e3]},  # 1.5% faster TTFT
+                 {1024: [71.0e3, 71.2e3], 2048: [72.0e3, 72.2e3]})
+    aa = tmp_path / "aa.json"
+    aa.write_text(json.dumps({"gate": {"per_len": {"1024": {"ttft_gain": -0.02, "decode_delta": 0.0}}}}))
+    monkeypatch.setattr(bench.hipep_env.Env, "from_environ",
+                        staticmethod(lambda pkg=None: bench.hipep_env.Env(pkg, "/tr", "/s")))
+    monkeypatch.setattr(bench.hipep_env, "pkg_info", lambda pkg: {"pkg": pkg})
+    monkeypatch.setattr(bench, "collect", lambda *a: {"a": BASE, "b": cand})
+    for extra, accepted in (([], True), (["--noise-from", str(aa)], False)):
+        monkeypatch.setattr(sys, "argv", ["bench.py", "ab", "--model", "m", "--base", "a", "--cand", "b",
+                                          "--out", str(tmp_path / "ab"), *extra])
+        bench.main()
+        assert json.loads((tmp_path / "ab" / "ab.json").read_text())["gate"]["accepted"] is accepted

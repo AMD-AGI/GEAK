@@ -194,6 +194,7 @@ jobs:
             tools/hip_ep_e2e/tests/test_kprof.py \
             tools/hip_ep_e2e/tests/test_build_kernels.py \
             tools/hip_ep_e2e/tests/test_make_pkg.py \
+            tools/hip_ep_e2e/tests/test_lut_refresh.py \
             geak/test_bootstrap.py
 
       - name: expert skill static validation

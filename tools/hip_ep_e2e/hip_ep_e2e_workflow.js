@@ -1,11 +1,13 @@
 export const meta = {
   name: 'hip-ep-e2e-workflow',
-  description: 'End-to-end loop for an OGA model served by hip-ep (the ONNX Runtime EP for AMD GPUs). Rebuilds the release kernel library, measures TTFT and decode with model_benchmark (with an A/A of the rebuild), profiles the prefill and decode forwards, and reports. The tools it drives live next to this script (tools/hip_ep_e2e).',
-  whenToUse: 'Run GEAK end to end on an OGA-exported model on hip-ep. Pass args.model_path (OGA model dir), args.hipep_pkg (release package dir), args.tools_dir (this script\'s dir), args.exp_root, and the machine paths args.therock, args.sysroot, args.py314, args.hipep_src and args.hipep_build (tools/hip_ep_e2e/README.md).',
+  description: 'End-to-end optimizer for an OGA model served by hip-ep (the ONNX Runtime EP for AMD GPUs). Measures TTFT and decode with model_benchmark and profiles the prefill and decode forwards. For the ops whose kernels carry the prefill or decode (matmul_nbits, gqa), it refreshes hip-ep\'s own autotune tables for the model (the tuning lane). The candidate is a rebuilt libcustom_kernels library in a copy of the release package, accepted only through an interleaved TTFT/decode A/B and a teacher-forced logits parity gate. The tools it drives live next to this script (tools/hip_ep_e2e).',
+  whenToUse: 'Optimize an OGA-exported model on hip-ep. Pass args.model_path (OGA model dir), args.hipep_pkg (release package dir), args.tools_dir (this script\'s dir), args.exp_root, and the machine paths args.therock, args.sysroot, args.py314, args.hipep_src and args.hipep_build (tools/hip_ep_e2e/README.md).',
   phases: [
     { title: 'Setup', detail: 'Director rebuilds the release library and measures it against the release (A/A, baseline)' },
     { title: 'Profile', detail: 'Profiler traces one run -> per-phase kernel shares with sources' },
-    { title: 'Validate', detail: 'Validator writes the report' },
+    { title: 'Strategize', detail: 'The tuning lane runs for the tunable ops that carry enough of the prefill or decode' },
+    { title: 'Tuning', detail: 'Tuner refreshes those ops\' autotune tables for the model -> rebuild -> gate' },
+    { title: 'Validate', detail: 'Validator re-measures the final package against the release and writes the report' },
   ],
 };
 
@@ -35,6 +37,14 @@ const LENS = String(A.lens || '1024,2048');
 const GEN = parseInt(A.gen != null ? A.gen : 128, 10);
 const REPS = parseInt(A.reps != null ? A.reps : 3, 10);
 const ROUNDS = parseInt(A.rounds != null ? A.rounds : 2, 10);
+// The ops with a hip-ep autotune table the tuning lane can refresh, the kernels each table picks
+// configs for, and the phases those kernels run in (matmul_nbits' table covers the prefill GEMM).
+// An op is tuned when its kernels hold at least MIN_SHARE of a phase.
+const TUNABLE = [
+  { op: 'matmul_nbits', kernels: /^MatMulNBitsWMMA/, phases: ['prefill'] },
+  { op: 'gqa', kernels: /^gqa_flash/, phases: ['prefill', 'decode'] },
+];
+const MIN_SHARE = 0.2;
 const AGENT_RETRIES = 2;
 const MIN = 60000;
 
@@ -103,9 +113,13 @@ async function agentT(prompt, opts, timeoutMs) {
 
 const S = (props, req) => ({ type: 'object', properties: props, required: req,
   additionalProperties: true });
+const num = { type: 'number' };
 const str = { type: 'string' };
 const bool = { type: 'boolean' };
 const PERLEN = { type: 'object', additionalProperties: true };
+const GATE_SCHEMA = S({
+  accepted: bool, reason: str, pkg: str, overlay: str, per_len: PERLEN, parity_top1: num, parity_rel_l2: num,
+}, ['accepted', 'reason', 'pkg', 'overlay']);
 
 // ===========================================================================
 phase('Setup');
@@ -137,16 +151,60 @@ const prof = await agentT(roleAgent('profiler', 'profile',
 if (!prof || !prof.heads_json) throw new Error('Profile failed: no heads.json');
 
 // ===========================================================================
-phase('Validate');
-const val = await agentT(roleAgent('validator', 'validate', 'Write the report.', {
-  EVAL_DIR, MODEL_PATH, BASE_PKG, AA_JSON, HEADS_JSON: prof.heads_json,
-  DEVICE_GFX: setup.device_gfx, AA_PARITY_EXACT: setup.aa_parity_exact,
-}), { label: 'validator:validate', phase: 'Validate', schema: S({ report_md: str }, ['report_md']) },
-60 * MIN);
+phase('Strategize');
+const pct = (x) => `${(100 * x).toFixed(1)}%`;
+const shares = {};
+for (const t of TUNABLE) {
+  shares[t.op] = Math.max(...t.phases.map((ph) => (prof[ph] || [])
+    .filter((r) => t.kernels.test(String(r.base || ''))).reduce((s, r) => s + (Number(r.share) || 0), 0)));
+}
+const tuneOps = TUNABLE.map((t) => t.op).filter((op) => shares[op] >= MIN_SHARE);
+log(`largest phase share per tunable op: ${TUNABLE.map((t) => `${t.op} ${pct(shares[t.op])}`).join(', ')}` +
+  ` (the tuning lane needs ${pct(MIN_SHARE)})`);
 
+// The candidate: the release, unless the tuning lane's package is accepted.
+let cur = { pkg: BASE_PKG, overlay: '', label: 'release' };
+const history = [];
+if (tuneOps.length) {
+  phase('Tuning');
+  const laneDir = `${EVAL_DIR}/lanes/0_tuning`;
+  const r = await agentT(roleAgent('tuner', 'tuning',
+    `Refresh the ${tuneOps.join(' and ')} autotune tables for this model, rebuild, and gate the candidate.`, {
+      EVAL_DIR, LANE_DIR: laneDir, MODEL_PATH, BASE_PKG, AA_JSON, TOOLS_DIR, LENS, GEN, REPS,
+      ROUNDS, TOOL_ENV, ARCH: setup.device_gfx, OPS: tuneOps.join(','),
+    }), { label: 'tuner:tuning', phase: 'Tuning', schema: GATE_SCHEMA }, 360 * MIN);
+  history.push({ lane: 'tuning', ops: tuneOps, shares,
+    result: r || { accepted: false, reason: 'the tuner returned no result' } });
+  if (r && r.accepted) cur = { pkg: r.pkg, overlay: r.overlay, label: 'tuning' };
+  log(`tuning: ${r ? (r.accepted ? 'ACCEPTED' : `rejected (${r.reason})`) : 'no result'}`);
+} else {
+  history.push({ lane: 'tuning', ops: [], shares, result: { accepted: false,
+    reason: `not run: no tunable op holds ${pct(MIN_SHARE)} of a phase` } });
+}
+
+// ===========================================================================
+phase('Validate');
+const val = await agentT(roleAgent('validator', 'validate',
+  'Independently re-measure the final package against the release and write the report.', {
+    EVAL_DIR, MODEL_PATH, BASE_PKG, FINAL_PKG: cur.pkg, HISTORY: history, AA_JSON,
+    HEADS_JSON: prof.heads_json, DEVICE_GFX: setup.device_gfx, AA_PARITY_EXACT: setup.aa_parity_exact,
+    TOOLS_DIR, LENS, GEN, REPS, ROUNDS, TOOL_ENV,
+  }), { label: 'validator:validate', phase: 'Validate', schema: S({
+  validation_status: { type: 'string', enum: ['validated', 'not_reproduced', 'parity_failed', 'no_change'] },
+  report_md: str, per_len: PERLEN,
+}, ['validation_status', 'report_md']) }, 120 * MIN);
+
+// A candidate the validator could not reproduce against the release is reported, not returned as
+// the final package.
+const status = val ? val.validation_status : 'unknown';
+const kept = status === 'validated';
 const ret = {
   eval_dir: EVAL_DIR, model_path: MODEL_PATH, base_pkg: BASE_PKG, device_gfx: setup.device_gfx,
+  final_pkg: kept ? cur.pkg : BASE_PKG, final_overlay: kept ? cur.overlay : '',
+  final_label: kept ? cur.label : 'release',
+  candidate: cur.pkg === BASE_PKG ? null : { pkg: cur.pkg, overlay: cur.overlay, label: cur.label },
   aa_json: AA_JSON, aa_parity_exact: setup.aa_parity_exact, baseline: setup.baseline || null,
+  lanes: history, validation_status: status, per_len: val ? val.per_len : null,
   report_md: val ? val.report_md : '',
 };
 await agentT(`Write the JSON below verbatim to "${EVAL_DIR}/workflow_return.json" with the Write ` +

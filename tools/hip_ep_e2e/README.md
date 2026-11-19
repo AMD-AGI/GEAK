@@ -3,8 +3,11 @@
 GEAK's end-to-end loop for an OGA model served by hip-ep, the ONNX Runtime execution
 provider for AMD GPUs, validated on Strix Halo (gfx1151) with Qwen3.8-27B int4. It
 rebuilds the release's kernel library, measures TTFT and decode with an A/A of the rebuild,
-profiles the prefill and decode forwards, and writes a report. The design is in
-[DESIGN.md](DESIGN.md).
+profiles the prefill and decode forwards, and refreshes hip-ep's own autotune tables
+(matmul_nbits, gqa) for the model wherever their kernels hold at least 20% of the
+prefill or of a decode step (the tuning lane). A candidate is accepted only through an
+interleaved A/B and a logits parity gate, and the final package is re-measured against
+the release. The design is in [DESIGN.md](DESIGN.md).
 
 ## Prerequisites
 

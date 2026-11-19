@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Orchestration checks for tools/hip_ep_e2e/hip_ep_e2e_workflow.js (no GPU, no agents).
-// The script runs in a stub sandbox where agent() answers by label. Checks the phase order, what
-// reaches the tools and the report, the refusals, and that the long-command template works when an
-// agent runs it as written.
+// The script runs in a stub sandbox where agent() answers by label. Checks the phase order, when
+// the tuning lane runs, how its verdict moves the current package, what reaches the tools and the
+// validator, the refusals, and that the long-command template works when an agent runs it as written.
 //
 // Run:  node tools/hip_ep_e2e/tests/test_workflow.js
 'use strict';
@@ -52,30 +52,80 @@ const SETUP = { ok: true, error: '', eval_dir: '/exp/e2e_q27b', device_gfx: 'gfx
 const ANSWERS = {
   'director:setup': SETUP,
   'profiler:profile': { heads_json: '/h.json',
-    prefill: [{ base: 'MatMulNBitsWMMA_NoZP', share: 0.82 }],
+    prefill: [{ base: 'MatMulNBitsWMMA_NoZP', share: 0.15 }, { base: 'MatMulNBitsWMMAX_NoZP', share: 0.67 },
+      { base: 'gatedDeltaNetRecurrentKernel', share: 0.077 }],
     decode: [{ base: 'matmul_nbits_gemv_dp4a_kernel', share: 0.93 }] },
-  'validator:validate': { report_md: '# report\n' },
+  'tuner:tuning': { accepted: true, reason: 'TTFT -9%', pkg: '/pkg/lut1', overlay: '/o/lut' },
+  'validator:validate': { validation_status: 'validated', report_md: '# report\n', per_len: {} },
   persist: { written: true },
 };
 
 (async () => {
-  console.log('\n# a run');
-  const sb = sandbox(ANSWERS);
-  const ret = await go(sb);
-  ok(JSON.stringify(sb.calls.phases) === JSON.stringify(['Setup', 'Profile', 'Validate']), 'phases run in order');
+  console.log('\n# tuning lane accepted');
+  let sb = sandbox(ANSWERS);
+  let ret = await go(sb);
+  ok(JSON.stringify(sb.calls.phases) === JSON.stringify(
+    ['Setup', 'Profile', 'Strategize', 'Tuning', 'Validate']), 'phases run in order');
+  ok(/BASE_PKG: \/pkg\/rel/.test(sb.calls.prompts['tuner:tuning']) && /AA_JSON: \/aa\/ab\.json/.test(sb.calls.prompts['tuner:tuning']),
+    "the candidate is gated against the release, with the A/A's noise band");
+  ok(ret.final_pkg === '/pkg/lut1' && ret.final_overlay === '/o/lut' && ret.final_label === 'tuning',
+    'the validated candidate becomes final');
+  ok(/FINAL_PKG: \/pkg\/lut1/.test(sb.calls.prompts['validator:validate']) &&
+    /BASE_PKG: \/pkg\/rel/.test(sb.calls.prompts['validator:validate']),
+  'the validator re-measures the final package against the release');
   ok(/DEVICE_GFX: gfx1151/.test(sb.calls.prompts['validator:validate']) &&
     /AA_PARITY_EXACT: true/.test(sb.calls.prompts['validator:validate']) &&
-    /HEADS_JSON: \/h\.json/.test(sb.calls.prompts['validator:validate']) &&
     /AA_JSON: \/aa\/ab\.json/.test(sb.calls.prompts['validator:validate']) &&
     /AA_JSON: \/aa\/ab\.json/.test(sb.calls.prompts['profiler:profile']) &&
-    ret.aa_parity_exact === true && ret.device_gfx === 'gfx1151', "Setup's and Profile's findings reach the report and the return");
+    ret.aa_parity_exact === true && ret.device_gfx === 'gfx1151', "Setup's findings reach the report and the return");
   ok(ret.report_md === '# report\n' && /report\.md/.test(sb.calls.prompts.persist),
     'the report comes back as text and is saved next to workflow_return.json');
-  const toolEnv = JSON.parse(/TOOL_ENV: (\{.*\})/.exec(sb.calls.prompts['director:setup'])[1]);
+  ok(Math.abs(ret.lanes[0].shares.matmul_nbits - 0.82) < 1e-9, 'the matmul_nbits share sums every MatMulNBitsWMMA variant');
+  ok(/OPS: matmul_nbits\n/.test(sb.calls.prompts['tuner:tuning']) && /ARCH: gfx1151/.test(sb.calls.prompts['tuner:tuning']),
+    'the tuner refreshes only the ops that carry the run, for the device the run is on');
+  ok(sb.calls.schemas['tuner:tuning'].required.includes('overlay'), 'an accepted candidate must name its overlay');
+  ok(sb.calls.schemas['validator:validate'].properties.validation_status.enum.includes('validated'),
+    "the validator's status is one of the values the return reads");
+  const toolEnv = JSON.parse(/TOOL_ENV: (\{.*\})/.exec(sb.calls.prompts['tuner:tuning'])[1]);
   const pathsBlock = /^PATHS = \{([\s\S]*?)^\}/m.exec(fs.readFileSync(path.join(HERE, 'hipep_env.py'), 'utf8'))[1];
   const needed = [...pathsBlock.matchAll(/"(HIPEP_\w+)":/g)].map((m) => m[1]);
   ok(needed.length === 6 && needed.every((k) => toolEnv[k]), `TOOL_ENV sets every path the tools read (${needed.join(', ')})`);
   ok(toolEnv.HIPEP_PKG === '/pkg/rel', 'HIPEP_PKG is the release package');
+
+  console.log('\n# tuning lane rejected, silent, or not reproduced');
+  sb = sandbox({ ...ANSWERS, 'tuner:tuning': { ...ANSWERS['tuner:tuning'], accepted: false,
+    reason: 'TTFT@2048 -0.6% inside noise 1.0%' } });
+  ret = await go(sb);
+  ok(ret.final_pkg === '/pkg/rel' && ret.final_label === 'release' && ret.candidate === null,
+    'a rejected candidate leaves the release final');
+  ok(ret.lanes[0].result.reason === 'TTFT@2048 -0.6% inside noise 1.0%', 'the gate reason is recorded');
+  sb = sandbox({ ...ANSWERS, 'tuner:tuning': null });
+  ret = await go(sb);
+  ok(ret.final_pkg === '/pkg/rel' && ret.lanes[0].result.reason === 'the tuner returned no result',
+    'a tuner with no result is recorded with a reason');
+  sb = sandbox({ ...ANSWERS, 'validator:validate': { ...ANSWERS['validator:validate'], validation_status: 'not_reproduced' } });
+  ret = await go(sb);
+  ok(ret.final_pkg === '/pkg/rel' && ret.candidate && ret.candidate.pkg === '/pkg/lut1' &&
+    ret.validation_status === 'not_reproduced', 'a candidate the validator does not reproduce is not returned as final');
+
+  console.log('\n# the lane threshold');
+  sb = sandbox({ ...ANSWERS, 'profiler:profile': { ...ANSWERS['profiler:profile'],
+    prefill: [{ base: 'MatMulNBitsWMMA_NoZP', share: 0.12 }, { base: 'gqa_flash_prefill_v6x_kernel', share: 0.07 }],
+    decode: [{ base: 'matmul_nbits_gemv_dp4a_kernel', share: 0.9 }, { base: 'gqa_flash_decode_kernel', share: 0.05 }] } });
+  ret = await go(sb);
+  ok(!sb.calls.phases.includes('Tuning') && !sb.calls.agents.includes('tuner:tuning'), 'under 20% in every phase: no tuning lane');
+  ok(/^not run: no tunable op holds 20\.0% of a phase/.test(ret.lanes[0].result.reason), 'the reason reaches the report');
+  ok(sb.calls.agents.includes('validator:validate') && ret.final_pkg === '/pkg/rel', 'the run still validates and reports');
+  sb = sandbox({ ...ANSWERS, 'profiler:profile': { ...ANSWERS['profiler:profile'],
+    prefill: [{ base: 'MatMulNBitsWMMA_NoZP', share: 0.56 }, { base: 'gqa_flash_prefill_v6x_kernel', share: 0.07 }],
+    decode: [{ base: 'gqa_flash_decode_kernel', share: 0.17 }, { base: 'gqa_flash_decode_reduce_kernel', share: 0.03 }] } });
+  ret = await go(sb);
+  ok(/OPS: matmul_nbits,gqa\n/.test(sb.calls.prompts['tuner:tuning']) && Math.abs(ret.lanes[0].shares.gqa - 0.2) < 1e-9,
+    "an op counts its largest phase: gqa's 20% of a decode step tunes it, at exactly the threshold");
+  sb = sandbox({ ...ANSWERS, 'profiler:profile': { ...ANSWERS['profiler:profile'],
+    prefill: [{ base: 'MatMulNBitsFp16GEMM', share: 0.9 }] } });
+  await go(sb);
+  ok(!sb.calls.agents.includes('tuner:tuning'), 'a kernel no table picks configs for does not count');
 
   console.log('\n# refusals');
   ok(await refusal({ ...ANSWERS, 'director:setup': { ...SETUP, device_gfx: 'gfx1201' } }) === '',
@@ -100,7 +150,7 @@ const ANSWERS = {
   console.log('\n# the long-command template, run as an agent would run it');
   const prompt = sandbox(ANSWERS);
   await go(prompt);
-  const lines = prompt.calls.prompts['director:setup'].split('\n').map((l) => l.trim());
+  const lines = prompt.calls.prompts['tuner:tuning'].split('\n').map((l) => l.trim());
   const prep = lines.find((l) => l.startsWith('mkdir -p DIR'));
   const start = lines.find((l) => l.startsWith('setsid nohup'));
   const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'hipep-long-')), 'new', 'dir');

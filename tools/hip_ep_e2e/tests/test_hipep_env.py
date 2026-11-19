@@ -17,6 +17,27 @@ import hipep_env  # noqa: E402
 import kprof  # noqa: E402
 import parity  # noqa: E402
 
+CMD = ("/opt/tr/bin/amdclang++  -DUSE_PROF_API=1 -D__HIP_PLATFORM_AMD__=1 -I/s/lib/Runtime/Kernels/include "
+       "-I/b/schemas -isystem /b/_deps/llvm/include -isystem /opt/tr/include -O3 -DNDEBUG -std=c++17 "
+       "--offload-arch=gfx11-generic -fPIC -Wno-ignored-attributes --offload-compress -MD -MT x.o "
+       "-MF x.o.d -o x.o -x hip -c /s/lib/Runtime/Kernels/hip/matmul_nbits_kernel.hip")
+
+
+def test_compile_flags_keep_codegen_drop_io():
+    cc, flags = hipep_env.compile_flags(CMD)
+    assert cc == "/opt/tr/bin/amdclang++"
+    assert flags == ["-DUSE_PROF_API=1", "-D__HIP_PLATFORM_AMD__=1", "-O3", "-DNDEBUG",
+                     "-std=c++17", "--offload-arch=gfx11-generic", "-fPIC",
+                     "-Wno-ignored-attributes", "--offload-compress"]
+
+
+def test_compile_commands_come_from_the_builds_one_kernel_target(tmp_path):
+    objs = tmp_path / "lib" / "Runtime" / "Kernels" / "CMakeFiles"
+    (objs / "custom_kernels_gfx1201.dir").mkdir(parents=True)
+    (objs / "custom_kernels_gfx1151.dir").mkdir()
+    with pytest.raises(RuntimeError, match="2 custom_kernels_<arch> targets"):
+        hipep_env.product_command(str(tmp_path), "hip/k.hip.o")
+
 
 def test_every_machine_path_is_required(monkeypatch):
     assert set(hipep_env.PATHS) == {"HIPEP_PKG", "HIPEP_THEROCK", "HIPEP_SYSROOT", "HIPEP_PY",

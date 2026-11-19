@@ -26,7 +26,8 @@ baseline. You do not optimize anything.
        --out EVAL_DIR/runs/aa --lens LENS --gen GEN --reps REPS --rounds ROUNDS
    ```
    Return `EVAL_DIR/runs/aa/ab.json` as `aa_json`, and as `baseline` its release medians
-   (`gate.per_len.<L>.ttft_base` and `decode_base`, in us).
+   (`gate.per_len.<L>.ttft_base` and `decode_base`, in us). The lanes' gates take their
+   noise band from it.
 6. **A/A parity** (LONG; DIR `EVAL_DIR/runs`, NAME `aa_parity`):
    ```
    python3 TOOLS_DIR/parity.py --model MODEL_PATH --base BASE_PKG --cand EVAL_DIR/pkg/aa \
