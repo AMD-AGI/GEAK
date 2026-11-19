@@ -219,7 +219,7 @@ async function run(body, overrides = {}, reply = selection()) {
       EVAL_DIR: '/eval', MODEL_PATH: '/model', WORKLOAD: {}, WORKFLOW_DIR: '/wf', profile: {},
       curOverlay: '', curFlags: '', curEnv: '', curTput: 100, NOISE_BAND: 0.5,
       KERNEL_WF_SCRIPT: '/kernel.js', KERNEL_WF_DIR: '/kernel', USE_EXPERT_SKILLS: false,
-      EXPERT_SKILLS_DIR: '', KB_ARGS: {}, KERNEL_BUDGET: 1, GRAPH_REQ: '', TASK: '', EXTRACT_SCHEMA: {},
+      EXPERT_SKILLS_DIR: '', KB_ARGS: {}, KERNEL_BUDGET: 1, GRAPH_REQ: '', TASK: '', EXTRACT_SCHEMA: {}, mileWindowAbs: 0,
       history: {ledger: []}, acceptedKernels: [], log: () => {}, noteKernelKB: () => {},
       laneArgs: a => a, parallel: jobs => Promise.all(jobs.map(f => f())),
       extractWithBaseline: async () => ({unittest_smoke: 'pass', task_dir: '/task', target_callable: 'pkg:leaf'}),
