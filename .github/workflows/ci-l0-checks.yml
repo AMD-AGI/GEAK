@@ -370,6 +370,10 @@ jobs:
         run: node e2e_workflow/scripts/test_kernel_canonicalization_parity.js
       - name: head entity_kind adopted from the profiled row
         run: node e2e_workflow/scripts/test_head_entity_kind_adoption.js
+      # A fused non-GEMM head (attention scorer + select) keeps its declared op_kind, so its prepared
+      # UT is not rejected at dispatch as an op_kind mismatch. No GPU, no model.
+      - name: op-identity guard keeps settled op kinds
+        run: node e2e_workflow/scripts/test_op_identity_guard.js
       # Structural guard on the TuningSkillset phase: the accept bars, the overlay
       # carry-forward, and the deploy-bundle handoff to finalize. Node + git only.
       - name: tuning skillset phase regression
