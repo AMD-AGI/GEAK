@@ -967,6 +967,13 @@ Run this bound-the-win probe FIRST for any lever whose card is `gating_law == oc
 (`climb.md ## 2. Reversed-intuition traps — read this once`, trap 6): on an occupancy-hidden kernel
 the lever is a wash, and the probe is what tells you before you spend the round.
 
+**Split the probe when the path has more than one contributor.** A path such as "the scale feed" or
+"the epilogue" is several loads and ops. After the whole-path probe, remove each contributor alone
+(each one a separate measurement-only variant) and see which one carries the ceiling. The lever then
+targets that contributor, and a mechanism that turns out to cost nothing is retired with its number
+instead of re-tried. **One implementation that fails does not close a path whose probe ceiling is
+high**: it closes that implementation; the split says where the cost actually sits.
+
 **What a probe number does NOT prove (anti-misjudgement).** "removing X → time T" is ambiguous: T is
 either *unreached headroom* (the removing lever was never tried) or a *real ceiling* (every such lever
 was tried, measured negative, each negative a proven wall). **A floor / bound-the-win probe bounds a

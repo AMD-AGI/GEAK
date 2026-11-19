@@ -388,6 +388,13 @@ what sits between the matmuls) rather than as standalone recipes:
   - *Hoist the per-step scale load.* A scale load issued in the same K step that consumes it is a
     memory wait on the critical path; load the scales for the next step (or a few steps) ahead, the
     same way an operand is prefetched.
+  - *Count how many warps load the same scales.* A per-row (or per-column) scale vector takes the
+    layout of the accumulator's row (column) slice, and that slice is replicated across the warps
+    the matrix layout spreads along the other dimension: with `warps_per_cta` splitting N, every warp
+    loads the same per-row scales. Read the replication from the layout, or from the load count per
+    workgroup in the ISA. When it is more than one, let one warp load (mask the others' loads) and
+    share the values through a small LDS buffer, reusing an existing barrier where the staging
+    already has one.
 - **One accumulator instead of two.** The fresh-accumulator-per-step form keeps a second fp32 tile live
   (the partial product before scaling). Carrying the accumulator in the units of the current scale
   removes it: `U_k = P_k + (s_{k-1} / s_k) * U_{k-1}`, then multiply by the last scale once in the

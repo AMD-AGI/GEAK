@@ -4,16 +4,18 @@ export const meta = {
   whenToUse: 'Launch this script directly to port a tuned Triton kernel to Gluon, or to climb an existing Gluon kernel, on gfx942/gfx950. Pass args.kernel_path, args.workflow_dir (the kernel_workflow dir: shared roles, GPU lock, kernel tools), args.gpu_ids, args.budget (directions, as in kernel-workflow), optionally args.deadline_epoch, args.entry_mode (auto|port|incumbent|fresh) and args.target_arch. See this directory\'s README.md.',
   phases: [
     { title: 'Setup', detail: 'director (kernel_workflow role): isolated eval dir + workspace, GPU identity' },
+    { title: 'Analyze', detail: 'tech_lead PHASE=analyze (kernel_workflow role): roadmap, codebase context, perf_knowledge cards' },
     { title: 'Benchmark', detail: 'benchmark_engineer (kernel_workflow role): COMMANDMENT + frozen baseline' },
     { title: 'Profile', detail: 'gluon_profiler: gluon_profile.py baseline profile, the four dials (trace, PMC, ATT, IR)' },
     { title: 'Entry', detail: 'gluon_lead: entry mode, champion bundle, champion_gate.py (G1), track workspace' },
     { title: 'Budget', detail: 'gluon_lead: hw_budget.py, bound class and floor (no GPU)' },
+    { title: 'WarmStart', detail: 'experience KB (language gluon): adopt a verified stored patch (incumbent) or read it as reference' },
     { title: 'Transcribe', detail: 'gluon_engineer: faithful anchor + equivalence (port) / first Gluon kernel (fresh)' },
     { title: 'Recover', detail: 'tech_lead plans one direction per debt suspect; gluon_engineers repay in parallel; parity_gate.py (G2) on the round winner gates the climb' },
     { title: 'Climb', detail: 'tech_lead plans 2-3 directions (Gluon layers); gluon_engineers in parallel with G3/G4 (+ATT) evidence; verify_engineer measures each' },
     { title: 'Integrate', detail: 'gluon_engineer PHASE=integrate: integrator.md strategy on the track tags, permuted screen; verify; tech_lead update_memory' },
     { title: 'Close', detail: 'gluon_lead: outcome, final report, closure self-review' },
-    { title: 'Validate', detail: 'director (kernel_workflow role): independent validation vs the true baseline' },
+    { title: 'Validate', detail: 'director (kernel_workflow role): independent validation vs the true baseline; update_experience, citation ledger, experience store' },
   ],
 };
 
@@ -63,6 +65,45 @@ const MAX_FORCED_REPLANS = Math.max(1, Math.floor(num(A.max_forced_replans, 6)))
 // A continuation of an earlier run on the same kernel (whose kept line is this run's baseline):
 // that run's insight log / final report, read by the planner and the engineers like HISTORY.
 const PRIOR_LOG = String(A.prior_log || '').trim();
+
+// The rest of kernel_lane.js's knowledge loop, same switches and defaults (tests/test_main_alignment.js):
+// perf_knowledge cards resolved by tech_lead analyze; the experience KB read at the start (warm start)
+// and written at the end (update_experience, the citation ledger, the experience store). Every KB read
+// and write is keyed by language 'gluon', so a Triton page never seeds a Gluon run.
+const LANGUAGE = 'gluon';
+const KERNEL_KNOWLEDGE_DIR = String(A.perf_knowledge_dir || `${GEAK_ROOT}/perf_knowledge`).replace(/\/+$/, '');
+const LEARNED_DIR = `${WORKFLOW_DIR}/knowledge/learned`;
+const WARM_START = String(A.warm_start != null ? A.warm_start : 'on').trim().toLowerCase() || 'on';
+const WARM_START_ON = WARM_START !== 'off' && WARM_START !== 'false' && WARM_START !== 'none';
+const WARM_START_MIN_SPEEDUP = Number.isFinite(parseFloat(A.warm_start_min_speedup))
+  ? parseFloat(A.warm_start_min_speedup) : 1.05;
+const WARM_START_MATCH = ['exact', 'normalized', 'fuzzy'].includes(String(A.warm_start_match || '').trim())
+  ? String(A.warm_start_match).trim() : 'fuzzy';
+const UPDATE_EXPERIENCE = String(A.update_experience != null ? A.update_experience : 'on').trim().toLowerCase() || 'on';
+const UPDATE_EXPERIENCE_ON = UPDATE_EXPERIENCE !== 'off' && UPDATE_EXPERIENCE !== 'false' && UPDATE_EXPERIENCE !== 'none';
+// A contended box measured its neighbours, and a held-out kernel is the instrument that measures the
+// KB itself: neither is distilled (kernel_lane.js).
+const BOX_QUIET = String(A.box_quiet != null ? A.box_quiet : 'true') === 'true';
+const HELD_OUT = String(A.held_out != null ? A.held_out : 'false') === 'true';
+const KB_ARTIFACTS_DIR = String(A.kb_artifacts_dir || `${GEAK_ROOT}/kb_artifacts`).replace(/\/+$/, '');
+const EXPERIENCE_STORE = `${WORKFLOW_DIR}/scripts/experience_store.py`;
+const KB_MODE = String(A.kb_mode || 'store').trim().toLowerCase() === 'local' ? 'local' : 'store';
+const KB_STORE_DIR = String(A.kb_store_dir ||
+  (KB_ARTIFACTS_DIR ? KB_ARTIFACTS_DIR.replace(/\/[^/]*$/, '') + '/kb_store_local' : '')).replace(/\/+$/, '');
+const KB_FRAMEWORK_VERSION = String(A.kb_framework_version || '').trim();
+const KB_VERSION_FLAG = KB_FRAMEWORK_VERSION ? ` --framework-version ${JSON.stringify(KB_FRAMEWORK_VERSION)}` : '';
+const KB_ROOT_OK = KB_MODE === 'store' ? !!KB_STORE_DIR : !!KB_ARTIFACTS_DIR;
+const KB_WRITE_OK = KB_ROOT_OK && !!KB_ARTIFACTS_DIR;
+const KB_REMOTE = String(A.kb_remote || 'auto').trim().toLowerCase() === 'off' ? 'off' : 'auto';
+// kernel_lane.js's credential prelude, verbatim: the commands read the KB service credentials themselves.
+const KB_ENV_PRELUDE =
+  'export KB_STORE_URL="${GEAK_KB_STORE_URL:-${KB_STORE_URL:-https://global.primus-safe.amd.com/knowledge-base}}"; ' +
+  'export KB_STORE_TOKEN="${GEAK_KB_STORE_TOKEN:-${KB_STORE_TOKEN:-$(cat ~/.geak_kb_token 2>/dev/null)}}"; ' +
+  'if [ -z "${SSL_CERT_FILE:-}" ]; then for _ca in "${KB_CA_BUNDLE:-}" ' +
+  '/shared_nfs/hyperloom/ca/amd-ca-combined.pem "$HOME/amd-extra-ca-bundle.pem"; do ' +
+  '[ -n "$_ca" ] && [ -r "$_ca" ] && { export SSL_CERT_FILE="$_ca" REQUESTS_CA_BUNDLE="$_ca" ' +
+  'CURL_CA_BUNDLE="$_ca" NODE_EXTRA_CA_CERTS="$_ca"; break; }; done; fi; ';
+const STORAGE_RECLAIM = String(A.storage_reclaim != null ? A.storage_reclaim : 'on') !== 'off';
 // kernel_workflow/knowledge/learned/ for the planner, with kernel_lane.js's budget on how much of a
 // round it may steer: at most KB_DIR_CAP directions cite cards, one direction is profile-only.
 const USE_LEARNED_READ = String(A.use_learned_kb != null ? A.use_learned_kb : 'true') === 'true';
@@ -343,6 +384,32 @@ const INTEGRATE_SCHEMA = obj({
   correctness: { type: 'string', enum: ['pass', 'fail', 'not_run'] },
   g4_screen: ROUND_SCHEMA.properties.g4_screen, parity_gate: ROUND_SCHEMA.properties.parity_gate,
 }, ['attempted', 'conclusion']);
+// kernel_lane.js ANALYZE_SCHEMA (tech_lead PHASE=analyze).
+const ANALYZE_SCHEMA = obj({
+  kernel_type: { type: 'string' }, kernel_file: { type: 'string' }, entry_point: { type: 'string' },
+  modifiable_files: strs, bottleneck_guess: { type: 'string' }, roadmap_summary: { type: 'string' },
+  candidate_directions: { type: 'array', items: anyObj },
+  kk_operator: { type: ['string', 'null'] }, kk_language: { type: ['string', 'null'] }, kk_refs: strs,
+}, ['kernel_type', 'roadmap_summary']);
+// kernel_lane.js experience-store schemas (experience_store.py JSON, verbatim).
+const WARMSTART_RESOLVE_SCHEMA = obj({
+  read_reason: { type: 'string' }, slug: { type: 'string' }, requested_slug: { type: 'string' },
+  match_tier: { type: 'string' }, canonical_id: { type: 'string' }, read_plane: { type: 'string' },
+  other_language_pages: strs, filtered: anyObj,
+  candidates: { type: 'array', items: obj({
+    rank: { type: 'number' }, slug: { type: 'string' }, speedup: { type: 'number' }, exp_dir: { type: 'string' },
+    session_id: { type: 'string' }, patch_path: { type: 'string' }, prose_path: { type: 'string' },
+    direction: { type: 'string' },
+  }, ['rank', 'patch_path']) },
+}, ['read_reason']);
+const WARMSTART_WRITE_SCHEMA = obj({
+  written: { type: 'boolean' }, reason: { type: 'string' }, slug: { type: 'string' }, dir: { type: 'string' },
+  speedup: { type: 'number' }, remote: anyObj,
+}, ['written']);
+const UPDATE_EXPERIENCE_SCHEMA = obj({
+  action: { type: 'string' }, card_path: { type: 'string' }, key: { type: 'string' }, note: { type: 'string' },
+}, []);
+const ADOPT_SCHEMA = obj({ committed: { type: 'boolean' }, patch_file: { type: 'string' }, note: { type: 'string' } }, ['committed']);
 const VERIFY_SCHEMA = obj({
   status: { type: 'string' }, correctness: { type: 'string' }, verified_geomean: { type: 'number' },
   verified_weighted: { type: 'number' }, per_case: { type: 'array', items: anyObj }, notes: { type: 'string' },
@@ -530,12 +597,30 @@ if (!(setup.baseline_frozen === true || has(setup.baseline_callable))) {
 }
 log(`Setup done. EVAL_DIR=${EVAL_DIR} GFX=${GFX}`);
 
+// kernel_lane.js's tech_lead analyze, before Benchmark as there: the roadmap, codebase_context.md and
+// the perf_knowledge cards (KK_*) the planner and every engineer read.
+phase('Analyze');
+const analysis = await agentT(
+  rolePrompt('tech_lead', geakRole('tech_lead'), 'analyze', 'Analyze the kernel and write the roadmap.', {
+    WORKSPACE: CANONICAL, EVAL_DIR, TASK, SKILL_DIR: WORKFLOW_DIR, KERNEL_KNOWLEDGE_DIR, GFX,
+    DEVICE_TARGET: setup.device_target || '', PHYSICAL_CU_COUNT: setup.physical_cu_count || 0,
+  }, { tail: '## This run\nThe gluon_authoring expert workflow keeps this kernel in Gluon ' +
+    `(${SKILL}): resolve the perf_knowledge cards for the operator with kk_language gluon; your ` +
+    'candidate_directions are advisory to the later plan_round. A tile, config or language change is not ' +
+    'a direction here (deep_explore / resweep_request decide those later).' }),
+  { phase: 'Analyze', label: 'tech_lead:analyze', schema: ANALYZE_SCHEMA });
+const KK_OPERATOR = (analysis && analysis.kk_operator) || '';
+const KK_LANGUAGE = (analysis && analysis.kk_language) || LANGUAGE;
+const KK_REFS = (analysis && Array.isArray(analysis.kk_refs)) ? analysis.kk_refs : [];
+const KK_INPUTS = { KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE, KK_REFS };
+log(`Analyze done. kernel_type=${analysis ? analysis.kernel_type : '?'} kk_operator=${KK_OPERATOR || '-'}`);
+
 phase('Benchmark');
 const bench = await agentT(
   rolePrompt('benchmark_engineer', geakRole('benchmark_engineer'), 'setup',
     'Build the COMMANDMENT and record a reliable baseline.', {
       WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL,
-      ANALYSIS: { kernel_type: 'gluon_authoring', note: 'see the task dir config/README for the target' },
+      ANALYSIS: analysis || { kernel_type: 'gluon_authoring', note: 'see the task dir config/README for the target' },
     }),
   { phase: 'Benchmark', label: 'benchmark_engineer', schema: BENCH_SCHEMA });
 if (!bench || !Array.isArray(bench.baseline_per_case)) throw new Error('Benchmark setup failed: no baseline recorded');
@@ -737,7 +822,10 @@ async function runDirection(d, stg, roundInputs, engTimeout) {
   const ph = STAGE_PHASE[stg];
   const inputs = { ...roundInputs, ROUND_TAG: d.id, OUTPUT_DIR: d.out,
     ...(d.planned ? { DIRECTION: { id: d.id, title: d.title, specialty: d.specialty, layer: d.layer || '',
-      suspect: d.suspect || '', paired: d.paired === true, expected_speedup: d.expected_speedup, prompt: d.prompt } } : {}) };
+      suspect: d.suspect || '', paired: d.paired === true, expected_speedup: d.expected_speedup, prompt: d.prompt,
+      kk_refs: d.kk_refs || [], learned_refs: d.learned_refs || [] } } : {}),
+    // a direction's own perf_knowledge cards replace the run's (kernel_lane.js)
+    ...(d.planned && Array.isArray(d.kk_refs) && d.kk_refs.length ? { KK_REFS: d.kk_refs } : {}) };
   const intro = d.planned
     ? `Carry direction ${d.id} (${d.specialty}${d.layer ? `, layer ${d.layer}` : ''}${d.paired ? ', a prerequisite + lever pair' : ''}) ` +
       `of round ${inputs.ROUND}, stage ${stg}, in your own copy of the track.`
@@ -776,7 +864,7 @@ async function runDirection(d, stg, roundInputs, engTimeout) {
   const row = { round: inputs.ROUND, id: d.id, stage: stg, specialty: d.specialty || '', title: d.title || '',
     layer: r ? (stg === 'recover' ? (SUSPECT_LAYER[r.suspect] || r.layer || '') : (r.layer || '')) : (d.layer || ''),
     claim: r ? r.claim || '' : '', lesson: r ? r.lesson || '' : '', status: '', vs_baseline: null, vs_champion: null,
-    kept: false, accepted: false };
+    kept: false, accepted: false, learned_refs: d.planned && Array.isArray(d.learned_refs) ? d.learned_refs : [] };
   if (r && has(r.resweep_request)) requests.push({ round: inputs.ROUND, id: d.id, kind: 'resweep_request', ref: r.resweep_request });
   if (r && has(r.structure_suspect)) requests.push({ round: inputs.ROUND, id: d.id, kind: 'structure_suspect', ref: r.structure_suspect });
   if (r && r.edge_shapes && r.edge_shapes.exit_code === 3 && !caveats.some(c => c.startsWith('boundary_limitation'))) {
@@ -839,6 +927,10 @@ function planAddendum(stg) {
       'transcription-debt `suspect` (lost_pipeline -> layer 4, lost_layout -> layer 3, lost_RA -> layer 5; ' +
       `${refPath('references/method/recover.md')}), at most one direction per suspect, no deep_explore. If the debt is not ` +
       'attributed yet, one direction attributes it and repays the largest suspect.'] : []),
+    '- Knowledge (KK_REFS, learned cards, KB_REFERENCES, the analyze roadmap) is advisory and mostly written for other ' +
+      'languages: take the mechanism, not the recipe. The kernel stays Gluon; a config or tile change is a resweep_request ' +
+      'or a deep_explore direction. A construct that exists only on some targets (an async copy, a scaled MFMA, a ' +
+      `scheduling knob) is planned only after \`${SKILL}/scripts/probe_levers.py --all\` shows it is live on ${GFX}.`,
     ...(PRIOR_LOG ? [`- PRIOR_RUN_LOG (${PRIOR_LOG}) is an earlier run on this kernel whose kept line is this run's baseline: ` +
       'read its insights, ledger and every direction\'s verdict and lesson as part of HISTORY before planning.'] : []),
     'Return the plan_round JSON with `layer` on every direction (and `suspect` / `paired` where they apply).',
@@ -860,7 +952,10 @@ async function planRound(stg, left) {
       bottleneck_now: memory.bottleneck_now, suggest_next: memory.suggest_next },
     GFX, DEVICE_TARGET: setup.device_target || '', PHYSICAL_CU_COUNT: setup.physical_cu_count || 0,
     ROOFLINE_STATUS: budgetRes && budgetRes.exit_code === 0 ? `tabulated-${GFX}` : `unknown-${GFX}`,
-    BUDGET_JSON: budgetRes ? budgetRes.budget_json : '', LEARNED_KB: USE_LEARNED_READ ? 'on' : 'off',
+    BUDGET_JSON: budgetRes ? budgetRes.budget_json : '', ...KK_INPUTS,
+    CODEBASE_CONTEXT: `${EVAL_DIR}/codebase_context.md`, ROADMAP: analysis ? analysis.roadmap_summary || '' : '',
+    ...(KB_REFERENCES ? { KB_REFERENCES } : {}),
+    LEARNED_KB: USE_LEARNED_READ ? 'on' : 'off',
     ...(USE_LEARNED_READ ? { LEARNED_KB_BUDGET:
       `At most ${KB_DIR_CAP} of this round's directions may draw on learned cards, and you must cite ` +
       'the cards you used in that direction\'s `learned_refs`. ' +
@@ -969,14 +1064,144 @@ async function integrate(stg, cands, roundInputs, engTimeout) {
 }
 
 // The kept line's profile after an integrated winner (a single direction's own round profile is used as is).
-async function reprofile(tag) {
+async function reprofile(tag, outDir) {
   const pr = await agentT(
     rolePrompt('gluon_profiler', pkgRole('gluon_profiler'), 'reprofile', 'Profile the new kept line against the last profile.', {
-      TRACK, TRACK_TAG: tag, OUTPUT_DIR: `${GLUON_DIR}/round_${round}/profile`, LAST_PROFILE: lastProfile,
+      TRACK, TRACK_TAG: tag, OUTPUT_DIR: outDir || `${GLUON_DIR}/round_${round}/profile`, LAST_PROFILE: lastProfile,
       EVAL_DIR, GPU_ID: GPU_POOL, COMMANDMENT, GFX, KT, SKILL, WORKFLOW_DIR,
     }, { stage: 'profile' }),
-    { phase: 'Integrate', label: `gluon_profiler:reprofile r${round}`, schema: PROFILE_SCHEMA });
+    { phase: outDir ? 'WarmStart' : 'Integrate', label: outDir ? 'warm_start:reprofile' : `gluon_profiler:reprofile r${round}`, schema: PROFILE_SCHEMA });
   return pr && has(pr.profile_dir) ? pr.profile_dir : '';
+}
+
+// ===========================================================================
+// WarmStart: kernel_lane.js's experience read, keyed by language gluon. An incumbent adopts the first
+// stored patch that passes verify (its tag becomes the kept line, and this run earns only the delta
+// above it); a port or fresh run reads the candidates as reference only, since its anchor must come
+// from its own transcription. Every benched candidate is attested back, as in kernel_lane.js.
+// ===========================================================================
+let KB_REFERENCES = '';
+const warm_start = { adopted: false, read_reason: WARM_START_ON ? 'read' : 'disabled', candidates: [] };
+if (!stoppedBy && WARM_START_ON && KB_ROOT_OK) {
+  phase('WarmStart');
+  const adoptMode = ENTRY === 'incumbent';
+  const localResolveCmd = KB_MODE === 'store'
+    ? `resolve-remote --plane local --store ${JSON.stringify(KB_STORE_DIR)}${KB_VERSION_FLAG}`
+    : `resolve --root ${JSON.stringify(KB_ARTIFACTS_DIR)} --match ${WARM_START_MATCH}`;
+  const syncCmd = KB_MODE === 'store' && KB_ARTIFACTS_DIR
+    ? `python3 ${JSON.stringify(EXPERIENCE_STORE)} sync-local --root ${JSON.stringify(KB_ARTIFACTS_DIR)} \\
+  --store ${JSON.stringify(KB_STORE_DIR)} --kernel-name ${JSON.stringify(KERNEL_NAME)} --gfx ${GFX} \\
+  > ${JSON.stringify(EVAL_DIR + '/kb_sync.json')} 2>&1 || true\n` : '';
+  const commonArgs = `--kernel-name ${JSON.stringify(KERNEL_NAME)} --language ${LANGUAGE} \\\n` +
+    `  --gfx ${GFX} --top-n 3 --min-speedup ${WARM_START_MIN_SPEEDUP} \\\n` +
+    `  --refs-dir ${JSON.stringify(EVAL_DIR + '/kb_references')}`;
+  const resolveScript = KB_REMOTE === 'off'
+    ? `${syncCmd}python3 ${JSON.stringify(EXPERIENCE_STORE)} ${localResolveCmd} \\\n  ${commonArgs}`
+    : `${syncCmd}${KB_ENV_PRELUDE}
+REMOTE_OUT=''
+if [ -n "$KB_STORE_TOKEN" ]; then
+  REMOTE_OUT=$(python3 ${JSON.stringify(EXPERIENCE_STORE)} resolve-remote --plane remote${KB_VERSION_FLAG} \\
+  ${commonArgs} 2>/dev/null || true)
+  if printf '%s' "$REMOTE_OUT" | python3 -c 'import json,sys; sys.exit(0 if (json.load(sys.stdin).get("candidates") or []) else 1)' 2>/dev/null; then
+    printf '%s\\n' "$REMOTE_OUT"; exit 0
+  fi
+fi
+python3 ${JSON.stringify(EXPERIENCE_STORE)} ${localResolveCmd} \\
+  ${commonArgs}`;
+  const resolved = await agentT(
+    'You are the warm-start resolver. Run EXACTLY this script and return its single-line JSON stdout ' +
+    'verbatim as StructuredOutput -- do not add, drop, reorder or reinterpret any field. An empty ' +
+    'candidate list is a VALID answer meaning "nothing recorded for this kernel yet". Do not retry with ' +
+    'different flags and do not invent candidates:\n```bash\n' + resolveScript + '\n```',
+    { phase: 'WarmStart', label: 'warm_start:resolve', schema: WARMSTART_RESOLVE_SCHEMA }) || {};
+  const cands = Array.isArray(resolved.candidates) ? resolved.candidates : [];
+  warm_start.read_reason = resolved.read_reason || 'read';
+  warm_start.slug = resolved.slug || '';
+  warm_start.plane = resolved.read_plane === 'remote' ? 'remote' : resolved.canonical_id ? 'store'
+    : KB_MODE === 'store' ? 'none' : 'local';
+  warm_start.candidates = cands.map(c => ({ rank: c.rank, slug: c.slug, speedup: c.speedup,
+    direction: c.direction || '', session_id: c.session_id || '', exp_dir: c.exp_dir || '', status: 'read' }));
+  log(`[kb] warm start (${LANGUAGE}): ${cands.length} candidate(s), reason=${warm_start.read_reason}, mode=${adoptMode ? 'adopt' : 'reference'}`);
+  if (cands.length) KB_REFERENCES = `${EVAL_DIR}/kb_references`;
+  if (adoptMode) {
+    for (const c of cands) {
+      const rec = warm_start.candidates.find(x => x.rank === c.rank);
+      const dir = `${GLUON_DIR}/warm_start/cand_${c.rank}`;
+      const remapOut = `${dir}/remapped.diff`;
+      const ver = await agentT(
+        rolePrompt('verify_engineer', geakRole('verify_engineer'), 'verify',
+          'Validate a HISTORICAL warm-start patch -- the SAME gate as any round candidate. The patch was won in ' +
+          'the workspace that produced it, so FIRST run EXACTLY:\n```bash\n' +
+          `mkdir -p ${JSON.stringify(dir)}\n` +
+          `python3 ${JSON.stringify(EXPERIENCE_STORE)} remap --patch ${JSON.stringify(c.patch_path)} \\\n` +
+          `  --out ${JSON.stringify(remapOut)} --editable ${JSON.stringify(((analysis && analysis.modifiable_files) || []).join(','))} \\\n` +
+          `  --workspace ${JSON.stringify(CANONICAL)}\n` + '```\n' +
+          'remapped=true: apply the REMAPPED patch. reason "no_change_needed": apply the original PATCH. Any other ' +
+          'reason: return status:"apply_failed", notes "patch_outside_editable_set", and do not apply or benchmark.', {
+          CANONICAL, PATCH: c.patch_path, REMAP_OUT: remapOut, VERIFY_DIR: dir, EVAL_DIR, WORKFLOW_DIR,
+          GPU_ID: GPU_POOL, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT, BASELINE_PER_CASE,
+        }),
+        { phase: 'WarmStart', label: `warm_start:verify c${c.rank}`, schema: VERIFY_SCHEMA });
+      const sp = ver && says(ver.correctness, 'pass') && says(ver.status, 'verified') ? primary(ver) : 0;
+      if (sp > 1.0) {
+        // Install on the track as tag `warm_start` (the kept line every round-1 direction starts from).
+        const adopt = await agentT(
+          `You are installing a validated warm-start patch on the Gluon track. Run, then report:
+\`\`\`bash
+export GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
+WS=${JSON.stringify(dir + '/ws')}; mkdir -p "$WS"
+bash ${JSON.stringify(WORKFLOW_DIR + '/scripts/materialize_workspace.sh')} --src ${JSON.stringify(TRACK)} --dst "$WS" --shared-root ${JSON.stringify(EVAL_DIR + '/_shared')} --link-aiter
+cp -a ${JSON.stringify(TRACK + '/.git')} "$WS/.git"
+cd "$WS" && git reset -q --hard ${BASE_TAG}
+P=${JSON.stringify(remapOut)}; [ -f "$P" ] || P=${JSON.stringify(c.patch_path)}
+git apply "$P" || git apply --3way "$P"
+git -c user.email=team@workflow -c user.name=team add -A
+git -c user.email=team@workflow -c user.name=team commit -q -m "warm start: ${c.slug} (${sp.toFixed(3)}x)"
+git tag -f warm_start
+git diff ${BASE_TAG} warm_start > ${JSON.stringify(dir + '/best_patch.diff')}
+git -C ${JSON.stringify(TRACK)} fetch -q "$WS" refs/tags/warm_start:refs/tags/warm_start
+\`\`\`
+If both applies fail, apply by hand to match the patch's intent, commit, and re-run the COMMANDMENT correctness
+command (${COMMANDMENT}); report committed=true only if it passes. Return {committed, patch_file, note}.`,
+          { phase: 'WarmStart', label: `warm_start:adopt c${c.rank}`, schema: ADOPT_SCHEMA });
+        if (adopt && adopt.committed) {
+          trackTag = 'warm_start'; trackBest = sp; bestSeen = Math.max(bestSeen, sp);
+          if (Array.isArray(ver.per_case) && ver.per_case.length) bestPerCase = ver.per_case;
+          accepted = { round: 0, id: 'warm_start', primary: sp, vs_champion: vsChampion(sp),
+            patch: adopt.patch_file || `${dir}/best_patch.diff`, layer: '', per_case: ver.per_case || [] };
+          Object.assign(warm_start, { adopted: true, adopted_speedup: sp, slug: c.slug, direction: c.direction || '',
+            exp_dir: c.exp_dir || '' });
+          if (rec) Object.assign(rec, { status: 'adopted', outcome: 'validated', verified_speedup: sp });
+          lastProfile = (await reprofile('warm_start', `${GLUON_DIR}/warm_start/profile`)) || lastProfile;
+          log(`[kb] warm start ADOPTED ${c.slug} @ ${sp.toFixed(3)}x -- the track starts there.`);
+          break;
+        }
+      }
+      if (rec && rec.status !== 'adopted') {
+        rec.status = ver && ver.status ? `rejected:${ver.status}` : 'rejected:apply_failed';
+        rec.outcome = !ver ? 'not_reproduced' : says(ver.correctness, 'fail') ? 'failed'
+          : says(ver.status, 'apply_failed') ? (/outside_editable_set/i.test(String(ver.notes || '')) ? 'inapplicable' : 'not_reproduced')
+          : !says(ver.status, 'verified') ? 'not_reproduced' : !(sp > 1.0) ? 'failed' : 'inapplicable';
+        rec.verified_speedup = sp || 0;
+      }
+    }
+    const benched = warm_start.candidates.filter(x => x.outcome && (x.session_id || x.exp_dir));
+    if (benched.length) {
+      const planeFlags = warm_start.plane === 'remote' ? '--plane remote'
+        : warm_start.plane === 'store' ? `--plane local --store ${JSON.stringify(KB_STORE_DIR)}` : '';
+      const cmds = benched.map(x => `python3 ${JSON.stringify(EXPERIENCE_STORE)} attest ${planeFlags} ` +
+        (x.exp_dir ? `--exp-dir ${JSON.stringify(x.exp_dir)} ` : '') +
+        (planeFlags && x.session_id ? `--session-id ${JSON.stringify(x.session_id)} ` : '') +
+        `--kernel-name ${JSON.stringify(KERNEL_NAME)} --language ${LANGUAGE} --gfx ${GFX}${KB_VERSION_FLAG} ` +
+        `--outcome ${x.outcome} --measured-speedup ${Number(x.verified_speedup) || 0} ` +
+        `--note ${JSON.stringify(`gluon_authoring warm-start c${x.rank}: ${x.status}`.slice(0, 200))} ` +
+        `--measured-by ${JSON.stringify('gluon_authoring:' + GFX)} --apply || true`);
+      await agentT('You are the kernel knowledge-base attestor. Run EXACTLY these commands in order and return ' +
+        '{"ran": <how many you ran>, "note": "<anything that failed>"}. Do NOT edit, add, drop or retry any.\n' +
+        '```bash\n' + KB_ENV_PRELUDE + cmds.join('\n') + '\n```',
+        { phase: 'WarmStart', label: 'kb:attest', schema: obj({ ran: { type: 'number' }, note: { type: 'string' } }, []) });
+    }
+  }
 }
 
 while (!stoppedBy) {
@@ -1004,6 +1229,8 @@ while (!stoppedBy) {
     TRACK_BEST_VS_BASELINE: trackBest, ACCEPTED_VS_BASELINE: accepted ? accepted.primary : 1,
     BUDGET_JSON: budgetRes ? budgetRes.budget_json : '', LAST_PROFILE: lastProfile,
     HISTORY: history.slice(-12), INSIGHTS: memory.insights, ...(PRIOR_LOG ? { PRIOR_RUN_LOG: PRIOR_LOG } : {}),
+    ...KK_INPUTS, CODEBASE_CONTEXT: `${EVAL_DIR}/codebase_context.md`,
+    SELF_MONITORING: `${WORKFLOW_DIR}/knowledge/self_monitoring.md`, ...(KB_REFERENCES ? { KB_REFERENCES } : {}),
     ...(roundEnd ? { ROUND_DEADLINE_EPOCH: roundEnd } : {}),
   };
 
@@ -1126,6 +1353,19 @@ while (!stoppedBy) {
     if (has(mem.bottleneck_now)) memory.bottleneck_now = mem.bottleneck_now;
     if (has(mem.suggest_next)) memory.suggest_next = mem.suggest_next;
   }
+  // kernel_lane.js's storage reclaim after every round, on the Gluon round dirs (the track keeps every tag).
+  if (STORAGE_RECLAIM) {
+    const reclaim = `bash ${WORKFLOW_DIR}/scripts/reclaim_eval_artifacts.sh --eval-dir ${GLUON_DIR} --keep-round ${round}` +
+      `; bytes=$(du -sb ${EVAL_DIR} 2>/dev/null | awk '{print $1}');` +
+      ` hard=\${GEAK_EVAL_HARD_BYTES:-68719476736};` +
+      ` if [ -n "$bytes" ] && [ "$bytes" -gt "$hard" ]; then` +
+      `   bash ${WORKFLOW_DIR}/scripts/reclaim_eval_artifacts.sh --eval-dir ${GLUON_DIR} --keep-round ${round} --force-heavy;` +
+      ` fi; echo STORAGE_RECLAIM_DONE round=${round}`;
+    await agentT(`Storage reclaim after round ${round}. Run EXACTLY this bash, then return {ok:true, note:"reclaimed"}.\n` +
+      '```bash\n' + reclaim + '\n```',
+      { phase: STAGE_PHASE[stg], label: `storage:reclaim r${round}`, effort: 'low',
+        schema: obj({ ok: { type: 'boolean' }, note: { type: 'string' } }, ['ok']) });
+  }
   log(`Round ${round} ${stg} done: winner=${winner ? `${winner.d.id} ${winner.p.toFixed(3)}x` : 'none'}, ` +
       `track=${trackTag} ${trackBest ? trackBest.toFixed(3) : '-'}x, accepted=${accepted ? accepted.primary.toFixed(3) : '-'}x` +
       `${stg === 'climb' ? `, noImprove=${noImprove}` : ''}, budget ${dispatched}/${BUDGET}`);
@@ -1189,6 +1429,81 @@ if (FINAL_SRC) {
     { phase: 'Validate', label: 'director:validate', schema: VALIDATE_SCHEMA });
 }
 const finalSpeedup = validation ? validation.director_verified_speedup_geomean : null;
+const finalPrimary = validation ? (isNum(validation.director_verified_speedup_weighted) && validation.director_verified_speedup_weighted > 0
+  ? validation.director_verified_speedup_weighted : Number(validation.director_verified_speedup_geomean)) : NaN;
+
+// ===========================================================================
+// Experience write-back, as kernel_lane.js does it at the end of a run, keyed by language gluon:
+// update_experience distills one learned card from a director-accepted win; the citation ledger
+// (what every cited card's direction measured) is filed for every run; the experience store records
+// the delivered patch. Off with update_experience=off (A/B runs), box_quiet=false or held_out=true.
+// ===========================================================================
+let learned_card = null;
+let kb_written = null;
+const citations = [];
+for (const h of history) for (const card of (h.learned_refs || [])) {
+  citations.push({ card, round: h.round, direction: h.id, specialty: h.specialty,
+    cited_then_verified: isNum(h.vs_baseline) ? h.vs_baseline : null, became_winner: h.accepted === true });
+}
+// Gates as in kernel_lane.js: the card needs a director-accepted win on a quiet, non-held-out box; the
+// citation ledger is owed by every run except a held-out one; the store records any verified win.
+const kbGate = !BOX_QUIET ? 'the box was contended' : HELD_OUT ? 'this kernel is held out' : '';
+if (kbGate) log(`[kb] not distilling: ${kbGate}.`);
+const kbAccepted = String((validation && validation.validation_status) || '').toLowerCase() === 'accepted';
+const reportPath = closeRes && has(closeRes.report_path) ? closeRes.report_path : `${GLUON_DIR}/report.md`;
+if (UPDATE_EXPERIENCE_ON && !kbGate && kbAccepted && deliverable && finalPrimary > 1.0) {
+  learned_card = await agentT(
+    rolePrompt('update_experience', geakRole('update_experience'), 'Validate',
+      'Curate one distilled learned card from this run\'s verified win (ADD-only, measured evidence, ratios not ' +
+      'wall-clock; record the pitfalls hit; total-then-per-direction for a stacked win).', {
+        SCOPE: 'lane', LEARNED_DIR, SKILL_DIR: WORKFLOW_DIR, EVAL_DIR, PERF_KNOWLEDGE_DIR: KERNEL_KNOWLEDGE_DIR,
+        CURATION_ISOLATE: 'false', REQUIRED_PLATFORMS: [],
+        WINNER: { kernel: KERNEL_NAME, language: LANGUAGE, mode: 'optimize', gfx: GFX,
+          device_target: setup.device_target || '', physical_cu_count: setup.physical_cu_count || 0,
+          kernel_class: (analysis && analysis.kernel_type) || '', speedup: finalPrimary,
+          validation_status: validation.validation_status, bottleneck: profile ? profile.bottleneck : '' },
+        HISTORY: { rounds: history, insights: memory.insights, ledger: memory.ledger },
+        CITATIONS: citations, PROFILE: lastProfile, REPORT_PATH: reportPath,
+      }),
+    { phase: 'Validate', label: 'update_experience', schema: UPDATE_EXPERIENCE_SCHEMA });
+}
+if (citations.length && !HELD_OUT) {
+  await agentT(`Run EXACTLY this command and nothing else. Do NOT edit any file.
+\`\`\`bash
+cat <<'CITEJSON' | python3 ${WORKFLOW_DIR}/scripts/kb.py --kb-dir ${LEARNED_DIR} cite \\
+--run-id ${JSON.stringify(KERNEL_NAME)} \\
+--kernel ${JSON.stringify(KERNEL_NAME)} --citations -
+${JSON.stringify(citations)}
+CITEJSON
+\`\`\`
+Return {"filed": <the "citations" number the command printed, or 0>}.`,
+    { phase: 'Validate', label: 'kb:cite', effort: 'low',
+      schema: obj({ filed: { type: 'number' } }, ['filed']) });
+}
+if (KB_WRITE_OK && GFX && deliverable && finalPrimary > 1.0) {
+  const remoteWriteOn = KB_REMOTE !== 'off' && !!KB_STORE_DIR;
+  const writeCmd = remoteWriteOn
+    ? `write-remote --plane both --store ${JSON.stringify(KB_STORE_DIR)}${KB_VERSION_FLAG}`
+    : KB_MODE === 'store' ? `write-remote --plane local --store ${JSON.stringify(KB_STORE_DIR)}${KB_VERSION_FLAG}` : 'write';
+  const caseNames = (bestPerCase || []).map(c => c && String(c.name || '').replace(/,/g, ';')).filter(Boolean).join(',');
+  const direction = String(warm_start.direction || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
+  kb_written = await agentT(
+    'You are the experience writer. Run EXACTLY this command (it applies its own gates and prints a single-line ' +
+    'JSON) and return that JSON verbatim as StructuredOutput. If the command errors, return ' +
+    '{"written": false, "reason": "io_error"}' + (remoteWriteOn ? ' -- do NOT retry it: every write the shared ' +
+    'service accepts is permanent.' : '.') + `
+\`\`\`bash
+${remoteWriteOn ? KB_ENV_PRELUDE + '\n' : ''}python3 ${JSON.stringify(EXPERIENCE_STORE)} ${writeCmd} --root ${JSON.stringify(KB_ARTIFACTS_DIR)} \\
+  --kernel-name ${JSON.stringify(KERNEL_NAME)} --language ${LANGUAGE} \\
+  --gfx ${GFX} --kernel-class ${JSON.stringify((analysis && analysis.kernel_type) || 'unknown')} \\
+  --speedup ${finalPrimary} --baseline-wall-ms ${bench.baseline_geomean_ms} \\
+  --patch ${JSON.stringify(`${EVAL_DIR}/final_patch.diff`)} --eval-dir ${JSON.stringify(EVAL_DIR)} \\
+  --report ${JSON.stringify(reportPath)} --metric-kind geomean \\
+  --direction ${JSON.stringify(direction)} --case-names ${JSON.stringify(caseNames)}\
+${warm_start.exp_dir ? ` \\\n  --parent ${JSON.stringify(warm_start.exp_dir)}` : ''}
+\`\`\``,
+    { phase: 'Validate', label: 'kb:write', schema: WARMSTART_WRITE_SCHEMA });
+}
 log(`COMPLETE. ${KERNEL_NAME}: entry=${ENTRY} outcome=${outcome} stopped_by=${stoppedBy} parity=${parity}` +
     `${finalSpeedup != null ? ` director-verified ${Number(finalSpeedup).toFixed(3)}x` : ''}. Results in ${EVAL_DIR}`);
 
@@ -1206,4 +1521,6 @@ return {
   closure_review_path: closeRes ? closeRes.closure_review_path || '' : '',
   validation_status: validation ? validation.validation_status : (FINAL_SRC ? 'not_validated' : 'no_candidate'),
   director_verified_speedup_geomean: finalSpeedup,
+  analysis: analysis ? { kernel_type: analysis.kernel_type, kk_operator: KK_OPERATOR, kk_refs: KK_REFS } : null,
+  warm_start, learned_card, kb_written, citations,
 };

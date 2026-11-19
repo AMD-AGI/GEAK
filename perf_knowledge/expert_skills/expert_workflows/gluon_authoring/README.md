@@ -50,7 +50,11 @@ refused while time is left), `parity_threshold` 0.95, `max_recover_rounds` ceil(
 `max_no_improve` (port 6, else 2; climb rounds without progress), `progress_delta` (port −0.05, else
 `min_improve`; how far over the best candidate seen a round's winner must land to count as progress),
 `enabling_delta` (port −0.05, else 0; how far an `enabling_step` may sit below the track best and still
-be kept), `prior_log` (an earlier run's insight log or final report when this run continues from its kept line), `use_learned_kb` true, `kb_dir_cap` 1 and `kb_cold_direction` true (kernel-workflow's learned
+be kept), `prior_log` (an earlier run's insight log or final report when this run continues from its kept line),
+`warm_start` on, `update_experience` on, `box_quiet` true, `held_out` false, `kb_mode` store, `kb_remote` auto,
+`warm_start_min_speedup` 1.05, `perf_knowledge_dir`, `kb_artifacts_dir`, `kb_store_dir`, `storage_reclaim` on
+(kernel-workflow's knowledge loop, same defaults; an A/B run sets `warm_start=off` and `held_out=true` so neither arm
+reads or teaches the KB), `use_learned_kb` true, `kb_dir_cap` 1 and `kb_cold_direction` true (kernel-workflow's learned
 cards for the planner, with its budget),
 `deadline_reserve_s` 1800, `round_time_cap_s` 3600, `evidence_reasks` 1, `evidence_audit` true,
 `token_reserve` 150000, `agent_timeout_ms` 3600000, `engineer_timeout_ms` 7200000, `eval_dir`,
@@ -66,14 +70,17 @@ directory, derived from `workflow_dir`). Single-GPU kernels only (`gpus_per_job`
 | 3 | Profile | `gluon_profiler` PHASE=baseline (`gluon_profile.py`) + `profile.md` | the baseline dials (`EVAL_DIR/gluon/profile_baseline`), handed to entry and round 1 as `LAST_PROFILE`; every layer's state stated (`trace`, `pmc`, `att`, `ir`), a non-`ok` one with `degraded_reason`; otherwise re-asked, then a `baseline_profile_incomplete` caveat |
 | 4 | Entry | `gluon_lead` PHASE=entry | entry mode (`port` / `incumbent` / `fresh`); champion bundle; **G1** `champion_gate.py` — exit ≠ 0 blocks the run before any edit; the track workspace `EVAL_DIR/gluon/track` tagged `geak_base`; `champion_patch` when the champion is not the frozen baseline |
 | 4b | Entry | `verify_engineer` on `champion_patch` | the champion's speedup vs the frozen baseline (`champion_vs_baseline`), so every later number also carries `vs_champion` |
+| 1b | Analyze | `tech_lead` PHASE=analyze (kernel_workflow) | roadmap, `codebase_context.md`, `KK_OPERATOR` / `KK_REFS` for the planner and engineers |
 | 5 | Budget | `gluon_lead` PHASE=budget | `hw_budget.py` ran (exit 0, json written); otherwise re-asked, then a `budget_missing` caveat |
 | 6 | Transcribe (port) / Author (fresh) | `gluon_engineer`, one direction | the four equivalence checks (layout diff PASS/RECONCILED, numeric, determinism, asm parity) and G3; a failed equivalence or an incorrect anchor stops the run — no recovery on a wrong anchor |
 | 7 | Recover (port) | `tech_lead` plan_round (one direction per debt suspect), `gluon_engineer` per direction in parallel, integrate | **G2** on the round's kept candidate: parity clears only when its `parity_gate.py` exits 0 **and** verify measures the track at ≥ `parity_threshold` of the champion; until then the loop does not climb; after `max_recover_rounds` rounds the run closes `parity_unreached` |
 | 8 | Climb | `tech_lead` plan_round (~2–3 directions, each a Gluon layer), `gluon_engineer` per direction in parallel, integrate | G3/G4 (+ATT) evidence per direction; verify's number; track keep, commit gate, stall count |
 | 8b | Integrate | `gluon_engineer` PHASE=integrate (integrator.md's strategy on the track tags), `verify_engineer`; `gluon_profiler` PHASE=reprofile when the integrated candidate is kept | when ≥ 2 directions verified above the kept line (or enabling); kept only if verified above the best individual |
 | 8c | Memory | `tech_lead` PHASE=update_memory | insights and the hypothesis ledger, read by the next plan and every engineer |
+| 5b | WarmStart | resolver, `verify_engineer`, adopt, `kb:attest` | experience KB (language gluon): an incumbent adopts the first stored patch that passes verify; port/fresh read it as reference |
 | 9 | Close | `gluon_lead` PHASE=close | the report, `final_report.json`, `closure_review.md` for any non-win (re-asked if missing); the outcome and the delivered patch are decided by the code and passed in |
 | 10 | Validate | `director` (kernel_workflow, PHASE=validate) | only when a patch is delivered; its verdict is the headline |
+| 11 | Write-back | `update_experience`, `kb:cite`, `kb:write` (kernel_workflow) | a learned card from a director-accepted win; the citation ledger for every non-held-out run; the store entry for a verified win |
 
 Entry modes follow `references/method/entry.md ## 4`: **port** runs 6→7→8, **incumbent** (already
 explicit Gluon, nothing converted) goes straight to 8 with no parity gate, **fresh** (no Triton
@@ -206,7 +213,8 @@ tests/        harness.js (runs workflow.js with synthetic agent responses) and t
               gluon_profile re-profile, baseline profile layers, audit, pair screens),
               acceptance by verify and the commit gate, parity/G1/deadline/token/budget stops,
               the parallel search (plan, directions, integrate, budget, deep_explore, gating, memory,
-              no-early-stop), alignment with kernel_lane.js (defaults, schemas, rules read from it),
+              no-early-stop), the knowledge loop (analyze, KK cards, warm start, write-back, reclaim),
+              alignment with kernel_lane.js (defaults, schemas, commands, rules read from it),
               launch contract (args, arch, reference paths, size, no injection left in kernel/e2e)
 ```
 
@@ -228,7 +236,11 @@ planner schema or rules move.
 | stall, commit, stop | `max_no_improve` 2, `progress_delta` = `min_improve`, `min_improve` 0.02; no early stop with a deadline | the same; a port gives ground (6, −0.05) |
 | added | — | entry modes, G1 champion gate, transcribe with equivalence, recover with G2, layer gating inside a round, paired directions |
 | learned KB | planner reads `knowledge/learned/` with a per-round budget | the same switch, cap and control direction |
-| not wired | warm start, deep research, EVO, routing, analyze phase | the entry, budget and baseline profile stand in for analyze |
+| analyze | `tech_lead` PHASE=analyze before Benchmark: roadmap, `codebase_context.md`, perf_knowledge cards (`KK_*`) | the same role and phase; `KK_*`, `CODEBASE_CONTEXT` and `SELF_MONITORING` go to the planner and every engineer |
+| warm start | experience KB read by kernel id, verify, adopt, attest | the same commands keyed by language gluon; an incumbent adopts (the tag `warm_start` is the kept line), a port or fresh run reads it as reference |
+| write-back | `update_experience` card, `kb.py cite` ledger, `experience_store.py write-remote` | the same roles, commands and gates, language gluon |
+| storage reclaim | `reclaim_eval_artifacts.sh` after every round | the same script on `EVAL_DIR/gluon` |
+| not wired | deep research, EVO, routing (all off by default in kernel-workflow) | — |
 
 ## Open points
 

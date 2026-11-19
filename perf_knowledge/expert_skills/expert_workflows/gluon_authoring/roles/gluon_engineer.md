@@ -42,6 +42,11 @@ field names the command you ran, its exit code and where its output is.
   `INSIGHTS` (tech_lead's memory) and, when set, `PRIOR_RUN_LOG` (an earlier run whose kept line is this
   run's baseline) before editing; never retry a lever measured null on the same
   body unless your `DIRECTION` pairs it with the prerequisite its lesson named.
+- Reference inputs, read when they bear on your layer: `KK_REFS` (perf_knowledge cards under
+  `KERNEL_KNOWLEDGE_DIR`), `CODEBASE_CONTEXT`, `SELF_MONITORING`, `KB_REFERENCES` (stored patches and
+  their prose for this kernel). Take the mechanism, not the recipe: the kernel stays Gluon, and a
+  construct that exists only on some targets is used only after `probe_levers.py --all` shows it live
+  on `GFX`.
 - Return `lesson`: one line on what this direction showed, for a null or negative result too. The next
   round's plan reads it.
 - Every GPU command (compile that needs a device, correctness, timing, profile, capture) runs under

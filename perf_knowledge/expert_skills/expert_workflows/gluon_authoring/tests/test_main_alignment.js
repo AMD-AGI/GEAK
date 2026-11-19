@@ -64,6 +64,29 @@ const enumOf = (block) => ((block.match(/specialty: \{ type: 'string', enum: (\[
   }
   ok(fs.existsSync(path.join(WF_DIR, 'roles', 'integrator.md')), 'integrator.md exists');
 
+  console.log('\n# 3b. the knowledge loop');
+  for (const [key, val] of [['warm_start', "'on'"], ['update_experience', "'on'"], ['box_quiet', "'true'"], ['held_out', "'false'"]]) {
+    const re = new RegExp(`A\\.${key} != null \\? A\\.${key} : ${val.replace(/'/g, "\\'")}`);
+    ok(re.test(lane) && re.test(wf), `${key} defaults to ${val} in both`);
+  }
+  for (const frag of ["A.kb_mode || 'store'", "A.kb_remote || 'auto'", "parseFloat(A.warm_start_min_speedup)) ? parseFloat(A.warm_start_min_speedup) : 1.05",
+    "'/kb_store_local'", '/scripts/experience_store.py']) {
+    const norm = (t) => t.replace(/\s+/g, ' ');
+    ok(norm(lane).includes(norm(frag)) && norm(wf).includes(norm(frag)), `same: ${frag}`);
+  }
+  const prelude = (src) => (src.match(/const KB_ENV_PRELUDE =\n([\s\S]*?);\n/) || [])[1];
+  ok(prelude(lane) && prelude(lane) === prelude(wf), 'the KB credential prelude is kernel_lane.js\'s, verbatim');
+  for (const cmd of ['sync-local --root', 'resolve-remote --plane local --store', 'resolve-remote --plane remote', ' remap --patch',
+    ' attest ${planeFlags}', 'write-remote --plane both --store', 'scripts/kb.py --kb-dir ${LEARNED_DIR} cite']) {
+    ok(lane.includes(cmd) && wf.includes(cmd), `both run: ${cmd.trim()}`);
+  }
+  ok(schemaBlock(lane, 'ANALYZE_SCHEMA')[1] === schemaBlock(wf, 'ANALYZE_SCHEMA')[1], 'ANALYZE_SCHEMA: the same required fields');
+  for (const role of ['tech_lead', 'update_experience', 'verify_engineer']) {
+    ok(new RegExp(`geakRole\\('${role}'\\)`).test(wf) && fs.existsSync(path.join(WF_DIR, 'roles', `${role}.md`)), `${role} is kernel_workflow's role file`);
+  }
+  ok(fs.readFileSync(path.join(WF_DIR, 'roles', 'tech_lead.md'), 'utf8').includes('## PHASE=analyze'), 'tech_lead.md still has PHASE=analyze');
+  ok(fs.existsSync(path.join(WF_DIR, 'scripts', 'reclaim_eval_artifacts.sh')) && wf.includes('reclaim_eval_artifacts.sh'), 'storage reclaim script shared');
+
   console.log('\n# 4. behaviour: with no budget given, 6 directions as in kernel_lane.js');
   {
     const x = await launch({ entry_mode: 'incumbent', max_no_improve: 99 }, (label, prompt) =>

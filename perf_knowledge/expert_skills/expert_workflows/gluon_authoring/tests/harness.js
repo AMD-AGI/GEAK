@@ -85,6 +85,14 @@ function defaults(label, prompt, ctx) {
   if (label.startsWith('gluon_lead:close')) return { report_path: '/x/report.md', final_patch: '/tmp/eval/final_patch.diff',
     closure_review_path: '/x/closure_review.md', references_read: refsIn(prompt) };
   if (label.startsWith('gluon_engineer:')) return engineerReturn(prompt);
+  if (label === 'tech_lead:analyze') return { kernel_type: 'gemm', roadmap_summary: 'r', kk_operator: 'gemm_op', kk_language: 'gluon',
+    kk_refs: ['operators/gemm_op/tuning.md'], modifiable_files: ['source/k.py'] };
+  if (label === 'warm_start:resolve') return { read_reason: 'kernel_page_not_found', candidates: [] };
+  if (label.startsWith('storage:reclaim')) return { ok: true, note: 'reclaimed' };
+  if (label === 'update_experience') return { action: 'created', card_path: '/x/card.md' };
+  if (label === 'kb:cite') return { filed: 1 };
+  if (label === 'kb:write') return { written: true, slug: 's' };
+  if (label === 'kb:attest') return { ran: 1 };
   if (/^tech_lead:(re)?plan /.test(label)) return planReturn(prompt);
   if (label.startsWith('tech_lead:memory')) return { insights: ['an insight'], ledger: [] };
   if (label.startsWith('integrate r')) return integrateReturn(prompt);
