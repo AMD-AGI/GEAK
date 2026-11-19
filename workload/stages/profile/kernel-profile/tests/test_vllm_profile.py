@@ -346,6 +346,12 @@ class VllmProfileTest(unittest.TestCase):
         self.assertEqual(got, [{"point": "b1", "kernels": ["attn", "oneshot_ar"]},
                                {"point": "b2", "kernels": ["moe_id_rows"]}])
         self.assertEqual(run_points.eager_windows(dec, replayed, {"moe_id_rows"}, {"b2"}), [])
+        # a batch-1 window asked for all three: the batch-2-only kernel is still missing,
+        # the graph-only all-reduce that eager never launches is not asked for again
+        (self.root / "b1@eager.json").write_text(json.dumps({
+            "requested": sorted(replayed), "kernels": {"attn": {}}}))
+        covered, taken = run_points.eager_covered(str(self.root), replayed)
+        self.assertEqual((covered, taken), ({"attn", "oneshot_ar"}, {"b1"}))
 
 
     def test_amd_kernels_entries_are_operators_not_their_vllm_callers(self):

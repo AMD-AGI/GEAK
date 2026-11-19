@@ -357,6 +357,24 @@ def main():
     return 0 if timeline["status"] == "ok" else 1
 
 
+def eager_covered(shapes_dir, replayed):
+    """(kernels no further eager window can help, points that already have a window).
+    Covered: launched in an eager window, or asked for at a point that replayed it and still
+    absent -- eager launch takes another path there (a graph-only one-shot all-reduce), so
+    another window would not show it either. A kernel asked for at a point that never
+    replayed it (batch-2-only, asked at batch 1) is not covered."""
+    covered, taken = set(), set()
+    for f in os.listdir(shapes_dir):
+        if f.endswith("@eager.json"):
+            pid = f[:-len("@eager.json")]
+            taken.add(pid)
+            d = json.load(open(os.path.join(shapes_dir, f)))
+            launched = set(d.get("kernels", {}))
+            covered |= {k for k in d.get("requested") or launched
+                        if k in launched or pid in replayed.get(k, [])}
+    return covered, taken
+
+
 def eager_windows(dec, replayed, missing, taken=()):
     """Decode points whose eager windows together launch every missing kernel: each time
     the point that covers most of the rest, ties to the smaller batch. A kernel graph-
@@ -573,12 +591,7 @@ def evidence(a, ev, censuses, points, sel, py, log, timeline, run_steps):
             for k in json.load(open(f)).get("graph_replayed_kernels", []):
                 replayed.setdefault(k, []).append(pid)
     serial_evidence(a, ev, phase, shapes_dir, censuses, cand, py, log, timeline)
-    covered, taken = set(), set()
-    for f in os.listdir(shapes_dir):
-        if f.endswith("@eager.json"):
-            taken.add(f[:-len("@eager.json")])
-            d = json.load(open(os.path.join(shapes_dir, f)))
-            covered |= set(d.get("requested") or d.get("kernels", {}))
+    covered, taken = eager_covered(shapes_dir, replayed)
     if set(replayed) - covered:
         dec = sorted((p for p in points if p["phase"] == "DECODE" and p["point_id"] in censuses),
                      key=lambda p: p.get("batch_size") or 0)
