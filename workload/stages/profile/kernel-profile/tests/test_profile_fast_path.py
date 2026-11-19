@@ -6,7 +6,6 @@ No GPU, no sglang: a stdlib HTTP server answers /generate, /metrics, /start_prof
 import gzip
 import json
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -17,8 +16,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 WORKLOAD = Path(__file__).resolve().parents[4]
-TOOLS = WORKLOAD / "brain" / "tools"                  # task boundaries -> ut_request.json
-UT_SCRIPTS = WORKLOAD / "stages" / "ut" / "kernel-ut" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 sys.path.insert(0, str(SCRIPTS.parent / "shared"))
 
@@ -381,12 +378,7 @@ class RunPointsTest(unittest.TestCase):
              "--eval-dir", str(self.root / "eval"), *FAST, *extra],
             capture_output=True, text=True, timeout=300)
 
-    def script(self, name, *args):
-        where = next(d for d in (SCRIPTS, TOOLS, UT_SCRIPTS) if (d / name).exists())
-        return subprocess.run([sys.executable, str(where / name), *map(str, args)],
-                              capture_output=True, text=True, timeout=300)
-
-    def test_template_path_from_capture_to_ut_scaffold(self):
+    def test_template_path_from_capture_to_selection(self):
         server = FakeServer()
         self.addCleanup(server.close)
         p = self.run_points(server, "--decode-eager", "--observed", self.root / "observed.json")
@@ -427,120 +419,16 @@ class RunPointsTest(unittest.TestCase):
         mla = sh["kernels"]["sparse_mla_attn"]["variants"][0]["samples"][0]
         self.assertEqual(mla["resolved_by"], "launch_correlation")
         self.assertEqual(mla["py_frames"][0], MLA_FRAME)
-        self.assertFalse((ev / "task_decls.json").exists())
-        p = self.script("draft_task_decls.py", "--eval-dir", ev, "--out", ev / "task_decls.json")
-        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        decls = json.loads((ev / "task_decls.json").read_text())
-        groups = {tuple(sorted(t["kernels"])): t for t in decls["tasks"]}
-        moe = groups[("gemm_a4w4_moe", "moe_sort_kernel")]
-        self.assertEqual(moe["ut_family"], "fused_moe")
-        self.assertIn("moe_forward", moe["target_callable"])
-        # prefill's flash_prefill and decode's sparse_mla_attn never launch together but
-        # enter through one callable: one task, two dispatch branches.
-        attn = groups[("flash_prefill", "sparse_mla_attn")]
-        self.assertEqual(attn["ut_family"], "sparse_mla")
-        self.assertTrue(all(len(j["required_kernels"]) == 1 for j in attn["joint_phases"]))
-        # A collective stays a target: a task on the deployment's world size, not an
-        # exclusion (its lane builds the multi-rank harness).
-        coll = next(t for t in decls["tasks"] if COLL in t["kernels"])
-        self.assertEqual(coll["required_gpu_count"], RANKS)
-        self.assertEqual(coll["ut_family"], "all_reduce")
-        self.assertNotIn(COLL, [k for x in decls["excluded"] for k in x["kernels"]])
         # Selection ran per operator over resolved stacks: the MoE op carries its sort
         # kernel as a member, whatever that kernel's own share.
         self.assertEqual(sel["policy"]["unit"], "operator")
         moe_op = next(o for o in sel["ops"] if "gemm_a4w4_moe" in o["members"])
         self.assertIn("moe_sort_kernel", moe_op["members"])
         self.assertTrue((ev / "attribution_candidates.json").exists())
-        # Unreviewed draft is refused; the reviewed one builds the request, and the UT
-        # stage installs and scaffolds it without reading the profile evidence.
-        kernels = self.root / "kernels.json"
-        kernels.write_text(json.dumps({"profile_root": str(ev)}))
-        req_dir = self.root / "request"
-        request = ("--kernels", kernels, "--decls", ev / "task_decls.json", "--out", req_dir,
-                   "--no-verify")
-        p = self.script("build_ut_request.py", *request, "--check")
-        self.assertNotEqual(p.returncode, 0)
-        self.assertIn("needs_review", p.stdout)
-        for t in decls["tasks"] + decls["excluded"]:
-            t["needs_review"] = []
-        moe["axes"] = {"model_dim": 6144, "inter_dim": 256, "n_experts": 257, "topk": 9}
-        moe["attrs"] = {"quant": "mxfp4"}
-        moe["case_axes"] = {"PREFILL": {"n_tokens": "shape"}, "DECODE": {"n_tokens": "shape * 6"}}
-        (ev / "task_decls.json").write_text(json.dumps(decls))
-        p = self.script("build_ut_request.py", *request)
-        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        ut_out = self.root / "ut"
-        p = self.script("scaffold_tasks.py", "--request", req_dir / "ut_request.json",
-                        "--out", ut_out)
-        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        plan = json.loads((ut_out / "task_plan.json").read_text())
-        owned = {k for t in plan["tasks"] for k in t["selected_identities"]}
-        blocked = {b["kernel"] for b in plan["blocked_identities"]}
-        self.assertEqual(owned | blocked, set(ids))
-        mt = next(t for t in plan["tasks"] if t["label"] == moe["label"])
-        self.assertEqual(mt["scaffold"]["status"], "ok", mt["scaffold"])
-        tdir = Path(mt["task_dir"])
-        cases = json.loads((tdir / "run" / "ut_cases.json").read_text())
-        kinds = {c["kind"] for c in cases["cases"]}
-        self.assertEqual(kinds, {"point", "bucket"})
-        dec = [c for c in cases["cases"] if c["regime"] == "DECODE"]
-        self.assertEqual(sorted(c["axes"]["n_tokens"] for c in dec), [6, 12])
-        self.assertEqual(len([s for s in cases["replay_sigs"] if s.startswith("DECODE")]), 2)
-        self.assertTrue((tdir / "unittest.py").exists())
-        req = json.loads((tdir / "run" / "requested_kernel.json").read_text())
-        self.assertEqual(len(req["shared"]["census"]), 4)
-        at = next(t for t in plan["tasks"] if t["label"] == attn["label"])
-        areq = json.loads(Path(at["requested_kernel"]).read_text())
-        self.assertIsNone(areq["joint_ut"])
-        self.assertEqual(sorted(r["device_kernel"] for r in areq["dispatch_ut"]["phases"]),
-                         ["flash_prefill", "sparse_mla_attn"])
-        # scaffold_tasks stamps what each phase must launch, for the UT's launches gate.
-        meta = json.loads((tdir / "meta.json").read_text())
-        self.assertEqual(meta["expected_launches"]["DECODE"], ["gemm_a4w4_moe", "moe_sort_kernel"])
-        ct = next(t for t in plan["tasks"] if t["label"] == coll["label"])
-        self.assertEqual(json.loads(Path(ct["requested_kernel"]).read_text())
-                         ["required_gpu_count"], RANKS)
-        # requested_kernel.json is the delivery gate's KERNEL object (delivery-contract.md):
-        # entity_kind gpu_kernel, and seam candidates the gate keeps -- a numeric depth and
-        # device_kernels naming the kernel each one must launch.
-        for r in (req, areq):
-            self.assertEqual(r["entity_kind"], "gpu_kernel")
-            head = r["seam_candidates"]
-            self.assertEqual(len(head), 1)
-            self.assertIsInstance(head[0]["depth"], int)
-            self.assertIn(r["device_kernel"], head[0]["device_kernels"])
-        for p in areq["dispatch_ut"]["phases"]:
-            self.assertEqual(p["seam_candidates"][0]["device_kernels"], [p["device_kernel"]])
-            self.assertIsInstance(p["seam_candidates"][0]["depth"], int)
-        self.assertGateAcceptsDispatch(areq)
-
-    def assertGateAcceptsDispatch(self, req):
-        """The gate's own kernelSelectionVerified must accept build_ut_request's dispatch
-        branches given a matching raw verdict per branch (the shape kernel_selection.py
-        writes). Before the KERNEL object carried entity_kind and structured seams, every
-        branch failed with 'no relevant structured seam_candidates were returned'."""
-        node = shutil.which("node")
-        if not node:
-            self.skipTest("node is not installed; the gate check needs Node.js 18+")
-        target = req["target_callable"]
-        rows = [{"regime": p["regime"], "target_callable": target, "selection_validation": {
-            "contract": "kernel_selection", "ok": True, "target_callable": target,
-            "device_kernel": p["device_kernel"], "total_calls_observed": 1,
-            "target_marker_calls": 1, "matched_kernel_calls": 1,
-            "candidate_targets_tested": [target], "live_candidate_targets": [target],
-            "deeper_live_candidates": [], "deepest_verified": True, "failed": []}}
-            for p in req["dispatch_ut"]["phases"]]
-        ext = {"target_callable": target, "phase_selection_validations": rows}
-        contract = UT_SCRIPTS.parent / "shared" / "delivery_contract.mjs"
-        js = ("const m = await import(process.argv[1]);"
-              "const [h, e] = JSON.parse(process.argv[2]);"
-              "console.log(JSON.stringify(m.kernelSelectionVerified(h, e)));")
-        p = subprocess.run([node, "--input-type=module", "-e", js, contract.as_uri(),
-                            json.dumps([req, ext])], capture_output=True, text=True, timeout=60)
-        self.assertEqual(p.returncode, 0, p.stderr)
-        verdict = json.loads(p.stdout.strip().splitlines()[-1])
-        self.assertTrue(verdict["ok"], verdict["why"])
+        # Task boundaries and the UT request are the brain's (brain/README.md): profile
+        # delivers evidence only and writes no task declaration.
+        self.assertFalse((ev / "task_decls.json").exists())
+        self.assertFalse((ev / "ut_request.json").exists())
 
     def test_graph_mode_decode_fails_fast_without_recapture(self):
         server = FakeServer(graph=True)
@@ -608,7 +496,6 @@ class RunPointsTest(unittest.TestCase):
 class EagerEvidenceTest(unittest.TestCase):
     setUp = RunPointsTest.setUp
     run_points = RunPointsTest.run_points
-    script = RunPointsTest.script
 
     def test_graph_replayed_decode_gets_one_eager_evidence_window(self):
         graph = FakeServer(replay=True)
@@ -632,12 +519,9 @@ class EagerEvidenceTest(unittest.TestCase):
         sm = json.loads((ev / "evidence" / "source_map.json").read_text())
         self.assertFalse(sm["kernels"]["sparse_mla_attn"]["graph_replayed_only"])
         self.assertEqual(sm["kernels"]["sparse_mla_attn"]["frames"][0]["frame"], MLA_FRAME)
-        self.assertFalse((ev / "task_decls.json").exists())
-        p = self.script("draft_task_decls.py", "--eval-dir", ev, "--out", ev / "task_decls.json")
-        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        decls = json.loads((ev / "task_decls.json").read_text())
-        groups = {tuple(sorted(t["kernels"])) for t in decls["tasks"]}
-        self.assertIn(("gemm_a4w4_moe", "moe_sort_kernel"), groups)
+        sel = json.loads((ev / "selection_targets.json").read_text())
+        moe_op = next(o for o in sel["ops"] if "gemm_a4w4_moe" in o["members"])
+        self.assertIn("moe_sort_kernel", moe_op["members"])
         # Costs still come from the graph windows only.
         cov = json.loads((ev / "coverage.json").read_text())
         self.assertEqual({p["point_id"] for p in cov["phases"]["DECODE"]["points"]}, {"de_1", "de_2"})

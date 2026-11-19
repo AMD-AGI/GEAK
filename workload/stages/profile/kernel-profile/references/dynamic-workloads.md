@@ -35,7 +35,7 @@ served eager fallbacks. Keep unobserved envelope probes at zero observed weight.
 ## Call weights
 
 GPU launches weight a directly timed launch. When `cases.call` instead times a
-complete operation, supply this optional field on its `task_decls.json` task:
+complete operation, supply this optional field on its UT request task (`brain/README.md`):
 
 ```json
 {"invocation_counts": {"target_callable": "pkg:op", "points": {
@@ -60,7 +60,7 @@ that plan's operator-call mass. Custom task authors must also declare
 
 The other way to count complete calls is `invocation_anchors`: leaves that launch exactly
 once per call, `{"kernels": ["leaf"], "why": "source-backed reason"}` (several anchors need
-`mutually_exclusive: true`; see `brain/tools/plan_ut_cases.py`). A task declares one or the
+`mutually_exclusive: true`; see `brain/README.md`). A task declares one or the
 other, never both.
 Every case keeps `launches_per_instance` as the GPU launch inventory and records
 `invocations_per_instance` and `invocation_count_basis`.

@@ -9,7 +9,7 @@ scaffolded task directory into a UT whose every gate passes on the installed bas
 ## Rules
 
 - **Write only inside `TASK_DIR`.** Other lanes are editing their own tasks right now.
-  Read anything else; never write `task_plan.json`, `task_decls.json`, the evidence or a
+  Read anything else; never write `task_plan.json`, the request, the evidence or a
   sibling task.
 - **Start no server, take no profile, no capture.** The evidence is what it is. If the
   task cannot be built from it, that is a blocker (below), not a reason to collect more.

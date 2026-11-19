@@ -14,7 +14,7 @@ shape it achieved, so before the ledger counts it:
                                 each phase: nothing dropped, nothing counted twice
   * unrepresented_bands      := instances farther than --tolerance from every point, grouped
                                 into bands (they still count toward their nearest point,
-                                and plan_ut_cases.py turns each band into a bucket case)
+                                and a UT request turns each band into a bucket case)
 
 A point without a census is kept with `counted: false` and represents nothing.
 

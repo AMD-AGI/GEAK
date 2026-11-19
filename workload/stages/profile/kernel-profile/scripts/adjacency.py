@@ -92,7 +92,7 @@ def adjacency(trace_dirs, wanted):
 
 
 def chains(adj, min_kind=("observed_consecutive_launches",), linked=None):
-    """Connected groups of targets joined by consecutive-launch pairs (draft_task_decls.py).
+    """Connected groups of targets joined by consecutive-launch pairs (boundary candidates).
 
     `observed_order` is not enough: a whole decoder layer is one ordered sequence, so
     joining on it puts every target in one group. `linked(a, b)` can veto a pair (the

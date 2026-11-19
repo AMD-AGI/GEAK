@@ -48,4 +48,4 @@ derived from the evidence.
 ## What the pipeline does not ask for
 
 No task boundary, no UT, no optimization and no E2E claim. Task boundaries become a
-`ut_request.json` (`brain/tools/README.md`) that the UT stage consumes.
+`ut_request.json` (`brain/README.md`) that the UT stage consumes.

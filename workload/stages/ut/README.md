@@ -5,8 +5,8 @@ Define and qualify the computation boundary for an optimization task under the
 
 **Input:** one `ut_request.json`: per task its kernels, entry callable, contract family,
 scaffold arguments and concrete cases with their weights, plus any blocked identities.
-It is written from a profile's `kernels.json` and a reviewed declaration
-([request tools](../../brain/tools/README.md)); this module reads nothing else upstream
+It is written by the [brain](../../brain/README.md) from a profile's `kernels.json`;
+this module reads nothing else upstream
 and does not know how many configs a case's weight pools.
 **Output:** independently runnable frozen tasks, editable-source declarations, native
 qualification/delivery receipts and the covered or deferred identities. Report separately

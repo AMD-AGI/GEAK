@@ -5,8 +5,8 @@ description: Build and qualify standalone GPU kernel UTs from a ut_request.json 
 
 # Kernel UT generation
 
-The input is one `ut_request.json` (from `brain/tools/build_ut_request.py`, or any
-author of the same contract). It names each task's kernels, entry callable, contract
+The input is one `ut_request.json`, written by the brain (`brain/README.md`) or any
+author of the same contract. It names each task's kernels, entry callable, contract
 family, scaffold arguments and concrete cases with their weights. This skill writes and
 qualifies those UTs. It does not launch serving, profile, rediscover shapes, decide
 which kernels form a task, or know how many configs a case's weight pools: every
@@ -145,7 +145,7 @@ The UT must also cover what the server compiled, in the server's import environm
   UT variant; fix it with a case (the server call is in `run/server_calls.json`) or waive it
   in `meta.ut_contract.compile_variant_waivers` with a reason. Optional arguments in
   generated cases (descale, sinks, None-ness, index dtypes) come from these server calls,
-  not from defaults. For a `mono_layer` task, `build_ut_request.py` waives, one id at a
+  not from defaults. For a `mono_layer` task, the request waives, one id at a
   time with its why, each variant the runner's fallback branch compiled: the frame the
   entry called is a `forward` outside the entry's package, and the variant was eager and
   outside graph capture (Muse Spark: `MuseMonoRunner.launch` -> `MuseSpark1xDecoderLayer.forward`

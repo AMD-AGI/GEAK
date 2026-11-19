@@ -53,7 +53,7 @@
       "skill": "kernel-ut",
       "mode": "agent",
       "params": {
-        "_note_request": "The UT stage writes the tasks a ut_request.json names (brain/tools/build_ut_request.py from the profile's kernels.json and a reviewed task_decls.json). Without a request it is blocked: task boundaries are not drafted inside UT.",
+        "_note_request": "The UT stage writes the tasks a ut_request.json names (written by the brain from the profile's kernels.json; brain/README.md). Without a request it is blocked: task boundaries are not drafted inside UT.",
         "request": null,
         "minimum_qualified_tasks": 0
       }

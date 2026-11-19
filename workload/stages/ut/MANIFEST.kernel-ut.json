@@ -2,7 +2,7 @@
   "file_count": 52,
   "files": {
     "PROVENANCE.json": "8f2e806cf24f4ab46dcbdd6b58d3f049e745ca08bd58cabd6c648a3e77ba7825",
-    "SKILL.md": "fd5afbee9766270315622f58cfa3a1369ce4d908e04cfa85ccd47f3678ebd034",
+    "SKILL.md": "0fb8c19f398fee1fb6ae482d091118c609d511915b7cf4452eaefe5d5bbfd398",
     "references/collective-ut.md": "b65c161bf0c4e422a3ca10e6aef565ec4e640f53d0f3b17ebe3d97a09045fa4d",
     "references/delivery-contract.md": "888be480426fdda80d0c7d4304fd610976fe5ed68349bbb467488ed8e78ac996",
     "references/joint-indexer-ut.md": "815a3f4099040035289e7e714621f96e4fed1f85f5be98934fc8ac5d20612e9f",
@@ -11,7 +11,7 @@
     "references/source-delivery-records.md": "52890f74ed1731f8c90e11abcf6f8e9ec720ae42e2ea1192b5b837c4ca327c6d",
     "references/source-extraction.md": "eb5a218097f18c05a543ad5d3342f2ba09e50247da815f4ce2f72c557a798c46",
     "references/task-authoring.md": "88f67034d7cc9260b01fe8852b09387023d9324d2337a49e0f64a349d3ba8386",
-    "references/ut-lane.md": "4afe39295d343deda8f1be94045023e47aaba1071423eba79af1bd6db9c72b3d",
+    "references/ut-lane.md": "4863b87e492ae69cce9ea56da97a3130d30f6e79023d679f7d7d63d5fb056bed",
     "scripts/scaffold_tasks.py": "e0bfde7cf8efe55d3b5c06dd5b74bee3c57b9af64870a12f064863351e46bca5",
     "scripts/ut_gpu_queue.py": "98fb2b624e4b5b4ef44428523d6f8954fc93693958b62720a77c969187c43183",
     "scripts/ut_wave.py": "88f7790e5099698d553386097d6518aeccc516adf51d5c885e6d8274149015a6",
@@ -25,7 +25,7 @@
     "shared/rank_timing.py": "9aac02d3a9e059ce55e88cd71d9667d5f11d7c59d463ef6e4bad6b1ed930d037",
     "shared/schema.mjs": "19ba9273c7a443138eaf0ae0d072e278ec6f10e4477f2ee5e70b85f5b00454e3",
     "shared/seam_trace.py": "f1a98e0b5acfcd2769df75d47e9811c1367d340d6a2e77bab20b3bd2db23a90b",
-    "ut_contracts/README.md": "417552a283efbda5d45c075a11d8901e678ab34cabd092ebc9fcbd9109d7156d",
+    "ut_contracts/README.md": "3f93a57105ba75a6e8cead1fffdc72da7eb3c8235a43d9104859511c79a6eee0",
     "ut_contracts/families/act_mul.json": "8c7d3b8bf920796b0f2ad28213de73463c4cfe4c607dbf37b8ba08b4717ff0d0",
     "ut_contracts/families/all_reduce.json": "30215dedd2af7446669f72aae9364251be8b34c011ea288fa85a700f93dcd2a8",
     "ut_contracts/families/dsa_indexer.json": "e7014415b1d48db38d92f47adf2c966dcfc8bbccf71c04b14882a8aa63a31fea",
@@ -55,9 +55,9 @@
     "ut_contracts/ut_driver.py": "188aa6f7c086690da2e151f0182092e6b66e102cbb76c6415e4d2576d9bea2d9"
   },
   "modified_from_origin": false,
-  "note": "Installs a ut_request.json (scaffold_tasks.py) and writes/qualifies its tasks, including mono_layer. Reads no profile evidence. Rebased onto geak-x ccc7427: preserve the upstream requirement for distinct replay-call IDs and compilation-variant links in kernel-ut/SKILL.md. c28 regression: host UID/GID Docker writers with writable AITER cache, shared-lock broker liveness across PID namespaces, read-only GPU flock handles, and native delivery verification before wave completion. Explicit resumes retain logs and renew attempts; finite request weights are enforced. Rebased onto geak-x f3d2153; keep the split driver's selective CPU copy of top-k score inputs, which already avoids copying unused comparison inputs (236ee03). Timing now batches shapes per immutable side/round, streams input factories, reports setup/input timing, and retains fresh-process A/A mode with separate resume identity. No user scheduling flag; retain timing errors and provide writable FlyDSL/AITER runtime caches. Current canonical UT receipts use the explicit ut_driver/source_snapshot/v1 delivery contract and full-report verification. Scoped wave freshness now uses native source/input hashes, not unrelated delivery/cache timestamps; explicit legacy snapshot contracts remain supported. Accept the driver's positive-infinite SQNR only in successful zero-error comparison diagnostics; preserve strict bounds, timing and other nonfinite rejection. Keep the default PyTorch HIP kernel cache on container-local Linux storage because ISA filenames with colons fail on some shared filesystems. Document full-set collective leases without nested locks and reserved rendezvous endpoints after real multi-rank startup failures. Resume rechecks outcomes after drain and reconciles valid deliveries interrupted before their terminal state was written. Lane and worker containers override the serving image's ENTRYPOINT (vLLM's is `vllm serve`).",
+  "note": "Installs a ut_request.json (scaffold_tasks.py) and writes/qualifies its tasks, including mono_layer. Reads no profile evidence. Rebased onto geak-x ccc7427: preserve the upstream requirement for distinct replay-call IDs and compilation-variant links in kernel-ut/SKILL.md. c28 regression: host UID/GID Docker writers with writable AITER cache, shared-lock broker liveness across PID namespaces, read-only GPU flock handles, and native delivery verification before wave completion. Explicit resumes retain logs and renew attempts; finite request weights are enforced. Rebased onto geak-x f3d2153; keep the split driver's selective CPU copy of top-k score inputs, which already avoids copying unused comparison inputs (236ee03). Timing now batches shapes per immutable side/round, streams input factories, reports setup/input timing, and retains fresh-process A/A mode with separate resume identity. No user scheduling flag; retain timing errors and provide writable FlyDSL/AITER runtime caches. Current canonical UT receipts use the explicit ut_driver/source_snapshot/v1 delivery contract and full-report verification. Scoped wave freshness now uses native source/input hashes, not unrelated delivery/cache timestamps; explicit legacy snapshot contracts remain supported. Accept the driver's positive-infinite SQNR only in successful zero-error comparison diagnostics; preserve strict bounds, timing and other nonfinite rejection. Keep the default PyTorch HIP kernel cache on container-local Linux storage because ISA filenames with colons fail on some shared filesystems. Document full-set collective leases without nested locks and reserved rendezvous endpoints after real multi-rank startup failures. Resume rechecks outcomes after drain and reconciles valid deliveries interrupted before their terminal state was written. Lane and worker containers override the serving image's ENTRYPOINT (vLLM's is `vllm serve`). Task boundaries and the UT request are the brain's (brain/README.md); brain/tools was removed.",
   "origin": "AMD-AGI/GEAK refactor/profile-ut-split: UT half of kernel-extract",
   "skill": "kernel-ut",
   "stage": "ut",
-  "tree_sha256": "1ac5f1ba3585504167b43e86a8ed70c006393304e19e6064ef9ad4a5a2a799b9"
+  "tree_sha256": "a3b5890e9686538f05867ea9b19feaad9605c867bbe2c49d0f3a3a2ee25de6fd"
 }

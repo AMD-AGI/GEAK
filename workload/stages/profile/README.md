@@ -15,7 +15,7 @@ profiler explicitly named in the plan. Several configs are several calls; an ide
 deployment's captures can be reused (`plan_points.py --reuse-capture`). Use traces,
 native telemetry and CPU/device, queue, cache or communication evidence as the question
 requires. Computation boundaries needing qualification become a `ut_request.json`
-([request tools](../../brain/tools/README.md)) for [UT](../ut/README.md); use Roofline
+written by the [brain](../../brain/README.md) for [UT](../ut/README.md); use Roofline
 when a bound would help the next decision.
 
 For an unqualified capture path or a collection defect, establish capture, export and
