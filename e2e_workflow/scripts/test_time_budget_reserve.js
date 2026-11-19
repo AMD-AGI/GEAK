@@ -360,11 +360,18 @@ console.log("\n# a trace replay keeps a same-window win for Validate, whatever t
   const win = { gate: 'accepted', ab_complete: true, output_parity: 'pass',
     ref_med: 70.257, cand_med: 75.962, e2e_throughput_tok_s: 75.962, e2e_delta_pct: 8.119 };
   ok(ax.beatsCurTput(win, 85.608), 'an accepted same-window win is kept though its search-window number is below the canonical baseline');
-  ok(!ax.beatsCurTput({ ...win, gate: 'stack' }, 85.608) && ax.beatsCurTput({ ...win, gate: 'stack', e2e_throughput_tok_s: 85.7 }, 85.608),
-    'a sub-threshold stack result still has to beat the carried number');
+  // A sub-threshold result on the same window: +0.4%, below the 0.5% band, so the integrator says `stack`.
+  const stack = { ...win, gate: 'stack', ref_med: 75.1, cand_med: 75.4, e2e_throughput_tok_s: 75.4, e2e_delta_pct: 0.399 };
+  ok(ax.beatsCurTput(stack, 85.608) && ax.beatsCurTput({ ...stack, cand_med: 75.1 }, 85.608),
+    'a stack result that did not lose to its own same-window reference is kept, whatever the carried number');
+  ok(!ax.beatsCurTput({ ...stack, cand_med: 75.0 }, 85.608)
+    && !ax.beatsCurTput({ ...stack, ref_med: null, cand_med: null }, 85.608)
+    && !ax.beatsCurTput({ gate: 'stack', e2e_throughput_tok_s: 85.7 }, 85.608),
+    'and one that lost to that reference, or whose A/B has no medians, is not');
   ok(!fixed.beatsCurTput(win, 85.608) && fixed.beatsCurTput({ ...win, e2e_throughput_tok_s: 85.7 }, 85.608)
-    && !fixed.beatsCurTput({ ...win, e2e_throughput_tok_s: 85.608 }, 85.608),
-  'a fixed-ISL/OSL run keeps the absolute check exactly');
+    && !fixed.beatsCurTput({ ...win, e2e_throughput_tok_s: 85.608 }, 85.608)
+    && !fixed.beatsCurTput(stack, 85.608) && fixed.beatsCurTput({ ...stack, e2e_throughput_tok_s: 85.7 }, 85.608),
+  'a fixed-ISL/OSL run keeps the absolute check exactly, for stack results too');
   const SETUP = { flags: '--max-running-requests 16', env: '', overlay: '' };
   const kept = { setup: SETUP, accepted: 1, tput: 75.962, baseline: 85.608, ...SETUP };
   ok(ax.agentxValidateSkip(ax.agentxAdoptedNothing(kept), 121 * 60000) === '',
