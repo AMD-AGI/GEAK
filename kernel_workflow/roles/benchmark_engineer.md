@@ -201,6 +201,10 @@ The COMMANDMENT MUST contain, with concrete commands (not placeholders):
 ### 5. Record baseline + check reliability
 Run the FULL benchmark **3 times** via gpu_lock. Confirm per-case results are within ~5% across
 runs. If variance is high, investigate (GPU busy? clocks? other procs on this GPU?) and re-run.
+When the harness also times the unmodified workspace against the frozen baseline and prints the
+PRIMARY speedup (a weighted oracle prints `GEAK_WEIGHTED_SPEEDUP`), each run is an A/A measurement:
+record every run's printed value, unrounded, as `baseline_self_speedups`. They are the task's noise
+floor, so never average, adjust or estimate them; omit the field when the harness prints no such speedup.
 Save `EVAL_DIR/baseline_timing.json` (the `count`/`dims`/`dtypes`/`weight_source` fields appear only
 when a WORKLOAD_SPEC drove the cases; `baseline_weighted_total_ms = Σ count_i·latency_i`):
 ```json
@@ -212,7 +216,8 @@ when a WORKLOAD_SPEC drove the cases; `baseline_weighted_total_ms = Σ count_i·
   "baseline_weighted_total_ms": 0.0,
   "num_test_cases": 0,
   "reliable": true,
-  "runs_ms": [[...run1...],[...run2...],[...run3...]]
+  "runs_ms": [[...run1...],[...run2...],[...run3...]],
+  "baseline_self_speedups": [0.0, 0.0, 0.0]
 }
 ```
 
@@ -233,9 +238,11 @@ when a WORKLOAD_SPEC drove the cases; `baseline_weighted_total_ms = Σ count_i·
   "weights_provenance": "trace|caller|regime_prior|mixed",
   "num_test_cases": 0,
   "reliable": true,
+  "baseline_self_speedups": [0.0, 0.0, 0.0],
   "notes": "anything downstream agents must know (incl. any naive-baseline / regime_prior caveats)"
 }
 ```
 When `workload_aligned` is true, `baseline_per_case[].count` is the coefficient the time-weighted
 metric uses, and `weight = count·latency_ms` is the case's time share. On an unweighted run omit the
-workload fields entirely (output is identical to before).
+workload fields entirely (output is identical to before). Include `baseline_self_speedups` only when
+Step 5 recorded it.

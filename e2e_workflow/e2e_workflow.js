@@ -189,6 +189,9 @@ const laneArgs = (wfArgs) => {
       'route_max_output_tokens', 'route_floors', 'route_decider', 'route_eikos_tau', 'route_eikos_max_consults',
       'route_eikos_carrier_model', 'route_eikos_carrier_timeout_ms', 'route_eikos_probe_failed']
       .filter((k) => A[k] != null).map((k) => [k, typeof A[k] === 'object' ? JSON.stringify(A[k]) : String(A[k])])),
+    // A trace replay's lanes commit a verified gain above the task's measured A/A noise instead of the
+    // flat 2%: its integrate A/Bs, stacking and Validate then judge the gain in serving.
+    ...(IS_AGENTX ? { min_improve: 'noise' } : {}),
     ...wfArgs,
   };
   if (GPU_FAMILY.isolate) {

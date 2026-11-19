@@ -112,8 +112,8 @@ ok(txt({ candidate_floor: 0.5 }) === '0.5', 'and a lowered floor renders faithfu
 ok(txt({ candidate_floor: 0.55 }) === '0.55', 'including a non-round one', txt({ candidate_floor: 0.55 }));
 
 console.log('\n# the commit gate is NOT loosened by any of this');
-ok(/const improved = !!\(winner && winner\.geomean > cumulative \* \(1 \+ MIN_IMPROVE\)\)/.test(src),
-   'banking still requires beating cumulative by MIN_IMPROVE');
+ok(/const improved = !!\(winner && winner\.geomean > cumulative \* \(1 \+ COMMIT_IMPROVE\)\)/.test(src),
+   'banking still requires beating cumulative by COMMIT_IMPROVE, which is MIN_IMPROVE unless asked otherwise');
 ok(/const madeProgress = !!\(winner && bestSeen > 0 && winner\.geomean > bestSeen \* \(1 \+ PROGRESS_DELTA\)\)/.test(src),
    'the progress signal reads PROGRESS_DELTA against bestSeen, guarded on bestSeen > 0');
 ok(!/cumulative \* \(1 \+ CANDIDATE_FLOOR\)|CANDIDATE_FLOOR\)\s*;?\s*\/\/ commit/.test(src),
@@ -204,6 +204,57 @@ ok(replay(FLOOR_ONLY, TRAJ['pa_decode']).rounds < TRAJ['pa_decode'].length,
   ok(noBestSeen(6).rounds < TRAJ['very slow'].length && noBestSeen(8).rounds < TRAJ['very slow'].length,
      'a bigger max_no_improve is NOT a substitute -- it resets only on a commit',
      `mni=6 -> ${noBestSeen(6).rounds} rounds, mni=8 -> ${noBestSeen(8).rounds} rounds`);
+}
+
+console.log("\n# min_improve: 'noise' commits above the setup's measured A/A noise, never above MIN_IMPROVE");
+// What e2e passes on a trace replay. The real block runs after the benchmark setup, on its return.
+function commitGate(A, bench) {
+  const grab = (re, name) => {
+    const m = src.match(re);
+    if (!m) throw new Error(`could not extract ${name} from kernel_lane.js`);
+    return m[0];
+  };
+  const body = [
+    grab(/const MIN_IMPROVE = \(\(\) => \{[\s\S]*?\n\}\)\(\);\n/, 'MIN_IMPROVE'),
+    grab(/const MIN_IMPROVE_FROM_NOISE = [^\n]*\n/, 'MIN_IMPROVE_FROM_NOISE'),
+    grab(/const SELF_SPEEDUPS = [\s\S]*?\nif \(MIN_IMPROVE_FROM_NOISE\) \{[\s\S]*?\n\}\n/, 'COMMIT_IMPROVE'),
+  ].join('\n');
+  const logs = [];
+  const r = new Function('A', 'bench', 'log',
+    `${body}\nreturn { MIN_IMPROVE, NOISE_FLOOR, COMMIT_IMPROVE };`)(A, bench, (m) => logs.push(m));
+  return { ...r, logs };
+}
+{
+  const AA = { baseline_self_speedups: [0.9994, 0.9996, 0.9972, 0.9988] };
+  const near = (a, b) => Math.abs(a - b) < 1e-12;
+  ok(commitGate({}, AA).COMMIT_IMPROVE === 0.02 && commitGate({}, AA).logs.length === 0,
+     'a caller that does not ask keeps the 2% default, A/A runs or not, and logs nothing new');
+  ok(commitGate({ min_improve: 0.01 }, AA).COMMIT_IMPROVE === 0.01, 'an explicit number still wins');
+  const g = commitGate({ min_improve: 'noise' }, AA);
+  ok(near(g.COMMIT_IMPROVE, 0.0028) && g.MIN_IMPROVE === 0.02,
+     "'noise' commits above the largest A/A deviation (0.28%); MIN_IMPROVE itself stays 2%", g.COMMIT_IMPROVE);
+  ok(/A\/A noise 0\.28% over 4 baseline runs; a round winner commits above \+0\.28%/.test(g.logs.join('\n')),
+     'and the lane log says which gate it applied', g.logs.join(' | '));
+  ok(commitGate({ min_improve: 'noise' }, { baseline_self_speedups: [0.97, 1.03] }).COMMIT_IMPROVE === 0.02,
+     'a harness noisier than 2% never raises the gate above the default');
+  for (const [what, bench, why] of [
+    ['no runs', {}, /fewer than two A\/A runs recorded/],
+    ['one run', { baseline_self_speedups: [0.999] }, /fewer than two A\/A runs recorded/],
+    ['unusable values', { baseline_self_speedups: ['x', null, -1] }, /fewer than two A\/A runs recorded/],
+    ['a zero floor', { baseline_self_speedups: [1, 1, 1] }, /the A\/A runs show no deviation/]]) {
+    const r = commitGate({ min_improve: 'noise' }, bench);
+    ok(r.COMMIT_IMPROVE === 0.02 && why.test(r.logs.join('')),
+       `${what}: nothing resolves a gain, so the gate stays at 2% and the log says why`, r.logs.join(' | '));
+  }
+  ok(knobs({ min_improve: 'noise' }).MIN_IMPROVE === 0.02 && knobs({ min_improve: 'noise' }).PROGRESS_DELTA === 0.02,
+     "and the progress test keeps MIN_IMPROVE: 'noise' moves only the commit decision");
+  // Small verified steps that the flat 2% banks none of.
+  const steps = [1.012, 1.019, 1.026];
+  const cfg = { budget: 6, deepCost: 1, maxNoImprove: 2, floor: 1.0, progressDelta: 0.02 };
+  const flat = replay({ ...cfg, minImprove: 0.02 }, steps), noise = replay({ ...cfg, minImprove: g.COMMIT_IMPROVE }, steps);
+  ok(flat.commits === 0 && noise.commits === 3 && noise.final === 1.026,
+     'three verified steps of 0.7-1.2%: the flat 2% banks none, the measured gate banks all three',
+     `flat ${flat.commits} commit(s) ${flat.final}x, noise ${noise.commits} commit(s) ${noise.final}x`);
 }
 
 console.log('\n# a sub-baseline candidate is TRACKED but never BANKED');
