@@ -47,7 +47,7 @@ Other args, with defaults: `min_improve` 0.02 (commit gate), `deep_cost` 2 (a de
 alone in its round), `max_directions` 0 (no per-round cap beyond the budget; 1 gives the old
 one-engineer track), `no_stop_s` 900 and `max_forced_replans` 6 (with a deadline, a tech_lead stop is
 refused while time is left), `parity_threshold` 0.95, `max_recover_rounds` ceil(budget/2),
-`max_no_improve` (port 6, else 2; climb rounds without progress), `progress_delta` (port −0.05, else
+`max_no_improve` (port 6, else 3 -- one more than kernel-workflow's 2 on purpose: a Gluon round often spends a direction on a deep_explore or a structural rung that measures null first; an A/B passes one value to both arms), `progress_delta` (port −0.05, else
 `min_improve`; how far over the best candidate seen a round's winner must land to count as progress),
 `enabling_delta` (port −0.05, else 0; how far an `enabling_step` may sit below the track best and still
 be kept), `method_strictness` (strict | advisory, default strict: how much of the method recover/climb/integrate enforce; see `## Method strictness`), `focus_layers` (a guided run: comma list of layers the planner exercises whenever the profile gives them a target; gates unchanged; default none), `prior_log` (an earlier run's insight log or final report when this run continues from its kept line),
@@ -253,7 +253,7 @@ planner schema or rules move.
 | engineer | `engineer` / `deep_engineer` per specialty | `gluon_engineer` per direction, with G3/G4/ATT gates, re-ask and the artifact audit |
 | integrate | `integrator` when ≥ 2 verified; its own number | integrator.md's strategy on the track tags with permuted screens; the integrated candidate is verified |
 | profile | `profile_kernel.sh` (`profile_engineer`) | `gluon_profile.py`: every direction's round profile, `--compare` the last kept one |
-| stall, commit, stop | `max_no_improve` 2, `progress_delta` = `min_improve`, `min_improve` 0.02; no early stop with a deadline | the same; a port gives ground (6, −0.05) |
+| stall, commit, stop | `max_no_improve` 2, `progress_delta` = `min_improve`, `min_improve` 0.02; no early stop with a deadline | the same, except `max_no_improve` 3; a port gives ground (6, −0.05) |
 | added | — | entry modes, G1 champion gate, transcribe with equivalence, recover with G2, layer gating inside a round, paired directions |
 | learned KB | planner reads `knowledge/learned/` with a per-round budget | the same switch, cap and control direction |
 | analyze | `tech_lead` PHASE=analyze before Benchmark: roadmap, `codebase_context.md`, perf_knowledge cards (`KK_*`) | the same role and phase; `KK_*`, `CODEBASE_CONTEXT` and `SELF_MONITORING` go to the planner and every engineer |

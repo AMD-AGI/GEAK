@@ -24,8 +24,8 @@ const enumOf = (block) => ((block.match(/specialty: \{ type: 'string', enum: (\[
     ok(l === wfExpect, `kernel_lane.js ${key} default is ${wfExpect}`, l);
     ok(wfDefault(key) === wfExpect, `workflow.js ${key} default is ${wfExpect}`, wfDefault(key));
   }
-  ok(laneDefault('max_no_improve') === '2' && /max_no_improve, ENTRY === 'port' \? 6 : 2\)/.test(wf),
-    'max_no_improve: 2 as in kernel_lane.js (a port keeps its own 6)');
+  ok(laneDefault('max_no_improve') === '2' && /max_no_improve, ENTRY === 'port' \? 6 : 3\)/.test(wf),
+    'max_no_improve: kernel_lane.js 2, here 3 on purpose (documented; an A/B passes one value to both arms; a port keeps 6)');
   for (const [key, val] of [['use_learned_kb', "'true'"], ['kb_dir_cap', '1'], ['kb_cold_direction', "'true'"]]) {
     const re = (src) => new RegExp(`A\\.${key} != null \\? A\\.${key} : ${val.replace(/'/g, "\\'")}`).test(src) ||
       new RegExp(`num\\(A\\.${key}, ${val}\\)`).test(src);

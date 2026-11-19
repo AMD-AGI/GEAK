@@ -188,7 +188,7 @@ const { launch, ok, done, inOrder, engineerReturn, gate, refsIn, goodAtt } = req
     ok(y.result.stopped_by === 'budget' && y.result.rounds_used === 2, 'budget counts directions (one per round here)', y.result);
     const z = await launch({ budget: 6, entry_mode: 'incumbent' }, (label) =>
       /^verify/.test(label) ? { status: 'regression', correctness: 'pass', verified_geomean: 0.95 } : undefined, { entry: 'incumbent' });
-    ok(z.result.stopped_by === 'max_no_improve' && z.result.rounds_used === 2, 'incumbent stalls after 2 non-improving rounds', z.result);
+    ok(z.result.stopped_by === 'max_no_improve' && z.result.rounds_used === 3, 'incumbent stalls after 3 non-improving rounds (default 3)', z.result);
   }
   done('acceptance/stop');
 })();

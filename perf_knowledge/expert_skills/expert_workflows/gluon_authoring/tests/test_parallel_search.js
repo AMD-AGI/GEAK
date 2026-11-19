@@ -188,7 +188,7 @@ const three = [{ specialty: 'compute', layer: '7' }, { specialty: 'memory', laye
   console.log('\n# 9. the stall rule is kernel_lane.js\'s: progress means MIN_IMPROVE over the best candidate seen');
   {
     const vals = { 'verify r1_d0': 1.10, 'verify r2_d0': 1.11, 'verify r3_d0': 1.115 };
-    const x = await launch({ ...climb, budget: 9 }, (label) => (label in vals ? ver(vals[label]) : undefined), inc);
+    const x = await launch({ ...climb, budget: 9, max_no_improve: 2 }, (label) => (label in vals ? ver(vals[label]) : undefined), inc);
     ok(x.result.stopped_by === 'max_no_improve' && x.result.rounds_used === 3, 'two rounds under +2% stop the climb', x.result);
     ok(x.result.rounds[1].kept && !x.result.rounds[1].accepted, 'a +0.9% direction moves the track but is not accepted', x.result.rounds[1]);
   }

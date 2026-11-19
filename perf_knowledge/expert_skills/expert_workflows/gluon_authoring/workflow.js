@@ -764,7 +764,10 @@ log(`Entry: mode=${ENTRY}${blocked ? `, BLOCKED: ${blocked}` : ''}`);
 // MAX_NO_IMPROVE: climb rounds in a row without progress. PROGRESS_DELTA: how far over the best
 // candidate seen a round's winner must land to count as progress (kernel_lane.js: MIN_IMPROVE).
 // ENABLING_DELTA: how far below the track best an `enabling_step` may sit and still be kept.
-const MAX_NO_IMPROVE = Math.max(1, Math.floor(num(A.max_no_improve, ENTRY === 'port' ? 6 : 2)));
+// Deliberately one more than kernel_lane.js's 2: a Gluon round often spends a direction on a deep_explore or
+// a structural rung that measures null before the lever it enables pays, and runs stopped with most of the
+// budget unspent. An A/B passes the same value to both arms.
+const MAX_NO_IMPROVE = Math.max(1, Math.floor(num(A.max_no_improve, ENTRY === 'port' ? 6 : 3)));
 const PROGRESS_DELTA = num(A.progress_delta, ENTRY === 'port' ? -0.05 : MIN_IMPROVE);
 const ENABLING_DELTA = num(A.enabling_delta, ENTRY === 'port' ? -0.05 : 0);
 
