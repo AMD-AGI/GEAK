@@ -235,6 +235,21 @@ command. Its finalizer reads the resulting evidence without duplicating the sum.
 `SKILL.md` — points at `finalize.py` instead of restating its numbers, because a second
 copy of a rule is a rule that will drift.
 
+### 3.2 An exhausted agent budget: salvage and `delivery: "partial"`
+
+An agent-mode stage may opt in with `params.on_budget_exhausted: "deliver_qualified"`
+(default `"stop"`; budget `salvage_budget_sec`, default 7200, and `salvage_attempts`,
+default 3). When its normal sessions run out of budget or attempts without an `ok`, the
+driver writes `$OUT/salvage.json` and runs that bounded salvage phase; while the marker
+exists, later invocations resume the salvage instead of reopening the normal budget.
+The slot must supply `stages/<stage>/salvage.md` (what may be delivered from what is
+already on disk), and its `finalize.py` must recognise the marker: a delivery accepted
+that way carries `"delivery": "partial"` in `result.json` (written with
+`emit(..., delivery="partial")`), says what is missing in `notes`, and records every
+undelivered item as blocked rather than dropping it. The run report labels the stage
+`ok (partial delivery)`. Absent `delivery` means a full delivery. Only `profile` supplies
+`salvage.md` today; see [profile/README.md](profile/README.md).
+
 ## 4. Per-stage artifact contracts
 
 The `result.json` envelope is generic, but the specific files downstream reads are fixed.

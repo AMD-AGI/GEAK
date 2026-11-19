@@ -407,7 +407,7 @@ def render(snap, prev, acts, tick, rows=None):
         for r in done:
             keys = list(r["metrics"])[:4]
             L.append("  - **%s** `%s` — %s%s"
-                     % (r["stage"], r["skill"], r["status"],
+                     % (r["stage"], r["skill"], report_mod.status_label(r),
                         (": " + ", ".join("%s=%s" % (k, r["metrics"][k]) for k in keys))
                         if keys else ""))
     vram = snap.get("gpu_vram_used")

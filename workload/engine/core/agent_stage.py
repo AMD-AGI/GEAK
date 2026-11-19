@@ -44,6 +44,19 @@ import time
 # PRINCIPLES R2 says this pipeline does not have one.
 PROMPT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompt")
 
+# Opt-in salvage (params.on_budget_exhausted="deliver_qualified"). When the normal
+# sessions run out of budget or attempts without an `ok`, a bounded phase asks the agent
+# to deliver only what already qualifies and to record the rest as blocked. The engine
+# owns only the mechanism -- a fresh budget, the marker, the prompt frame; what "already
+# qualifies" means is the slot's, in `stages/<stage>/salvage.md`, and its finalize.py
+# judges the partial delivery it produces. The marker in $OUT is what makes a re-issued
+# `run.py all` resume the salvage rather than open a fresh normal budget.
+SALVAGE_MARKER = "salvage.json"
+SALVAGE_SCHEMA = "workload/agent_salvage/v1"
+SALVAGE_MODES = ("stop", "deliver_qualified")
+SALVAGE_DEFAULT_BUDGET_SEC = 7200
+SALVAGE_DEFAULT_ATTEMPTS = 3
+
 
 def read(path, default=""):
     try:
@@ -88,7 +101,43 @@ def inventory(out_dir, limit=60):
     return rows, False
 
 
-def build_prompt(env, lay, params, attempt, why=None, repair=None):
+def _positive_int(params, key, default):
+    value = params.get(key, default)
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("%s must be a positive integer, got %r" % (key, value))
+    return value
+
+
+def salvage_policy(lay):
+    """The stage's salvage settings, or None when it stops at an exhausted budget.
+
+    Raises ValueError for a setting that cannot be honoured, so `run.py plan` refuses it
+    before any GPU time rather than when the budget has already run out. The budget and
+    attempts are read even when the mode is `stop`: a stage whose marker says it already
+    entered salvage resumes it whatever the mode now says (see dispatch)."""
+    params = lay.get("params") or {}
+    mode = params.get("on_budget_exhausted", "stop")
+    if mode is None:
+        mode = "stop"
+    if mode not in SALVAGE_MODES:
+        raise ValueError("on_budget_exhausted must be one of %s, got %r"
+                         % (list(SALVAGE_MODES), mode))
+    policy = {"mode": mode,
+              "budget": _positive_int(params, "salvage_budget_sec",
+                                      SALVAGE_DEFAULT_BUDGET_SEC),
+              "attempts": _positive_int(params, "salvage_attempts",
+                                        SALVAGE_DEFAULT_ATTEMPTS),
+              "instructions": os.path.join(lay.get("slot_root") or "", "salvage.md")}
+    if mode != "stop" and not os.path.isfile(policy["instructions"]):
+        raise ValueError("on_budget_exhausted=%s but the slot has no salvage.md (%s); "
+                         "what may be delivered from a spent budget is the slot's to say"
+                         % (mode, policy["instructions"]))
+    return policy
+
+
+def build_prompt(env, lay, params, attempt, why=None, repair=None, salvage=None):
     out = env["OUT"]
     lines = [prompt_text("contract.md"), "", "",
              "ENVIRONMENT (already exported in your shell; use these paths "
@@ -106,7 +155,18 @@ def build_prompt(env, lay, params, attempt, why=None, repair=None):
         lines += ["CAMPAIGN NOTES from the scenario config. These are facts about this "
                   "particular run that the skill cannot know:", "", str(brief), ""]
 
-    if attempt > 1:
+    if salvage:
+        rows, truncated = inventory(out)
+        lines += [prompt_text(
+            "salvage.md",
+            SESSION=salvage["session"],
+            SESSIONS=salvage["attempts"],
+            BUDGET=salvage["left"],
+            MARKER=os.path.join(out, SALVAGE_MARKER),
+            TRIGGER=str(salvage.get("trigger") or "").strip() or "(not recorded)",
+            LAST=(str(why or "").strip() or "(no salvage session has run yet)"),
+            SLOT_SALVAGE=read(salvage["instructions"]).strip()), ""]
+    elif attempt > 1:
         rows, truncated = inventory(out)
         if repair:
             lines += [prompt_text(
@@ -121,12 +181,15 @@ def build_prompt(env, lay, params, attempt, why=None, repair=None):
                 "continuation.md",
                 ATTEMPT=attempt,
                 WHY=(": " + why) if why else ""), ""]
+    if salvage or attempt > 1:
         for rel, size in rows:
             lines.append("  %10d  %s" % (size, rel))
         if truncated:
             lines.append("  ... (listing truncated; walk $OUT yourself for the rest)")
         if not rows:
-            lines.append("  (nothing -- $OUT is empty, so begin at the start of SKILL.md)")
+            lines.append("  (nothing -- $OUT is empty, so there is nothing to salvage; "
+                         "run the finalize and let it record that)" if salvage else
+                         "  (nothing -- $OUT is empty, so begin at the start of SKILL.md)")
         lines.append("")
 
     lines += ["=" * 78,
@@ -218,11 +281,47 @@ def finalize(env, log_cb=print):
             raise RuntimeError(problem + "; no valid stage environment to record it")
 
 
+def _last_session(out):
+    """The highest session number already used in $OUT (0 when none)."""
+    return max([int(match.group(1)) for name in os.listdir(out)
+                if (match := re.fullmatch(r'agent_prompt\.(\d+)\.txt', name))] or [0])
+
+
+def _run_session(env, attempt, prompt, left, log_cb, label):
+    """Write the prompt, run one runner session under `timeout`, return (rc, seconds)."""
+    out = env["OUT"]
+    prompt_path = os.path.join(out, "agent_prompt.%d.txt" % attempt)
+    with open(prompt_path, "w") as f:
+        f.write(prompt)
+    log = os.path.join(out, "agent.%d.log" % attempt)
+
+    log_cb("[agent] %s  budget %ds left  prompt %s" % (label, left, prompt_path))
+    log_cb("[agent] log %s" % log)
+    started = time.time()
+    # The budget is enforced from outside the runner, as the contract requires: a
+    # runner that imposed its own would fight it.
+    rc = subprocess.call(["timeout", str(left), "bash", env["RUNNER"], prompt_path,
+                          env["GEAK_ROOT"], log], env=env)
+    took = time.time() - started
+    log_cb("[agent] attempt %d exited %d after %.0fs" % (attempt, rc, took))
+    return rc, took
+
+
+def _precondition(out, attempt):
+    tail = "\n".join(read(os.path.join(out, "agent.%d.log" % attempt)).splitlines()[-5:])
+    return 78, ("the runner reported an unmet precondition (78), which the "
+                "contract says must not be retried: %s" % tail.strip())
+
+
 def dispatch(cfg, lay, env, log_cb=print):
     """Run the stage's agent sessions until result.json validates or the budget is spent.
 
     Returns (exit_code, note). The caller validates result.json itself -- this function
     deliberately has no opinion about whether the stage succeeded.
+
+    With `on_budget_exhausted: "deliver_qualified"`, a normal budget that runs out
+    without an `ok` is followed by one bounded salvage phase (`salvage`). Once entered,
+    `$OUT/salvage.json` makes every later invocation resume that phase instead.
     """
     import stage as stage_mod                      # circular only at call time
 
@@ -234,6 +333,31 @@ def dispatch(cfg, lay, env, log_cb=print):
     if not os.path.exists(runner):
         return 78, "runner %s does not exist" % runner
 
+    try:
+        policy = salvage_policy(lay)
+    except ValueError as exc:
+        return 1, str(exc)
+    marker = os.path.join(out, SALVAGE_MARKER)
+    if os.path.lexists(marker):
+        # Resume, never restart: the partial delivery is already under way (or done),
+        # and a fresh normal budget would redo the captures the salvage exists to skip.
+        log_cb("[agent] %s exists: this stage already entered salvage; resuming the "
+               "salvage phase, not the normal budget (move the marker aside to rerun "
+               "the full stage)" % marker)
+        return salvage(lay, env, policy, None, log_cb)
+
+    def spent(rc, note):
+        """The normal budget or attempts ran out without an `ok` verdict."""
+        if policy["mode"] == "stop":
+            return rc, note
+        res, _ = stage_mod.validate_result(lay)
+        trigger = note or ("the normal agent budget (%ds, %d attempts) ended with "
+                           "status %s: %s" % (budget, attempts, (res or {}).get("status"),
+                                              str((res or {}).get("notes") or "").strip()))
+        log_cb("[agent] budget spent; entering salvage (%s, %ds, up to %d session(s)): %s"
+               % (policy["mode"], policy["budget"], policy["attempts"], trigger))
+        return salvage(lay, env, policy, trigger, log_cb)
+
     repairs = int(params.get("agent_repair_attempts")
                   or cfg.get("agent_repair_attempts") or 1)
     result_path = os.path.join(out, "result.json")
@@ -241,14 +365,13 @@ def dispatch(cfg, lay, env, log_cb=print):
     why, repair, recorded = None, None, None
     # Session numbers survive a new run.py invocation, so prompts/logs and the
     # continuation inventory survive node or controller recovery too.
-    offset = max([int(match.group(1)) for name in os.listdir(out)
-                  if (match := re.fullmatch(r'agent_prompt\.(\d+)\.txt', name))] or [0])
+    offset = _last_session(out)
     for local_attempt in range(1, attempts + 1):
         attempt = offset + local_attempt
         left = int(deadline - time.time())
         if left <= 60:
-            return 1, ("the %ds agent budget is spent after %d attempt(s); last problem: %s"
-                       % (budget, local_attempt - 1, why or "none recorded"))
+            return spent(1, "the %ds agent budget is spent after %d attempt(s); last "
+                            "problem: %s" % (budget, local_attempt - 1, why or "none recorded"))
 
         if os.path.lexists(result_path):
             previous, _ = stage_mod.validate_result(lay)
@@ -257,26 +380,11 @@ def dispatch(cfg, lay, env, log_cb=print):
             if previous and previous.get('status') in ('blocked', 'fail'):
                 recorded = saved
 
-        prompt_path = os.path.join(out, "agent_prompt.%d.txt" % attempt)
-        with open(prompt_path, "w") as f:
-            f.write(build_prompt(env, lay, params, attempt, why, repair))
-        log = os.path.join(out, "agent.%d.log" % attempt)
-
-        log_cb("[agent] attempt %d/%d  budget %ds left  prompt %s"
-               % (attempt, offset + attempts, left, prompt_path))
-        log_cb("[agent] log %s" % log)
-        started = time.time()
-        # The budget is enforced from outside the runner, as the contract requires: a
-        # runner that imposed its own would fight it.
-        rc = subprocess.call(["timeout", str(left), "bash", runner, prompt_path,
-                              env["GEAK_ROOT"], log], env=env)
-        took = time.time() - started
-        log_cb("[agent] attempt %d exited %d after %.0fs" % (attempt, rc, took))
-
+        rc, _ = _run_session(env, attempt,
+                             build_prompt(env, lay, params, attempt, why, repair), left,
+                             log_cb, "attempt %d/%d" % (attempt, offset + attempts))
         if rc == 78:
-            tail = "\n".join(read(log).splitlines()[-5:])
-            return 78, ("the runner reported an unmet precondition (78), which the "
-                        "contract says must not be retried: %s" % tail.strip())
+            return _precondition(out, attempt)
 
         # Whether the agent itself reported, before the slot overwrites the file.
         reported = os.path.exists(result_path)
@@ -285,8 +393,11 @@ def dispatch(cfg, lay, env, log_cb=print):
         res, errs = stage_mod.validate_result(lay)
         if not errs:
             status = (res or {}).get("status")
-            if (status == "ok" or repairs <= 0 or local_attempt == attempts
-                    or int(deadline - time.time()) <= 300):
+            if status == "ok":
+                return 0, None
+            if local_attempt == attempts or int(deadline - time.time()) <= 300:
+                return spent(0, None)
+            if repairs <= 0:
                 return 0, None
             if not reported:
                 # The session died mid-work and the slot graded what it left behind. That
@@ -325,6 +436,122 @@ def dispatch(cfg, lay, env, log_cb=print):
         shutil.copy(recorded, result_path)
         _, errs = stage_mod.validate_result(lay)
     if not errs:
+        return spent(0, None)
+    return spent(1, "%d agent attempts ended without a valid result.json; last problem: %s"
+                    % (attempts, why))
+
+
+def _save_marker(path, doc):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(doc, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+def salvage(lay, env, policy, trigger, log_cb=print):
+    """The bounded salvage phase: deliver what already qualifies, record the rest.
+
+    Entered once, from `dispatch`, when the normal budget is spent (`trigger` says why),
+    and resumed from `$OUT/salvage.json` by every later invocation (`trigger` None). Its
+    budget is its own and is cumulative across invocations: the marker records every
+    session's seconds, so a re-issued `run.py all` continues the same `salvage_budget_sec`
+    and `salvage_attempts` rather than granting them again. A session the controller never
+    saw end (node loss) is charged up to its log's last write.
+
+    The slot's finalize judges each session exactly as in the normal loop; an `ok` ends
+    the phase. When nothing is left, the slot's verdict on what is on disk stands (one
+    more finalize when this invocation ran no session, so a fix made by hand is judged).
+    """
+    import stage as stage_mod                      # circular only at call time
+
+    out = env["OUT"]
+    marker = os.path.join(out, SALVAGE_MARKER)
+    if trigger is not None:
+        doc = {"schema": SALVAGE_SCHEMA, "stage": env.get("STAGE"),
+               "mode": policy["mode"],
+               "entered_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+               "entered_unix": int(time.time()), "trigger": trigger,
+               "normal_sessions": _last_session(out), "sessions": []}
+        _save_marker(marker, doc)
+    else:
+        try:
+            with open(marker) as f:
+                doc = json.load(f)
+            if not isinstance(doc, dict) or not isinstance(doc.get("sessions"), list):
+                raise ValueError("not a %s object" % SALVAGE_SCHEMA)
+        except (OSError, ValueError) as exc:
+            return 1, ("the salvage marker %s is unreadable (%s); it is the only record "
+                       "of how much salvage budget is spent, so nothing was started. "
+                       "Repair it or move it aside to rerun the full stage" % (marker, exc))
+    if not os.path.isfile(policy["instructions"]):
+        return 1, ("this stage entered salvage (%s) but the slot has no salvage.md (%s)"
+                   % (marker, policy["instructions"]))
+
+    sessions = doc["sessions"]
+    for row in sessions:
+        if isinstance(row, dict) and row.get("seconds") is None:
+            try:
+                last = os.path.getmtime(os.path.join(out, "agent.%d.log" % row["session"]))
+            except (OSError, KeyError, TypeError):
+                last = row.get("started_unix") or 0
+            row["seconds"] = max(0, int(last - (row.get("started_unix") or last)))
+            row["exit"] = "lost (the controller did not see this session end)"
+    doc.update(budget_sec=policy["budget"], attempts=policy["attempts"])
+    _save_marker(marker, doc)
+
+    params = lay["params"]
+    result_path = os.path.join(out, "result.json")
+    why = next((r.get("finalize_notes") for r in reversed(sessions)
+                if isinstance(r, dict) and r.get("finalize_notes")), None)
+    ran = False
+    while True:
+        used = sum(int(r.get("seconds") or 0) for r in sessions if isinstance(r, dict))
+        left = int(policy["budget"] - used)
+        if len(sessions) >= policy["attempts"] or left <= 60:
+            break
+        attempt = _last_session(out) + 1
+        if os.path.lexists(result_path):
+            os.replace(result_path, os.path.join(
+                out, "result.before-session.%d.json" % attempt))
+        prompt = build_prompt(env, lay, params, attempt, why, salvage={
+            "session": len(sessions) + 1, "attempts": policy["attempts"], "left": left,
+            "trigger": doc.get("trigger"), "instructions": policy["instructions"]})
+        row = {"session": attempt, "started_unix": int(time.time()), "seconds": None}
+        sessions.append(row)
+        _save_marker(marker, doc)
+        rc, took = _run_session(env, attempt, prompt, left, log_cb,
+                                "salvage %d/%d (session %d)"
+                                % (len(sessions), policy["attempts"], attempt))
+        ran = True
+        row.update(seconds=int(round(took)), exit=rc)
+        _save_marker(marker, doc)
+        if rc == 78:
+            return _precondition(out, attempt)
+        finalize(env, log_cb)
+        res, errs = stage_mod.validate_result(lay)
+        row["status"] = (res or {}).get("status") if not errs else "invalid"
+        why = ("; ".join(errs) if errs
+               else str((res or {}).get("notes") or "").strip() or row["status"])
+        row["finalize_notes"] = why
+        _save_marker(marker, doc)
+        if not errs and row["status"] == "ok":
+            log_cb("[agent] salvage delivered: the slot's finalize accepts the partial "
+                   "delivery")
+            return 0, None
+        log_cb("[agent] salvage session %d: finalize says %s" % (attempt, row["status"]))
+
+    if not ran:
+        finalize(env, log_cb)
+    res, errs = stage_mod.validate_result(lay)
+    if (res or {}).get("status") == "ok" and not errs:
         return 0, None
-    return 1, ("%d agent attempts ended without a valid result.json; last problem: %s"
-               % (attempts, why))
+    log_cb("[agent] the salvage budget is spent (%d of %d session(s), %ds of %ds)"
+           % (len(sessions), policy["attempts"],
+              sum(int(r.get("seconds") or 0) for r in sessions if isinstance(r, dict)),
+              policy["budget"]))
+    if not errs:
+        return 0, None
+    return 1, ("the salvage phase (%ds, %d session(s)) ended without a valid result.json; "
+               "last problem: %s" % (policy["budget"], policy["attempts"],
+                                     "; ".join(errs)))

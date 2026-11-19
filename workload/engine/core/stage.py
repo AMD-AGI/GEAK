@@ -42,6 +42,7 @@ GEAK_ROOT = os.path.dirname(WORKLOAD_ROOT)
 DEFAULT_CONFIG = os.path.join(WORKLOAD_ROOT, "config", "default.json")
 RETIRED_CONFIG = os.path.join(WORKLOAD_ROOT, "config", "RETIRED.json")
 VALID_STATUS = ("ok", "blocked", "fail")
+VALID_DELIVERY = ("full", "partial")   # optional result.json field; absent = full
 
 
 # ---------------------------------------------------------------- config
@@ -266,6 +267,14 @@ def check_skill(lay, problems):
         problems.append("%s: missing SKILL.md (contract rule 0) %s" % (lay["stage"], lay["skill_md"]))
     if lay["mode"] == "script" and not os.path.exists(lay["run_sh"]):
         problems.append("%s: mode=script but there is no run.sh %s" % (lay["stage"], lay["run_sh"]))
+    if lay["mode"] != "script":
+        # A salvage setting that cannot be honoured must surface here, not when the
+        # normal budget has already run out.
+        import agent_stage
+        try:
+            agent_stage.salvage_policy(lay)
+        except ValueError as exc:
+            problems.append("%s: %s" % (lay["stage"], exc))
 
 
 def validate_result(lay):
@@ -303,6 +312,10 @@ def validate_result(lay):
             continue
         if not os.path.exists(os.path.join(lay["out"], rel)):
             errs.append("artifacts.%s points at %r, which does not exist" % (name, rel))
+
+    if "delivery" in res and res["delivery"] not in VALID_DELIVERY:
+        errs.append("delivery must be one of %s when present, got %r"
+                    % (list(VALID_DELIVERY), res["delivery"]))
 
     metrics = res.get("metrics")
     if metrics is not None and not isinstance(metrics, dict):
@@ -570,10 +583,15 @@ def cmd_validate(cfg, args, exec_rc=None):
                           for k, v in (res.get("artifacts") or {}).items()}
     if res.get("notes"):
         entry["notes"] = res["notes"]
+    if res.get("delivery"):
+        entry["delivery"] = res["delivery"]
     state["stages"][lay["stage"]] = entry
     save_state(cfg, state)
 
-    print("stage %s: %s (%s)" % (lay["stage"], res["status"], lay["skill"]))
+    print("stage %s: %s%s (%s)" % (lay["stage"], res["status"],
+                                   " (%s delivery)" % res["delivery"]
+                                   if res.get("delivery") == "partial" else "",
+                                   lay["skill"]))
     print("  stack identity: %s%s" % (rep["verdict"],
                                       (" — " + "; ".join(rep["matched"])) if rep["matched"] else ""))
     for k, v in (res.get("metrics") or {}).items():

@@ -47,6 +47,12 @@ EPSILON = 0.01
 
 SEVERITY = {"ok": 0, "blocked": 1, "fail": 2}
 
+# Written by engine/core/agent_stage.py when the normal agent budget ran out and the
+# stage is configured to salvage (README.md, "When the budget runs out"). Its presence
+# turns this verdict into one on a partial delivery; without it nothing here changes.
+SALVAGE_MARKER = "salvage.json"
+UNQUALIFIED_DIR = "tasks_unqualified"
+
 
 def worse(a, b):
     return a if SEVERITY[a] >= SEVERITY[b] else b
@@ -336,6 +342,25 @@ def reported_coverage(out):
     return numeric[0], numeric[1]
 
 
+def uncaptured_configs(ranking):
+    """Baseline points with no captured census, or None when that cannot be told.
+
+    A salvage may finish the merge over the configs it captured and skip the rest. The
+    merged ranking's `denominators.per_config` names the captured ones and `$IN`'s
+    `baseline.json` names all of them, so the slot derives the gap itself rather than
+    trusting the session to have listed it. A single-config baseline has no gap."""
+    baseline = read_json(os.path.join(os.environ.get("IN") or "", "baseline.json"),
+                         default={})
+    if not baseline.get("multi_config"):
+        return [] if baseline else None
+    points = [p.get("point_id") for p in baseline.get("points") or []
+              if isinstance(p, dict) and p.get("point_id")]
+    captured = (ranking.get("denominators") or {}).get("per_config")
+    if not isinstance(captured, dict) or not points:
+        return None
+    return sorted(set(points) - set(captured))
+
+
 def main(params_override=None, require_serving_coverage=True):
     out = os.environ.get("OUT")
     if not out:
@@ -343,7 +368,13 @@ def main(params_override=None, require_serving_coverage=True):
         return 2
 
     params = stage_params(out) if params_override is None else params_override
+    partial = os.path.lexists(os.path.join(out, SALVAGE_MARKER))
     if params.get("output_kind") == "dispatch_evidence":
+        if partial:
+            return emit(status="blocked", artifacts={},
+                        notes="%s is present, but a dispatch-evidence profile delivers no "
+                              "UT tasks, so there is nothing a salvage could deliver. Move "
+                              "the marker aside and rerun the stage." % SALVAGE_MARKER)
         from handoff import finalize_evidence
         return finalize_evidence(out, params)
 
@@ -406,6 +437,18 @@ def main(params_override=None, require_serving_coverage=True):
         notes.append("configured minimum_qualified_tasks=%d, observed fully qualified tasks=%d; "
                      "complete the supported nonoverlapping delivery before optimization"
                      % (minimum, len(qualified)))
+    if partial and not qualified and minimum < 1:
+        # A salvage that hands optimize nothing is not a delivery of any size.
+        status = worse(status, "blocked")
+        notes.append("the salvage left no fully qualified task under tasks/; a partial "
+                     "delivery needs at least one")
+    unqualified = [e["name"] for e in evidence if e not in qualified]
+    if partial and unqualified:
+        status = worse(status, "blocked")
+        notes.append("a salvage delivers only fully qualified tasks, and optimize and "
+                     "applyback treat every directory under tasks/ as delivered: move %s "
+                     "to %s/ and record their identities as blocked in results.json"
+                     % (unqualified, UNQUALIFIED_DIR))
 
     if broken:
         status = worse(status, "blocked")
@@ -530,8 +573,31 @@ def main(params_override=None, require_serving_coverage=True):
     if not require_serving_coverage and achieved_pct is None:
         notes.append("UT acceptance uses the frozen case and source-delivery receipts. Exact "
                      "whole-serving coverage remains unknown and is not inferred from a UT pass.")
+    if not partial:
+        return emit(status=status, artifacts=artifacts, metrics=metrics,
+                    notes="; ".join(notes))
+
+    # A partial delivery says so first, in the receipt itself and in its notes, so no
+    # reader of STATE.json or REPORT.md can take it for a full extraction.
+    missing_configs = uncaptured_configs(ranking)
+    artifacts["salvage"] = SALVAGE_MARKER
+    metrics.update(delivery="partial",
+                   blocked_identity_ids=blocked_ids,
+                   uncaptured_configs=missing_configs,
+                   tasks_moved_unqualified=len(
+                       [n for n in (os.listdir(os.path.join(out, UNQUALIFIED_DIR))
+                                    if os.path.isdir(os.path.join(out, UNQUALIFIED_DIR))
+                                    else [])
+                        if os.path.isdir(os.path.join(out, UNQUALIFIED_DIR, n))]))
+    head = ("PARTIAL DELIVERY (profile budget salvage): %d qualified task(s) %s; %d selected "
+            "identities blocked %s; configs not captured: %s. Optimize and applyback "
+            "receive only these tasks; this is not a full extraction"
+            % (len(qualified), [e["name"] for e in qualified], len(blocked_ids),
+               blocked_ids,
+               "unknown (no multi-config census to compare)" if missing_configs is None
+               else (missing_configs or "none")))
     return emit(status=status, artifacts=artifacts, metrics=metrics,
-                notes="; ".join(notes))
+                notes="; ".join([head] + notes), delivery="partial")
 
 
 if __name__ == "__main__":

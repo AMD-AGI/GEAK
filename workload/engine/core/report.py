@@ -88,6 +88,7 @@ def stage_rows(root, state=None):
         rows.append({"stage": name,
                      "skill": res.get("skill") or st.get("skill") or "—",
                      "status": status,
+                     "delivery": res.get("delivery") or st.get("delivery"),
                      "metrics": {k: v for k, v in m.items() if not k.startswith("_")},
                      "notes": notes})
     return rows
@@ -109,12 +110,20 @@ def stage_section(root, stage):
     return text + "\n" if text else ""
 
 
+def status_label(row):
+    """The row's status, with a partial delivery (result.json `delivery`) said aloud: an
+    `ok` that carries only part of its scope must not read like a full one."""
+    if row.get("delivery") == "partial":
+        return "%s (partial delivery)" % row["status"]
+    return row["status"]
+
+
 def stage_table(rows, limit=4):
     L = ["| Stage | Skill | Status | Key metrics |", "| --- | --- | --- | --- |"]
     for r in rows:
         keys = list(r["metrics"])[:limit]
         L.append("| `%s` | `%s` | %s | %s |"
-                 % (r["stage"], r["skill"], r["status"],
+                 % (r["stage"], r["skill"], status_label(r),
                     ", ".join("%s=%s" % (k, r["metrics"][k]) for k in keys) or "—"))
     return L
 

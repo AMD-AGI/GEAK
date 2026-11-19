@@ -18,6 +18,9 @@ import os
 import sys
 
 VALID_STATUS = ("ok", "blocked", "fail")
+# Optional. Absent means a full delivery; "partial" marks one that the slot accepted with
+# part of its scope recorded as blocked (an agent stage's salvage, ../CONTRACT.md 3.2).
+VALID_DELIVERY = ("full", "partial")
 
 
 def read_json(path, default=None):
@@ -31,7 +34,7 @@ def read_json(path, default=None):
 
 
 def emit(status, artifacts=None, metrics=None, notes="", out=None,
-         stage=None, skill=None):
+         stage=None, skill=None, delivery=None):
     """Write result.json. Returns a process exit code: ok -> 0, anything else -> 1."""
     out = out or os.environ.get("OUT")
     stage = stage or os.environ.get("STAGE")
@@ -42,6 +45,9 @@ def emit(status, artifacts=None, metrics=None, notes="", out=None,
         return 2
     if status not in VALID_STATUS:
         print("status must be one of %s" % list(VALID_STATUS), file=sys.stderr)
+        return 2
+    if delivery is not None and delivery not in VALID_DELIVERY:
+        print("delivery must be one of %s" % list(VALID_DELIVERY), file=sys.stderr)
         return 2
 
     artifacts = dict(artifacts or {})
@@ -68,6 +74,8 @@ def emit(status, artifacts=None, metrics=None, notes="", out=None,
            "artifacts": artifacts, "metrics": metrics}
     if notes:
         doc["notes"] = notes
+    if delivery is not None:
+        doc["delivery"] = delivery
 
     os.makedirs(out, exist_ok=True)
     path = os.path.join(out, "result.json")

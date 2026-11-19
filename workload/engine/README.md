@@ -31,7 +31,7 @@ what survived that rule, and they buy exactly three things prose cannot:
 
 Anything here that stops serving one of those three belongs in markdown instead.
 `core/prompt/` is the worked example: what an unattended session is told — the contract,
-the continuation, the repair attempt — is text, it is the text most worth rewriting as we
+the continuation, the repair attempt, the salvage after a spent budget — is text, it is the text most worth rewriting as we
 learn how these sessions fail, and the person best placed to rewrite it does not have to
 be someone who edits Python. `agent_stage.py` keeps only the assembly.
 

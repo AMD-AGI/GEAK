@@ -263,6 +263,52 @@ Two rules worth stating in prose because they shape what you build, not just wha
   surplus is recorded as `tasks_capacity_deferred` and scheduled in a later wave. A
   delivery is never truncated, and an existing extraction is never deleted, to fit it.
 
+## When the budget runs out: salvage (opt-in)
+
+By default a profile stage whose agent budget (`agent_budget_sec`) or attempts
+(`agent_attempts`) run out without an `ok` stops the campaign there, even when several
+tasks already have green UTs on disk. Three stage params change that:
+
+| Param | Default | Meaning |
+| --- | --- | --- |
+| `on_budget_exhausted` | `"stop"` | `"stop"`: current behaviour. `"deliver_qualified"`: run one bounded salvage phase that delivers only the tasks already qualified |
+| `salvage_budget_sec` | `7200` | wall budget of the whole salvage phase, cumulative across invocations |
+| `salvage_attempts` | `3` | at most this many salvage sessions, cumulative across invocations |
+
+They are deliberately absent from `config/default.json`: a stage's params are part of its
+input receipt (`inputs.json`), so adding them there would invalidate every retained
+profile result. Set them in the scenario config, before the run starts, rather than with a
+one-off `--set`: a later invocation without the `--set` sees changed inputs and refuses to
+reuse the profile receipt.
+
+The mechanism is generic (`engine/core/agent_stage.py`, prompt frame
+`engine/core/prompt/salvage.md`); what may be delivered is this slot's, in
+[salvage.md](salvage.md), and `finalize.py` judges the result:
+
+- On entry the driver writes `$OUT/salvage.json` and logs `[agent] budget spent; entering
+  salvage ...`. While that marker exists, every later `run.py all` / `run.py run profile`
+  resumes the salvage with what is left of its budget and attempts (each session is
+  recorded in the marker) and never reopens the normal budget. Move the marker aside to
+  rerun the full stage.
+- The salvage session captures nothing new. It finishes census/merge/selection over the
+  configs already captured, keeps the tasks whose GPU UT and delivery gate are both green,
+  **moves every other task directory to `$OUT/tasks_unqualified/`**, records every
+  selected identity without a qualified task as blocked (`profile budget exhausted
+  (salvage)`) in `results.json`, and runs the finalize.
+- With the marker present, `finalize.py` writes `"delivery": "partial"` into
+  `result.json`, adds `delivery`, `blocked_identity_ids`, `uncaptured_configs` (baseline
+  points absent from `kernel_ranking.json.denominators.per_config`) and
+  `tasks_moved_unqualified` to `metrics`, and opens `notes` with `PARTIAL DELIVERY
+  (profile budget salvage)`. It is `ok` only when at least `max(1,
+  minimum_qualified_tasks)` tasks are fully qualified, **every** directory under `tasks/`
+  is fully qualified (a red or incomplete one left there blocks it), and every selected
+  identity is owned by a task or carries a stated blocker. All other checks are the same
+  as for a full delivery. Without the marker nothing changes.
+- Downstream needs no special case: optimize schedules the directories under `tasks/`,
+  and applyback's `points: "covered"` measures the configs named by those tasks' UT cases,
+  so uncaptured configs and moved tasks are not in either. The run report shows the stage
+  as `ok (partial delivery)`.
+
 ## What the delivery must contain
 
 None of this is checked by code; all of it decides whether the evidence means anything.
