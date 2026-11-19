@@ -32,7 +32,7 @@ micro-kernels). See [mfma_intrinsics.md](mfma_intrinsics.md), [raw_asm.md](raw_a
 | **CU** | 304 | 4 SIMDs each |
 | **SIMD** | 4/CU | 64-lane; one wavefront issues per SIMD |
 | **Wavefront** | 64 lanes | CDNA is **wave64 only** (RDNA can be wave32) |
-| **VGPR** | 512 × 32-bit/lane/SIMD | drives occupancy; 16-granule alloc |
+| **VGPR** | 512 × 32-bit/lane/SIMD | drives occupancy; 8-granule alloc over ArchVGPR + AGPR (gfx90a+) |
 | **AGPR** | 256 × 32-bit/lane | accumulation GPRs for MFMA (CDNA-specific) |
 | **LDS** | 64 KB/CU (gfx942); 160 KB (gfx950) | 32 banks × 4B |
 | **Matrix cores** | per-SIMD MFMA units | the XDL engines |

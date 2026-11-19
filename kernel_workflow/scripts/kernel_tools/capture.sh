@@ -1,0 +1,440 @@
+#!/usr/bin/env bash
+# capture.sh - source-scoped trace/ATT/IR task wrapper.
+#
+# Shared rocprofv3_safe.sh collects and validates trace/ATT evidence. A matching
+# dispatch trace does not establish PMC support. Missing profiler layers remain
+# unavailable; static IR capture is independent. Counter/roofline runs are separate.
+#
+# (GEAK shared kernel tool; the Gluon pack's scripts/capture.sh is a shim to this file.)
+#
+# Usage:
+#   bash capture.sh <name> <out_dir> --kernel <substr> --source <kernel.py> [--dev N] [--no-att] -- <app cmd...>
+#   bash capture.sh <name> <out_dir> --kernel <substr> --source <kernel.py> [...] --cmd "<shell string>"
+#
+# GEAK conventions: GPU collection runs under gpu_lock.sh -- invoke capture.sh inside the lock, or pass
+# --dev <id> and it re-execs itself under `gpu_lock.sh <id>` (refuses with neither; --isa-only needs no
+# lock). The device is the one the lock exported -- no inline HIP_VISIBLE_DEVICES. Stale att/ and kt/
+# dirs are moved aside, never rm'd. A `bash -c "<string>"` command is accepted (`bash -lc` is not: a
+# login shell re-sources profiles and can drop the profiler's injected environment).
+# ATT needs the rocprof-trace-decoder library, which GEAK does not vendor: point
+# ROCPROF_ATT_LIBRARY_PATH at its directory. Without it the ATT layer is skipped and recorded as
+# DEGRADED (capture.json att_state=decoder_absent); every other layer still runs.
+#
+# Emits into <out_dir>/: preflight.txt, rc/ (rc_analyze.txt + rc_metrics.json), att/ (ui_output),
+# ir/ (.amdgcn), and capture.json (paths + which branch was taken). Feeds normalize.py.
+#
+# Exit: 0 captured (possibly on a degraded branch, recorded in capture.json) | 2 usage
+#       4 locus unusable -- a container is configured but the profiler cannot run in it. Fail-closed
+#         on purpose: the caller must NOT treat this as a degraded capture, because no artifact was
+#         written and anything collected host-side would not describe the kernel under test.
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Shared host<->container ownership: never write root-owned .pyc into the bind-mounted skill dir,
+# and make artifacts group-writable so the host uid can edit what the (root) container wrote. See
+# kernel_tools/profiling-dependencies.md.
+export PYTHONDONTWRITEBYTECODE=1
+umask 0002
+# Profiler runs WHERE the kernel runs: when TILE_KERNEL_CONTAINER is set, locus_run wraps the
+# profiler+app in `docker exec` (kernel is in the container) and locus_fetch copies artifacts out;
+# host-side passthrough (unchanged) when no container is configured. See the pack's scripts/locus.sh
+# (STANDALONE runs only; an EMBEDDED GEAK run is already inside its container and gets passthroughs).
+# --selftest: structural checks (no GPU/docker, runs BEFORE sourcing locus.sh so it works pre-compose
+# too). Asserts the static-ISA dump is routed through the locus (never a bare host-side
+# `bash dump_ir.sh`, which dies ModuleNotFoundError: triton in a container locus) and that env
+# forwarding is wired. Keeps the 1a+1b fix from silently regressing.
+if [ "${1:-}" = "--help" ]; then
+  cat <<'USAGE'
+Usage:
+  capture.sh --payload profile_payload.json
+  capture.sh <name> <out_dir> --kernel <device-kernel-substring> --source <kernel.py>
+             [--dev <gpu-id>] [--source-sha256 <expected-hash>]
+             [--no-att|--lite|--isa-only] -- <application command...>
+  capture.sh ... --cmd "<shell string>"        (run as bash -c "<string>")
+
+Run it under GEAK's gpu_lock.sh, or pass --dev <id> and it locks itself (it refuses with neither).
+
+The source file is verified and hashed in the execution locus. Its identity and the requested
+device-kernel substring are recorded in capture.json; callers must recapture after changing source.
+`TILE_KERNEL_FILE` supplies the same source identity for pack-managed round runners.
+Fleet runs use the JSON payload form; the legacy command form cannot carry a shell-wrapped profiler
+payload and will be removed after downstream callers migrate.
+USAGE
+  exit 0
+fi
+
+if [ "${1:-}" = "--selftest" ]; then
+  fail=0
+  self="$HERE/$(basename "${BASH_SOURCE[0]}")"
+  grep -qE '_run_dump_ir|locus_run bash "\$script"' "$self" || { echo "FAIL: dump_ir not routed through locus"; fail=1; }
+  if grep -nE '^\s*\(?\s*(TRITON_ALWAYS_COMPILE=1 )?bash "\$HERE/dump_ir.sh"' "$self" >/dev/null; then
+    echo "FAIL: a bare host-side 'bash \$HERE/dump_ir.sh' remains"; fail=1
+  fi
+  grep -q 'export LOCUS_ENV=' "$self" || { echo "FAIL: LOCUS_ENV not exported for env forwarding"; fail=1; }
+  # GEAK conventions: the device comes from gpu_lock.sh (no inline pin), collection is routed through
+  # the lock, and nothing is rm'd (stale dirs are moved aside).
+  grep -qE 'export HIP_VISIBLE_DEVICE[S]=' "$self" && { echo "FAIL: an inline HIP_VISIBLE_DEVICES pin remains"; fail=1; }
+  grep -q 'kt_ensure_lock' "$self" || { echo "FAIL: collection not routed through gpu_lock (kt_ensure_lock)"; fail=1; }
+  grep -nE '^[^#]*[^a-z_]rm -(r|f|rf) ' "$self" | grep -v 'grep -nE' >/dev/null \
+    && { echo "FAIL: an rm remains (move aside instead)"; fail=1; }
+  # profiler availability must be asked of the LOCUS, not the host: a host-side `command -v` says
+  # PMC-blind while a working rocprofv3 sits in the container, and the round degrades for nothing.
+  grep -q 'locus_have rocprofv3' "$self" || { echo "FAIL: rocprofv3 probe not routed through the locus"; fail=1; }
+  # the [v] class stops this guard from matching its own pattern line
+  if grep -nE 'command -[v] rocprofv3' "$self" >/dev/null; then
+    echo "FAIL: a host-side rocprofv3 probe remains (must go through locus_have)"; fail=1
+  fi
+  # a configured-but-broken locus must ABORT, never fall through and file host data as container data
+  grep -qE '^\s*exit 4$' "$self" || { echo "FAIL: locus preflight failure is not fail-closed (no exit)"; fail=1; }
+
+  # capture.json's SOL verdict, run for real against artifacts on disk. `rc_metrics: null` used to
+  # carry three different facts at once -- never attempted, crashed, collected-but-unparsed -- and
+  # they call for opposite responses, so each is asserted separately rather than grepped for.
+  # The emitter is extracted from its own heredoc so the test runs the shipped code, not a copy.
+  t="$(mktemp -d)"; mkdir -p "$t/rc"
+  sed -n '/^python3 - "\$OUT" "\$NAME" "\$KERNEL" "\$BRANCH" "\$SOURCE" "\$SOURCE_SHA" "\$DEV" "\$COMMAND_SHA" <<.PY.$/,/^PY$/p' "$self" \
+    | sed '1d;$d' > "$t/emit.py"
+  _sol(){ ( cd "$t" && python3 emit.py "$t" n k b s sh d ch >/dev/null 2>&1 ) \
+            && python3 -c "import json,sys; print(json.load(open('$t/capture.json'))['sol_state'])"; }
+  [ "$(_sol)" = "not_attempted" ] || { echo "FAIL: no probe at all should read not_attempted, got $(_sol)"; fail=1; }
+  printf 'Traceback (most recent call last):\nPermissionError: [Errno 13]\n' > "$t/rc/rc_analyze.txt"
+  [ "$(_sol)" = "crashed" ] || { echo "FAIL: a traceback should read crashed, got $(_sol)"; fail=1; }
+  printf 'System Speed-of-Light\nDependency-Wait 47\n' > "$t/rc/rc_analyze_fixed.txt"
+  [ "$(_sol)" = "collected_unparsed" ] \
+    || { echo "FAIL: SOL text beside a crash should read collected_unparsed, got $(_sol)"; fail=1; }
+  echo '{}' > "$t/rc/rc_metrics.json"
+  [ "$(_sol)" = "parsed" ] || { echo "FAIL: parsed metrics should read parsed, got $(_sol)"; fail=1; }
+  # ATT decoder detection degrades rather than fails: an empty search path reports absent.
+  ( source "$HERE/_kt_common.sh"; ROCPROF_ATT_LIBRARY_PATH="$t/none" KT_ATT_SYSTEM_DIRS="$t/none" kt_att_decoder_dir ) >/dev/null 2>&1 \
+    && { echo "FAIL: ATT decoder reported present in an empty search path"; fail=1; }
+  mkdir -p "$t/dec"; : > "$t/dec/librocprof-trace-decoder.so"
+  [ "$( source "$HERE/_kt_common.sh"; ROCPROF_ATT_LIBRARY_PATH="$t/dec" kt_att_decoder_dir )" = "$t/dec" ] \
+    || { echo "FAIL: ATT decoder in ROCPROF_ATT_LIBRARY_PATH not found"; fail=1; }
+
+  [ "$fail" = 0 ] && echo "CAPTURE SELFTEST PASS" || echo "CAPTURE SELFTEST FAIL"
+  exit "$fail"
+fi
+
+# shellcheck source=_kt_common.sh
+source "$HERE/_kt_common.sh"   # gpu_lock routing, move-aside, ATT decoder probe, shared locus.sh
+
+if [ "${1:-}" = "--payload" ]; then
+  PAYLOAD="${2:-}"
+  [ -n "$PAYLOAD" ] || { echo "capture: --payload needs a path" >&2; exit 2; }
+  shift 2
+  [ "$#" = 0 ] || { echo "capture: --payload cannot be combined with legacy arguments" >&2; exit 2; }
+  export LOCUS_ENV
+  exec python3 "$HERE/profile_payload.py" capture --payload "$PAYLOAD" \
+    --capture-script "$HERE/capture.sh"
+
+fi
+
+ORIG_ARGS=("$@")
+NAME="${1:?usage: capture.sh <name> <out_dir> --kernel <substr> --source <kernel.py> -- <cmd>}"; shift
+OUT="${1:?usage: capture.sh <name> <out_dir> --kernel <substr> --source <kernel.py> -- <cmd>}"; shift
+KERNEL=""; SOURCE=""; EXPECTED_SOURCE_SHA=""; DEV_ARG=""; WANT_ATT="yes"; LITE="no"; ISA_ONLY="no"; CMD=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --kernel) KERNEL="$2"; shift 2;;
+    --source) SOURCE="$2"; shift 2;;
+    --source-sha256) EXPECTED_SOURCE_SHA="$2"; shift 2;;
+    --dev) DEV_ARG="$2"; shift 2;;
+    --cmd) CMD=(bash -c "$2"); shift 2;;
+    --no-att) WANT_ATT="no"; shift;;
+    --lite) LITE="yes"; WANT_ATT="no"; shift;;   # fast: kernel-trace timing + static ISA only
+    # --isa-only is the MANDATORY per-round tier: dump the IR and audit the ISA, nothing else. No
+    # profiler runs at all, so it costs seconds and cannot hang. A tiered read is only honest if
+    # its bottom tier is genuinely cheap enough to run consistently; a mandatory layer that is
+    # routinely skipped is not a usable evidence floor.
+    --isa-only) ISA_ONLY="yes"; LITE="yes"; WANT_ATT="no"; shift;;
+    --) shift; CMD=("$@"); break;;
+    *) echo "unknown arg: $1" >&2; exit 2;;
+  esac
+done
+[ ${#CMD[@]} -gt 0 ] || { echo "no app cmd after --" >&2; exit 2; }
+PREFLIGHT_MODE=profile
+[ "$ISA_ONLY" = yes ] && PREFLIGHT_MODE=compile-only
+if ! locus_preflight "$PREFLIGHT_MODE"; then
+  echo "[capture] LOCUS PREFLIGHT FAILED (${LOCUS_DEGRADE_CAUSE:-?}): the task specifies a container but the profiler cannot run in it -> FIX the locus or escalate (kernel_tools/profiling-dependencies.md)." >&2
+  # Fail CLOSED (exit 4). Continuing would run every layer below on the HOST and write the results
+  # into the same capture.json the container round reads -- host evidence filed under a container
+  # kernel, which is worse than no evidence because nothing downstream can tell the difference.
+  echo "[capture] REFUSING to continue: host-collected data would be filed as in-container evidence. Fix TILE_KERNEL_CONTAINER (live container + profiler inside it), or unset it to profile the host deliberately." >&2
+  exit 4
+fi
+
+# Profiled tiers need the GPU lock; --isa-only only compiles and audits (dump_ir takes its own lock
+# discipline from the caller), so it may run outside it.
+if [ "$ISA_ONLY" != "yes" ]; then
+  kt_ensure_lock "$DEV_ARG" "$HERE/capture.sh" "${ORIG_ARGS[@]}"
+fi
+DEV="${HIP_VISIBLE_DEVICES:-${DEV_ARG:-}}"   # the device gpu_lock.sh exported (recorded, not set)
+if [ "${CMD[0]}" = "bash" ] || [ "${CMD[0]}" = "sh" ]; then
+  [ "${CMD[1]:-}" != "-lc" ] || {
+    echo "[capture] REFUSING shell-wrapped payload: profiler replay cannot attach reliably through bash -lc; use --payload with argv + config-file." >&2
+    exit 5
+  }
+fi
+for token in "${CMD[@]}"; do
+  case "$token" in
+    '{'*'}') echo "[capture] REFUSING inline JSON argv; pass an immutable config file through --payload." >&2; exit 5 ;;
+  esac
+done
+[ -n "$SOURCE" ] || SOURCE="${TILE_KERNEL_FILE:-}"
+[ -n "$SOURCE" ] || { echo "--source is required" >&2; exit 2; }
+mkdir -p "$OUT"
+OUT="$(cd "$OUT" && pwd -P)"
+# A reused output directory must never attach evidence from an earlier source.
+for artifact in rc att ir kt kt_probe.log capture.json att_dependencies.json att_run.log trace_selection.json; do
+  kt_move_aside "$OUT/$artifact"
+done
+mkdir -p "$OUT/rc" "$OUT/att" "$OUT/ir"
+# Keep host/container path translation separate from the process CWD. Older
+# same-path mounts keep working; fleet runtime_env.sh supplies both roots for
+# differently-mounted workdirs.
+if locus_active; then
+  : "${TILE_KERNEL_HOST_WORKDIR:=$OUT}"
+  : "${TILE_KERNEL_CONTAINER_WORKDIR:=$OUT}"
+  if ! locus_workdir_shared "$OUT"; then
+    echo "[capture] profiler_locus_workdir_unshared: '$OUT' is not shared with the kernel container" >&2
+    exit 4
+  fi
+fi
+LOCUS_OUT="$(locus_path "$OUT")"
+export TILE_KERNEL_CONTAINER_CWD="${TILE_KERNEL_CONTAINER_CWD:-$LOCUS_OUT}"
+: "${KERNEL:=$NAME}"
+
+# Under a container locus, docker exec inherits none of the host env: locus_run forwards the device
+# gpu_lock.sh exported (HIP_VISIBLE_DEVICES) + the Triton cache/import env into the container (see the
+# pack's locus.sh LOCUS_ENV). Without this the profiler + dump_ir run on GPU 0 and against a
+# stale/absent cache. A caller that selects a source variant via its own env var appends it upstream.
+export LOCUS_ENV="${LOCUS_ENV:-} HIP_VISIBLE_DEVICES ROCR_VISIBLE_DEVICES TRITON_CACHE_DIR TRITON_ALWAYS_COMPILE PYTHONPATH"
+LOCUS_SOURCE="$(locus_path "$SOURCE")"
+if ! locus_run test -f "$LOCUS_SOURCE"; then
+  echo "[capture] source is not readable in the execution locus: $SOURCE" >&2
+  exit 2
+fi
+SOURCE_SHA="$(locus_run sha256sum "$LOCUS_SOURCE" | awk '{print $1}')"
+[ -n "$SOURCE_SHA" ] || { echo "[capture] could not hash --source in the execution locus" >&2; exit 2; }
+if [ -n "$EXPECTED_SOURCE_SHA" ] && [ "$SOURCE_SHA" != "$EXPECTED_SOURCE_SHA" ]; then
+  echo "[capture] source SHA-256 differs from the requested payload; recapture the source identity before profiling." >&2
+  exit 2
+fi
+COMMAND_SHA="$(printf '%s\0' "${CMD[@]}" | sha256sum | awk '{print $1}')"
+
+# Task identity/IR orchestration remains here. The shared collection primitive
+# owns all rocprofv3 execution, dependencies, timeouts, retry and artifact checks.
+echo "=== [capture] preflight: is kernel '$KERNEL' visible in a dispatch trace? ===" | tee "$OUT/preflight.txt"
+TRACE_STATE=not_attempted
+ATT_STATE=not_attempted
+TRACE_LIVE=no
+if [ "$ISA_ONLY" != yes ] && locus_have rocprofv3; then
+  trace_rc=0
+  bash "$HERE/rocprofv3_safe.sh" --kernel . --out "$OUT/kt" --kernel-trace \
+    --timeout "${PROFILE_PMC_TIMEOUT:-150}" -- "${CMD[@]}" > "$OUT/kt_probe.log" 2>&1 || trace_rc=$?
+  TRACE_STATE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["state"])' "$OUT/kt/rocprofv3_safe.json" 2>/dev/null || echo error)"
+  if [ "$trace_rc" = 0 ]; then
+    if python3 "$HERE/profiler_artifacts.py" --out "$OUT/kt" --mode trace --kernel "$KERNEL" \
+        > "$OUT/trace_selection.json"; then
+      TRACE_LIVE=yes
+    else
+      echo "[capture] requested kernel selector matched no dispatch; correct --kernel and recapture." | tee -a "$OUT/preflight.txt" >&2
+      python3 - "$HERE" "$OUT/kt" <<'PY_CANDIDATES' | tee -a "$OUT/preflight.txt"
+import sys
+sys.path.insert(0, sys.argv[1])
+import parse_pmc
+candidate = parse_pmc.top_kernel_from_trace(sys.argv[2])
+print("Candidate device kernel: " + (candidate[0] if candidate else "none"))
+PY_CANDIDATES
+      exit 2
+    fi
+  else
+    echo "[capture] trace $TRACE_STATE (rc=$trace_rc); see kt_probe.log. Counter availability remains unknown." | tee -a "$OUT/preflight.txt"
+  fi
+elif [ "$ISA_ONLY" != yes ]; then
+  TRACE_STATE=unavailable
+fi
+
+BRANCH=trace-unavailable
+if [ "$ISA_ONLY" = yes ]; then
+  BRANCH=isa-only
+elif [ "$LITE" = yes ]; then
+  BRANCH=lite
+elif [ "$TRACE_LIVE" = yes ]; then
+  BRANCH=trace-live
+  echo "[capture] dispatch trace matched; PMC support was not tested. Optional ATT/ISA diagnostics follow." | tee -a "$OUT/preflight.txt"
+  echo "[capture] use profile_kernel.sh for counter diagnostics; roofline.sh requires a separately installed native runner." | tee -a "$OUT/preflight.txt"
+  if [ "$WANT_ATT" = yes ]; then
+    att_rc=0
+    bash "$HERE/rocprofv3_safe.sh" --kernel "$KERNEL" --out "$OUT/att" --att \
+      --timeout "${PROFILE_ATT_TIMEOUT:-600}" -- "${CMD[@]}" > "$OUT/att_run.log" 2>&1 || att_rc=$?
+    ATT_STATE="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print("collected" if d["state"] == "ok" else d["state"])' "$OUT/att/rocprofv3_safe.json" 2>/dev/null || echo error)"
+    [ ! -f "$OUT/att/att_dependencies.json" ] || cp "$OUT/att/att_dependencies.json" "$OUT/att_dependencies.json"
+    echo "[capture] ATT $ATT_STATE (rc=$att_rc); see att/rocprofv3_safe.json and att_run.log." | tee -a "$OUT/preflight.txt"
+    if [ "$ATT_STATE" = collected ] || [ "$ATT_STATE" = partial ]; then
+      ATTDIR="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("att_dispatch", ""))' "$OUT/att/rocprofv3_safe.json")"
+      WV="$(find "$ATTDIR" -maxdepth 1 -name 'se*_wv*.json' 2>/dev/null | head -1)"
+      # Without an instruction/architecture-specific reference, report observed cadence only.
+      [ -z "$WV" ] || python3 "$HERE/mfma_efficiency.py" "$WV" "$ATTDIR/code.json" \
+        > "$OUT/att/mfma_eff.txt" 2> "$OUT/att/mfma_eff.err" || true
+    fi
+  fi
+fi
+export CAPTURE_TRACE_STATE="$TRACE_STATE"
+
+# ISA dump always (static audit works in both branches; best-effort for non-triton apps)
+echo "=== [capture] dump_ir.sh (.amdgcn for the static ISA audit) ===" | tee -a "$OUT/preflight.txt"
+# AUTO-RETRY ONCE (parity with the ATT code:null retry): a transient dump failure (a stale
+# TRITON_CACHE hit that emits no fresh .amdgcn, a JIT temp-file race) is the common case and is
+# self-healing -- retry with TRITON_ALWAYS_COMPILE=1 forcing a fresh compile before declaring the
+# static layer degraded. A PERSISTENT failure (kernel structurally undumpable) survives the retry
+# and still degrades -> caught by post_round's persistent-tool-failure signal. dump_ir.sh:71 already
+# names TRITON_ALWAYS_COMPILE=1 as the fix for an empty cache dump; this makes it automatic.
+_dump_isa_present() { find "$OUT/ir" -maxdepth 3 \( -name '*_final_isa.s' -o -name '*.amdgcn' -o -name '*.s' \) 2>/dev/null | grep -q .; }
+# The full shared tool directory must be mounted in the execution locus: dump_ir
+# imports collect_ir.py. Copying a standalone shell script loses that dependency.
+_run_dump_ir() {   # $1 = retry env assignment, $2 = log
+  local extra="$1" log="$2" script
+  script="$(locus_path "$HERE/dump_ir.sh")"
+  if ! locus_run test -r "$script" || ! locus_run test -r "$(dirname "$script")/collect_ir.py"; then
+    echo "[capture] shared IR tools are not mounted in the execution locus: $script; mount the GEAK checkout or configure the host/container root mapping." | tee -a "$OUT/preflight.txt" >"$log"
+    return 1
+  fi
+  (
+    if [ -n "$extra" ]; then
+      export LOCUS_ENV="$LOCUS_ENV ${extra%%=*}"
+      export "${extra?}"
+    fi
+    locus_run bash "$script" --variant "$NAME" --out "$LOCUS_OUT/ir" --kernel-name "$KERNEL" -- "${CMD[@]}"
+  ) >"$log" 2>&1 || return 1
+  _dump_isa_present || locus_fetch "$LOCUS_OUT/ir" "$OUT"
+}
+_run_dump_ir "" "$OUT/ir/dump.log" \
+  || echo "[capture] dump_ir best-effort (non-triton app, no cache, or see ir/dump.log)" | tee -a "$OUT/preflight.txt"
+if ! _dump_isa_present; then
+  echo "[capture] dump_ir yielded no ISA -> AUTO-RETRY once (TRITON_ALWAYS_COMPILE=1, fresh compile)" | tee -a "$OUT/preflight.txt"
+  _run_dump_ir "TRITON_ALWAYS_COMPILE=1" "$OUT/ir/dump.retry.log" \
+    || echo "[capture] dump_ir retry best-effort (see ir/dump.retry.log)" | tee -a "$OUT/preflight.txt"
+  _dump_isa_present && echo "[capture] dump_ir retry RECOVERED the ISA layer" | tee -a "$OUT/preflight.txt" \
+    || echo "[capture] dump_ir retry still empty -> static layer PERSISTENTLY degraded this round" | tee -a "$OUT/preflight.txt"
+fi
+
+# static ISA audit: fold the third evidence layer. Run whichever auditor this skill ships
+# (asm_loop_audit.py in gluon/tilelang, isa_loop_audit.py in flydsl) on any dumped .amdgcn/.s.
+# For a non-Triton app that yields no dump, static is DEGRADED -> record the concrete upgrade path.
+AUDIT="$HERE/asm_loop_audit.py"; [ -f "$AUDIT" ] || AUDIT="$HERE/isa_loop_audit.py"
+# PER-KERNEL audit (do NOT let one kernel's failure void the whole static layer). A dump may hold
+# several kernels; audit EACH, make the one matching --kernel the PRIMARY ir/asm_audit.txt that
+# normalize reads. A failure writes the real stderr into ir/asm_audit_<k>.err (NEVER a 0-byte
+# asm_audit.txt) so the exact error is recorded, not swallowed. Dumps may nest under ir/<variant>/
+# or ir/<func>/; prefer *_final_isa.s (numeric prefix drifts 21_/22_) over a raw .amdgcn/.s.
+mapfile -t ASM_FILES < <(find "$OUT/ir" -maxdepth 3 -name '*_final_isa.s' 2>/dev/null)
+[ "${#ASM_FILES[@]}" -gt 0 ] || mapfile -t ASM_FILES < <(find "$OUT/ir" -maxdepth 3 \( -name '*.amdgcn' -o -name '*.s' \) 2>/dev/null)
+if [ "${#ASM_FILES[@]}" -gt 0 ] && [ -f "$AUDIT" ]; then
+  PRIMARY_TXT=""; N_OK=0; N_FAIL=0
+  for asm in "${ASM_FILES[@]}"; do
+    tag="$(basename "$(dirname "$asm")")_$(basename "$asm" | sed 's/[^A-Za-z0-9._-]/_/g')"
+    txt="$OUT/ir/asm_audit_${tag}.txt"; err="$OUT/ir/asm_audit_${tag}.err"
+    # --meta points at the whole ir/ dir (dump_ir.sh drops meta_*.json there): the .s may be
+    # nested under ir/<variant>/, so the tool's sibling-dir default would miss it and report
+    # LDS UNAVAILABLE. isa_loop_audit.py (flydsl) has no --meta -> only pass it when supported.
+    META_ARG=(); grep -q -- "--meta" "$AUDIT" 2>/dev/null && META_ARG=(--meta "$OUT/ir")
+    # stdout goes to a .partial that is renamed only on success (never a 0-byte asm_audit.txt), and
+    # stderr is kept in memory and written to the .err file only on failure -- no rm needed.
+    if audit_err="$(python3 "$AUDIT" "$asm" "${META_ARG[@]}" 2>&1 >"$txt.partial")"; then
+      N_OK=$((N_OK+1)); mv -f "$txt.partial" "$txt"
+      echo "[capture] static audit OK: ${tag} -> $(basename "$txt")" | tee -a "$OUT/preflight.txt"
+      if [ -z "$PRIMARY_TXT" ] || echo "$asm" | grep -qi "$KERNEL"; then
+        case "$asm" in *"$KERNEL"*) PRIMARY_TXT="$txt";; *) [ -z "$PRIMARY_TXT" ] && PRIMARY_TXT="$txt";; esac
+      fi
+    else
+      N_FAIL=$((N_FAIL+1)); printf '%s\n' "$audit_err" > "$err"; kt_move_aside "$txt.partial"
+      echo "[capture] static audit FAILED: ${tag} -> reason in $(basename "$err"): $(tail -1 "$err" 2>/dev/null)" | tee -a "$OUT/preflight.txt"
+    fi
+  done
+  if [ -n "$PRIMARY_TXT" ]; then
+    cp "$PRIMARY_TXT" "$OUT/ir/asm_audit.txt"
+    echo "[capture] static primary ($N_OK ok / $N_FAIL failed) -> ir/asm_audit.txt ($(basename "$PRIMARY_TXT"))" | tee -a "$OUT/preflight.txt"
+  else
+    echo "[capture] static layer DEGRADED: all $N_FAIL kernel audit(s) failed -- see ir/asm_audit_*.err for the exact errors (NOT swallowed)." | tee -a "$OUT/preflight.txt"
+  fi
+else
+  echo "[capture] static layer DEGRADED (no .amdgcn/.s dumped). To fold it: dump_ir.sh on a Triton-compiled kernel, or 'llvm-objdump -d <.co/.hsaco>' the loaded code object, then: normalize.py static --asm-txt <disasm>." | tee -a "$OUT/preflight.txt"
+fi
+
+export CAPTURE_ATT_STATE="${ATT_STATE:-}"
+python3 - "$OUT" "$NAME" "$KERNEL" "$BRANCH" "$SOURCE" "$SOURCE_SHA" "$DEV" "$COMMAND_SHA" <<'PY'
+import json, os, re, sys, glob
+out, name, kernel, branch, source, source_sha, device, command_sha = sys.argv[1:9]
+attdir = (next(iter(glob.glob(os.path.join(out, "att", "ui_output_agent_*"))), None)
+          if os.environ.get("CAPTURE_ATT_STATE") in ("collected", "partial") else None)
+rc_analyze = os.path.join(out, "rc", "rc_analyze.txt")
+rc_metrics = os.path.join(out, "rc", "rc_metrics.json")
+
+def sol_state():
+    """Why the SOL slot holds what it holds.
+
+    A bare `rc_metrics: null` covered three different facts -- never attempted, attempted and
+    crashed, collected but never parsed -- and they call for opposite responses: one is a wiring
+    bug to fix on the spot, one is the floor this pack is designed to run on. Reading them back
+    off one null is how a whole campaign accepted a dark group C as a property of the box.
+    Same repair as arm_result.completion, one layer down.
+    """
+    if os.path.exists(rc_metrics):
+        return "parsed", None
+    seen = sorted(glob.glob(os.path.join(out, "rc", "rc_analyze*")))
+    # Every sibling is read before answering "crashed". A failed analyze leaves the canonical name
+    # occupied, so a recovery lands next to it -- and the crash sorts FIRST. Returning on the first
+    # traceback would report the layer dead while its numbers sit in the next file along.
+    crashed = None
+    for p in seen:
+        try:
+            txt = open(p, errors="replace").read()
+        except OSError:
+            continue
+        if re.search(r"Speed-of-Light|System Speed|Dependency-Wait|SPI Stats", txt, re.I):
+            return "collected_unparsed", (f"{os.path.basename(p)} holds the SOL report but no "
+                                          f"rc_metrics.json was produced from it -- re-run parse_rc.py")
+        if crashed is None and ("PermissionError" in txt
+                                or "Traceback (most recent call last)" in txt):
+            crashed = (f"{os.path.basename(p)} holds a failure, not a report. On a box that ships "
+                       f"rocprof-compute this is a wiring issue to investigate; see "
+                       f"kernel_tools/profiling-dependencies.md")
+    if crashed:
+        return "crashed", crashed
+    if seen:
+        return "crashed", "an rc_analyze artifact exists but holds no report"
+    return "not_attempted", "counter diagnostics are collected separately; native roofline is optional and requires an external runner"
+
+state, why = sol_state()
+cap = {
+    "name": name, "kernel": kernel, "branch": branch,
+    "source_identity": {
+        "path": source,
+        "sha256": source_sha,
+        "verified_in_locus": True,
+    },
+    "execution_identity": {
+        "logical_device": device,
+        "command_sha256": command_sha,
+        "container": os.environ.get("TILE_KERNEL_CONTAINER"),
+        "payload_sha256": os.environ.get("GEAK_PROFILE_PAYLOAD_SHA256"),
+    },
+    "rc_analyze": rc_analyze if os.path.exists(rc_analyze) else None,
+    "rc_metrics": rc_metrics if os.path.exists(rc_metrics) else None,
+    # parsed | collected_unparsed | crashed | not_attempted
+    "sol_state": state,
+    "sol_note": why,
+    "att_dir": attdir,
+    # collected | decoder_absent (ROCPROF_ATT_LIBRARY_PATH holds no rocprof-trace-decoder) | not_attempted
+    "att_state": os.environ.get("CAPTURE_ATT_STATE") or "not_attempted",
+    "trace_state": os.environ.get("CAPTURE_TRACE_STATE") or "not_attempted",
+    "pmc_state": "not_attempted",
+    "att_mfma_eff": os.path.join(out, "att", "mfma_eff.txt") if os.path.exists(os.path.join(out, "att", "mfma_eff.txt")) else None,
+    "asm_audit": os.path.join(out, "ir", "asm_audit.txt") if os.path.exists(os.path.join(out, "ir", "asm_audit.txt")) else None,
+}
+json.dump(cap, open(os.path.join(out, "capture.json"), "w"), indent=2)
+print(f"[capture] branch={branch}  sol={state}  att={bool(attdir)}  "
+      f"static={bool(cap['asm_audit'])}  -> {out}/capture.json")
+if why:
+    print(f"[capture]   SOL: {why}")
+PY

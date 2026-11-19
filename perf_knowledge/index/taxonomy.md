@@ -10,8 +10,8 @@ These ids are authoritative. Use them verbatim in frontmatter and in `sota_regis
 | `gfx90a` | CDNA2 | MI210, MI250, MI250X |
 | `gfx942` | CDNA3 | MI300A, MI300X, MI325X |
 | `gfx950` | CDNA4 | MI350X, MI355X |
-| `gfx1201` | RDNA4 | ISA shared by R9700, RX 9070 XT, and other products; GEAK product calibration is R9700-only |
-| `gfx1151` | RDNA3.5 | integrated GPU of the Strix Halo APU; one ISA covers the Radeon 8060S (40 CU), 8050S (32 CU) and 8040S (16 CU) behind one generic nameplate, so there is no product key — peaks are calibrated for the 40-CU SKU and CU count is the only on-box discriminator |
+| `gfx1201` | RDNA4 | ISA shared by R9700, RX 9070 XT, and other products; GEAK serving policy covers R9700 and R9600D; measurement coverage is separate |
+| `gfx1151` | RDNA3.5 | ISA shared by Radeon 8060S (40 CU), 8050S (32 CU), 8040S (16 CU), and other products; a generic runtime nameplate does not identify the catalog SKU, so verify the CU count; Strix Halo measurements cover only the 8060S |
 
 ## dtypes (`dtype`)
 `fp32` · `tf32`(N/A on CDNA4, removed) · `bf16` · `fp16` ·

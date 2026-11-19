@@ -19,7 +19,7 @@ sources:
 
 ## TL;DR
 > CDNA4 adds **FP6 (E2M3/E3M2)** and **FP4 (E2M1)**, and **MXFP** block scaling where a **32-element
-> block** shares one **E8M0** (8-bit, exponent-only) scale. FP6 and FP4 both run at **10 PF** (the FP4
+> block** shares one **E8M0** (8-bit, exponent-only) scale. FP6 and FP4 both run at **10.1 PF on MI355X** (9.2 PF on MI350X; the FP4
 > rate). MXFP recovers accuracy at low bit-width by giving each 32-element block its own dynamic range.
 
 ## Concepts
@@ -57,12 +57,12 @@ FP6/FP8 activations. Layout (32×32×64): A 32×64, **Ax 32×2**, B 64×32, **Bx
 32 A / 1 Ax / 32 B / 1 Bx / 16 C.
 
 ### Throughput
-| Precision | CDNA4 peak | vs FP32 |
+| Precision | MI355X peak | vs FP32 |
 |---|---|---|
 | FP16/BF16 | 2.5 PF | 16× |
 | FP8 (OCP) | 5 PF | 32× |
-| FP6 | **10 PF** | 64× |
-| FP4 | **10 PF** | 64× |
+| FP6 | **10.1 PF** | 64× |
+| FP4 | **10.1 PF** | 64× |
 | MXFP8/6/4 | matches the underlying element rate | — |
 
 FP6 runs at the FP4 rate (not between FP8 and FP4) — choosing FP6 over FP4 costs **accuracy headroom,
@@ -77,7 +77,7 @@ not throughput**, so prefer FP6 when FP4 is too lossy.
 ## Pitfalls
 - **Per-tensor FP4** — underflows; use MXFP block scaling.
 - **Wrong Ax/Bx scale layout** → silent corruption; verify with the calculator.
-- **Choosing FP4 over FP6 "for speed"** — same 10 PF rate; FP6 just gives more mantissa.
+- **Choosing FP4 over FP6 "for speed"** — same 10.1 PF rate; FP6 just gives more mantissa.
 - **Assuming MXFP on CDNA3** — CDNA4-only.
 
 ## Verify
@@ -86,11 +86,12 @@ not throughput**, so prefer FP6 when FP4 is too lossy.
   v_mfma_scale_f32_32x32x64_f8f6f4 --get-register --Ax`/`--Bx` for the exact scale placement.
 
 ## Sources
+- Current product peaks (MI355X FP6/FP4 10.1 PF; MI350X 9.2 PF): [peak_tables.md](peak_tables.md).
 - Matrix Core Programming on CDNA3/CDNA4 — ROCm Blogs (FP6/FP4, E8M0, 32-elem block, type codes,
   FP6=FP4 rate, fp4x2 helpers): https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
 - AMD CDNA4 ISA Reference Guide (block exponent scaling, E8M0):
   https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-cdna4-instruction-set-architecture.pdf
-- AMD CDNA4 Architecture White Paper (FP6/FP4 10 PF, MXFP support):
+- AMD CDNA4 Architecture White Paper (historical rounded FP6/FP4 10 PF, MXFP support):
   https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/white-papers/amd-cdna-4-architecture-whitepaper.pdf
 - OCP Microscaling (MX) Formats Specification (E8M0, 32-element block) — corroborating primary spec:
   https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf

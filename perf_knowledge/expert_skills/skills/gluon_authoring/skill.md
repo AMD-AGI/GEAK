@@ -181,7 +181,7 @@ conditions, the landing tells, the recover→apply→verify order. What is **not
 every row of it can change a verdict rather than a magnitude. Read it once, here, before trusting a figure
 or asserting a digest across generations — the rest of this file assumes you have.
 
-**Numbers live in [`references/hardware/hw_constants.json`](references/hardware/hw_constants.json), not
+**Numbers live in [`perf_knowledge/hardware/data/hw_constants.json`](../../../hardware/data/hw_constants.json), not
 in prose.** It is the per-arch SSOT the occupancy probe already reads, so take the value from the named key
 and pass `--arch` everywhere rather than carrying a figure across a generation. A divisor that is right for
 one gen is a *confidently wrong* verdict on the other, not a rounding error.
@@ -199,7 +199,7 @@ one gen is a *confidently wrong* verdict on the other, not a rounding error.
 | **The omitted post-pipeline tail** | — | the same defect announces itself as `OutOfResources` on CDNA3 and, because the larger ceiling absorbs it, becomes a **silent slowdown** on CDNA4. Check the pass list, not the exception (`## Procedure` step 2c) |
 
 **Three gfx950 keys are missing where gfx942 has them, and the first two are traps rather than gaps** —
-`references/hardware/hw_constants.json` is vendored, so these are to report upstream rather than
+`perf_knowledge/hardware/data/hw_constants.json` is shared by GEAK; correct its sourced entries rather than
 patch here.
 `fp8_dtype` is covered above. `lds_min_alloc_bytes` is what tells a reported `lds/WG` apart from an
 allocator round-up, and gfx950's `lds_align_bytes` is **not** that granularity despite looking like it — a
