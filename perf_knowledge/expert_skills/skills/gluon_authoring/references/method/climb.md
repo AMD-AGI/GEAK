@@ -38,6 +38,11 @@ coupled chain must be one paired direction instead of two, is [`orchestration.md
 ([`front-end.md`](front-end.md)). This deep role preserves the inherited configuration and structure
 while it climbs explicit layout, memory-path, pipeline, and register controls.
 
+*Under the gluon_authoring expert workflow with `method_strictness=advisory`, a small screened
+launch/tile change and a shape-regime code path (chosen by problem size) are ordinary directions,
+provided every case verifies and the boundary-shape check passes; the default (`strict`) keeps the
+rule above.*
+
 **WHICH layer, and in what order, is `## Layer Backbone` below** — what each layer decides, the reference
 page that owns its mechanisms, the gating order, and the three pieces of evidence a layer is landed on.
 It is read at the ANCHOR, not per round — layers 2–5 are visited twice in role, once to repay

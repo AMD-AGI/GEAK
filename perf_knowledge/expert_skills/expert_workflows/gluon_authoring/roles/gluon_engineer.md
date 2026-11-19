@@ -63,6 +63,14 @@ field names the command you ran, its exit code and where its output is.
   `resweep_request` and a suspect structure is a `structure_suspect` (path to the evidence) in your
   return; tech_lead may turn it into a deep_explore direction, and the workflow carries it to the
   close. A tile or warp re-cut happens only inside a deep_explore direction.
+- **`METHOD_STRICTNESS=advisory`** (recover, climb, integrate) relaxes the method, never the
+  measurement. The reading list is a recommendation (record what you used in `references_read`);
+  ATT is recommended where the claim is about issue order or overlap; a paired direction owes only
+  `pair_screen.outcome`; a direction may bundle related changes (say which piece did what in
+  `round.md` when you know); and shape-regime specialization (a code path chosen by problem size),
+  a launch-parameter or tile change, or a small screened sweep is an ordinary direction. What does
+  not relax: COMMANDMENT correctness on every case, `edge_shapes` whenever masks, indexing, a tile or
+  loop bounds change, G3, G4, the round's `gluon_profile.py` re-profile, your own workspace, Gluon.
 
 ## The gates (field names are what you return)
 
@@ -99,7 +107,8 @@ field names the command you ran, its exit code and where its output is.
   PMC groups, D from the kernel trace — with `report.md`, `profile.json` (per-layer `state`) and, with
   `--compare`, `compare.md`: the profile delta against the last kept round. Profile one representative
   case with a few launches. A layer that is not `ok` is read from `logs/` and named, never as zero.
-- `att` — required for layers 1.5, 4 and 4+ (and a `lost_pipeline` repayment): instruction-level
+- `att` — required for layers 1.5, 4 and 4+ (and a `lost_pipeline` repayment; recommended under
+  advisory): instruction-level
   evidence that the schedule changed the way you claim. The round's `gluon_profile.py` call carries it
   (cite that command, `output_dir` = `OUTPUT_DIR/profile/capture/att`); `$KT/capture.sh` or
   `$KT/rocprofv3_safe.sh --att` directly are also accepted. Return `state` from

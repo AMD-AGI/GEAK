@@ -211,6 +211,17 @@ function workloadDocs(name) {
 let WORKLOAD = { key: '', docs: [] };   // set after Budget
 // Guided feature runs: layers the planner should exercise whenever the profile gives them a target.
 const FOCUS_LAYERS = String(A.focus_layers || '').split(',').map(x => x.trim()).filter(Boolean);
+// How much of the METHOD the code enforces in recover/climb/integrate. strict (default): the reading list,
+// ATT for the pipeline layers and both pair screens are gates, and the role's one-change / no-branch
+// rules hold. advisory: those become recommendations the direction records, a direction may bundle
+// related changes, and shape-regime specialization or a launch/tile change is an ordinary direction.
+// Correctness and measurement never relax: verify, edge_shapes, G3, G4, the re-profile, isolation.
+const METHOD_STRICTNESS = String(A.method_strictness || 'strict').trim().toLowerCase();
+if (!['strict', 'advisory'].includes(METHOD_STRICTNESS)) {
+  throw new Error(`args.method_strictness must be strict or advisory, got '${A.method_strictness}'`);
+}
+const ADVISORY = METHOD_STRICTNESS === 'advisory';
+const METHOD_STAGES = new Set(['climb', 'recover', 'integrate']);
 if (FOCUS_LAYERS.some(l => !LAYERS.includes(l))) {
   throw new Error(`args.focus_layers must be a comma list of ${LAYERS.join(', ')}, got '${A.focus_layers}'`);
 }
@@ -248,7 +259,10 @@ function readingBlock(stage, layer) {
     ? `For the layer this round works on, also read (required for that layer):\n` +
       LAYERS.map(l => `- layer ${l}: ${LAYER_REFS[l].map(refPath).join(', ')}`).join('\n') + '\n'
     : '';
-  return `## Required reading — open these before running any command\n${rows.join('\n')}\n${perLayer}` +
+  const head = ADVISORY && METHOD_STAGES.has(stage)
+    ? '## Recommended reading — the method pages for this stage; open what bears on your direction'
+    : '## Required reading — open these before running any command';
+  return `${head}\n${rows.join('\n')}\n${perLayer}` +
     `Read the named sections (grep the heading, or \`python3 ${SKILL}/scripts/toolctl.py context query ` +
     `--markdown-heading "<heading>"\`), not whole trees. List every path you opened in \`references_read\`.\n`;
 }
@@ -467,6 +481,7 @@ const primary = (v) => (v && isNum(v.verified_weighted) && v.verified_weighted >
 // Evidence completeness, per stage. Returns the names of what is missing; empty means complete.
 // ---------------------------------------------------------------------------
 function readsCover(stage, layer, read) {
+  if (ADVISORY && METHOD_STAGES.has(stage)) return [];
   const got = (Array.isArray(read) ? read : []).map(String);
   return requiredRefs(stage, layer).filter(rel => !got.some(p => p.endsWith(rel)))
     .map(rel => `references_read: ${refPath(rel)}`);
@@ -548,7 +563,7 @@ function missingEvidence(stage, r, ctx) {
     if (!r.no_change) {
       if (!SUSPECT_LAYER[r.suspect]) out.push('suspect (lost_pipeline|lost_layout|lost_RA)');
       out.push(...g3Missing(r.g3_occupancy), ...g4Missing(r.g4_screen));
-      if (PIPELINE_LAYERS.has(layer)) out.push(...attMissing(r.att, r));
+      if (PIPELINE_LAYERS.has(layer) && !ADVISORY) out.push(...attMissing(r.att, r));
     }
   }
   if (stage === 'climb') {
@@ -556,7 +571,7 @@ function missingEvidence(stage, r, ctx) {
     if (!has(r.profile_dir)) out.push('profile_dir (this round\'s re-profile)');
     if (!/gluon_profile\.py/.test(r.profile_command || '')) out.push('profile_command (the gluon_profile.py call behind profile_dir, with --compare LAST_PROFILE)');
     out.push(...g3Missing(r.g3_occupancy), ...g4Missing(r.g4_screen));
-    if (PIPELINE_LAYERS.has(String(r.layer))) out.push(...attMissing(r.att, r));
+    if (PIPELINE_LAYERS.has(String(r.layer)) && !ADVISORY) out.push(...attMissing(r.att, r));
     if (r.inline_asm && !has(r.disassembly_ref)) out.push('disassembly_ref (inline asm is accepted on the disassembly)');
     if (ctx.entry === 'incumbent' && r.parity_gate && r.parity_gate.mode === 'gate') out.push('parity_gate.mode=diagnostic (an incumbent has no parity gate)');
   }
@@ -575,6 +590,10 @@ function edgeMissing(e, required) {
   return [];
 }
 function pairMissing(s) {
+  if (ADVISORY) {
+    return s && ['pair', 'prerequisite', 'neither'].includes(s.outcome) ? []
+      : ['pair_screen.outcome (pair | prerequisite | neither: which half the returned candidate is)'];
+  }
   if (!s || typeof s !== 'object') return ['pair_screen (ab_bench.py --permute: the prerequisite alone and the pair, each vs TRACK_START)'];
   const out = [];
   for (const k of ['prerequisite_json', 'pair_json']) if (!has(s[k])) out.push(`pair_screen.${k}`);
@@ -836,8 +855,9 @@ function evidenceTail(stg, d) {
   if (stg === 'author') lines.push('- correctness of the first Gluon kernel; g3_occupancy: probe.py measure, BOTH limiters', '- edge_shapes: edge_shapes.py on the kernel (exit 3 = boundary shapes it does not handle; say which in shared_limitation)');
   if (stg === 'recover' || stg === 'climb') lines.push('- edge_shapes (when the change touches masks, index arithmetic, tile or loop bounds): edge_shapes.py with TRACK_START as --baseline; exit 1 rejects the candidate');
   if (stg === 'recover') lines.push('- parity_gate: parity_gate.py run as the gate (mode=gate), exit code, ratio, suspects', '- for a repayment: suspect, g3_occupancy, g4_screen (ab_bench.py --permute --json), and ATT when the suspect is lost_pipeline', '- a gate-only direction (nothing left to repay or nothing attributable) sets no_change=true');
-  if (stg === 'climb') lines.push(`- layer (one of ${LAYERS.join(', ')}), profile_dir + profile_command (gluon_profile.py ... --compare LAST_PROFILE)`, '- g3_occupancy: probe.py measure, BOTH limiters (a missing one as null + missing_reason)', '- g4_screen: ab_bench.py --module <adapter> --permute --json', `- att for layers ${[...PIPELINE_LAYERS].join('/')}: ${ATT_CMD} with state ok, or status=unavailable with the reason`, '- inline asm rounds: disassembly_ref');
-  if (d && d.paired) lines.push('- pair_screen: ab_bench.py --permute of the prerequisite alone and of the pair, each vs TRACK_START (prerequisite_json, prerequisite_delta_pct, pair_json, pair_delta_pct)');
+  if (stg === 'climb') lines.push(`- layer (one of ${LAYERS.join(', ')}), profile_dir + profile_command (gluon_profile.py ... --compare LAST_PROFILE)`, '- g3_occupancy: probe.py measure, BOTH limiters (a missing one as null + missing_reason)', '- g4_screen: ab_bench.py --module <adapter> --permute --json', ADVISORY ? `- att (recommended when the claim is about issue order or overlap): ${ATT_CMD}` : `- att for layers ${[...PIPELINE_LAYERS].join('/')}: ${ATT_CMD} with state ok, or status=unavailable with the reason`, '- inline asm rounds: disassembly_ref');
+  if (d && d.paired) lines.push(ADVISORY ? '- pair_screen.outcome: pair | prerequisite | neither (the half the candidate is; the two screens are recommended)'
+    : '- pair_screen: ab_bench.py --permute of the prerequisite alone and of the pair, each vs TRACK_START (prerequisite_json, prerequisite_delta_pct, pair_json, pair_delta_pct)');
   if (d && d.planned) lines.push('- lesson: one line on what this direction showed, for a null or negative result too (the next plan reads it)');
   return lines.join('\n');
 }
@@ -873,7 +893,7 @@ async function runDirection(d, stg, roundInputs, engTimeout) {
   let missing = missingEvidence(stg, r, ctx);
   let audit = null;
   for (let k = 0; ; k++) {
-    if (!missing.length && EVIDENCE_AUDIT && r) {
+    if (!missing.length && EVIDENCE_AUDIT && r && !(ADVISORY && stg === 'climb' && r.claim === 'negative')) {
       audit = await agentT(
         rolePrompt('evidence_auditor', pkgRole('evidence_auditor'), 'audit', 'Check that the cited evidence exists and says what the round claims.', {
           EVIDENCE: r, STAGE: stg, GFX, SKILL, KT, OUTPUT_DIR: d.out, TRACK, ROUND_TAG: d.id,
@@ -970,6 +990,10 @@ function planAddendum(stg) {
       'read its insights, ledger and every direction\'s verdict and lesson as part of HISTORY before planning.'] : []),
     ...(WORKLOAD.key ? [`- The ${WORKLOAD.key} archetype page(s) (${WORKLOAD.docs.map(refPath).join(', ')}) name this ` +
       'workload\'s regimes and levers and their gfx942 downgrades: read them before choosing.'] : []),
+    ...(ADVISORY ? ['- METHOD_STRICTNESS=advisory: a direction may bundle related changes (the integrate step and verify ' +
+      'judge the result); shape-regime specialization (a code path chosen by problem size), a launch or tile ' +
+      'change and a small screened sweep are ordinary directions, provided every case verifies and edge_shapes ' +
+      'passes; deep_explore stays for ground-up rewrites.'] : []),
     ...(FOCUS_LAYERS.length ? [`- GUIDED RUN: this run exercises layer(s) ${FOCUS_LAYERS.join(', ')}. Each round, plan at least ` +
       'one direction on one of them whenever the profile gives it a target, and say in `reasoning` why not when it ' +
       'does not. Their gates stay as they are (inline asm needs its disassembly; a scheduling-model or ' +
@@ -1270,7 +1294,7 @@ while (!stoppedBy) {
     TRACK_BEST_VS_BASELINE: trackBest, ACCEPTED_VS_BASELINE: accepted ? accepted.primary : 1,
     BUDGET_JSON: budgetRes ? budgetRes.budget_json : '', LAST_PROFILE: lastProfile,
     HISTORY: history.slice(-12), INSIGHTS: memory.insights, ...(PRIOR_LOG ? { PRIOR_RUN_LOG: PRIOR_LOG } : {}),
-    ...KK_INPUTS, CODEBASE_CONTEXT: `${EVAL_DIR}/codebase_context.md`,
+    ...KK_INPUTS, CODEBASE_CONTEXT: `${EVAL_DIR}/codebase_context.md`, METHOD_STRICTNESS,
     SELF_MONITORING: `${WORKFLOW_DIR}/knowledge/self_monitoring.md`, ...(KB_REFERENCES ? { KB_REFERENCES } : {}),
     ...(roundEnd ? { ROUND_DEADLINE_EPOCH: roundEnd } : {}),
   };
@@ -1563,6 +1587,6 @@ return {
   validation_status: validation ? validation.validation_status : (FINAL_SRC ? 'not_validated' : 'no_candidate'),
   director_verified_speedup_geomean: finalSpeedup,
   analysis: analysis ? { kernel_type: analysis.kernel_type, kk_operator: KK_OPERATOR, kk_refs: KK_REFS } : null,
-  workload: WORKLOAD.key, focus_layers: FOCUS_LAYERS,
+  workload: WORKLOAD.key, focus_layers: FOCUS_LAYERS, method_strictness: METHOD_STRICTNESS,
   warm_start, learned_card, kb_written, citations,
 };
