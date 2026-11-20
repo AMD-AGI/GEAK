@@ -1,12 +1,13 @@
-# Brain: from a profile to a UT request
+# Writing a UT request
 
-Between the profile and UT stages, the brain decides which kernels form one UT and writes
-the UT stage's only input, `ut_request.json`. Neither stage makes this decision. The profile
-measures and delivers `kernels.json`. The UT stage writes and qualifies what the request
-names. It reads no profile evidence and cannot tell how many configs a case's weight pools.
+This skill's only input is `ut_request.json`. Whoever calls UT writes it; in a campaign
+that is Brain. This file is the author's contract: which upstream evidence a request may be
+built from, the boundary decisions it must record, the request format and the checks to run
+before installing it. The UT stage itself reads no profile evidence and cannot tell how
+many configs a case's weight pools.
 
-No tool drafts or assembles the request. The brain reads the evidence and the installed
-source, and writes the request itself. Every decision in it needs its basis on record.
+No tool drafts or assembles the request. The author reads the evidence and the installed
+source and writes the request; every decision in it keeps its basis on record.
 
 ## Inputs
 
@@ -43,11 +44,11 @@ reason, or a companion of a task with its reason.
    thread launches, such as graph-capture all-reduce tiers and DBO-only hand-offs. Assign them
    from source to the entry that launches them, and say so. The UT seam trace must then
    confirm the binding. Do not guess from names alone.
-4. **Family.** Choose a family from `stages/ut/kernel-ut/ut_contracts/families/` only if it
+4. **Family.** Choose a family from `ut_contracts/families/` only if it
    describes the whole operation. Otherwise use `custom` with a reason; the lane then writes a
    contract.
 5. **GPUs.** A collective, or an entry built on a TP group, runs on the deployment's world
-   size (`required_gpu_count`); see `stages/ut/kernel-ut/references/collective-ut.md`.
+   size (`required_gpu_count`); see [multi-rank UT](collective-ut.md).
 6. **Cases and weights.**
    - Make one point case per measured point the task launched at.
    - For each band no point covers (`sampling_points_final.json`), add a bucket case at a
@@ -55,7 +56,7 @@ reason, or a companion of a task with its reason.
    - `effective_calls = instances represented × calls per instance`.
    - Count calls of the operation the UT times. If one call launches several kernels, name
      a leaf that launches once per call as its invocation anchor, or give the observed call
-     counts (`references/dynamic-workloads.md`, Call weights). Summing leaf launches
+     counts (`stages/profile/kernel-profile/references/dynamic-workloads.md`, Call weights). Summing leaf launches
      overstates calls by the kernels per call.
    - Check conservation: in every phase a task runs, its cases' instances add up to the
      phase's observed total.
@@ -72,14 +73,14 @@ reason, or a companion of a task with its reason.
 
 ## Output: `ut_request.json`
 
-`stages/ut/kernel-ut/scripts/scaffold_tasks.py --check` validates the request, and
-`stages/ut/tests/test_scaffold_tasks.py` holds a minimal one.
+`scripts/scaffold_tasks.py --check` validates the request, and
+`../../tests/test_scaffold_tasks.py` holds a minimal one.
 
 - `contract`: `"workload/ut_request/v1"`.
 - `tasks[]`, one per task:
   - `label`: a plain directory name, unique.
   - `requested_kernel`: the delivery gate's KERNEL object
-    (`stages/ut/kernel-ut/references/delivery-contract.md`). It contains:
+    ([delivery contract](delivery-contract.md)). It contains:
     - `entity_kind: "gpu_kernel"`;
     - `selected_identities`, `selected_device_kernels`, the anchor `device_kernel`, and
       `required_companions` with reasons;

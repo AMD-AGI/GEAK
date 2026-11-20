@@ -425,7 +425,7 @@ class RunPointsTest(unittest.TestCase):
         moe_op = next(o for o in sel["ops"] if "gemm_a4w4_moe" in o["members"])
         self.assertIn("moe_sort_kernel", moe_op["members"])
         self.assertTrue((ev / "attribution_candidates.json").exists())
-        # Task boundaries and the UT request are the brain's (brain/README.md): profile
+        # Task boundaries and the UT request are the request author's (UT request-authoring.md): profile
         # delivers evidence only and writes no task declaration.
         self.assertFalse((ev / "task_decls.json").exists())
         self.assertFalse((ev / "ut_request.json").exists())

@@ -5,8 +5,8 @@ description: Build and qualify standalone GPU kernel UTs from a ut_request.json 
 
 # Kernel UT generation
 
-The input is one `ut_request.json`, written by the brain (`brain/README.md`) or any
-author of the same contract. It names each task's kernels, entry callable, contract
+The input is one `ut_request.json`, written by its caller (in a campaign, Brain) under
+[request authoring](references/request-authoring.md). It names each task's kernels, entry callable, contract
 family, scaffold arguments and concrete cases with their weights. This skill writes and
 qualifies those UTs. It does not launch serving, profile, rediscover shapes, decide
 which kernels form a task, or know how many configs a case's weight pools: every
