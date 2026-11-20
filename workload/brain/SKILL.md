@@ -61,6 +61,11 @@ owner and hold only affected work. Changed test boundaries return to UT; healthy
 Wait only for needed inputs/qualification, shared resources or explicit user sequencing;
 do not invent success gates between otherwise independent candidates.
 
+After native materialization or resource isolation, resolve the call's actual output,
+workspace and dependency locations and inspect access from the context that will retain
+evidence or resume it. Record those locations with the continuation; configured paths
+alone do not establish recoverability.
+
 Before replacing a worker, stop new dispatch, let active measurements finish and retain
 the results. Record resource changes and active locations; changed qualification needs
 a separate work root. Scheduler deadlines do not themselves complete a checkpoint.
