@@ -65,6 +65,7 @@ After native materialization or resource isolation, resolve the call's actual ou
 workspace and dependency locations and inspect access from the context that will retain
 evidence or resume it. Record those locations with the continuation; configured paths
 alone do not establish recoverability.
+Keep writable native workspaces and output trees outside input trees that will be copied.
 
 Before replacing a worker, stop new dispatch, let active measurements finish and retain
 the results. Record resource changes and active locations; changed qualification needs
