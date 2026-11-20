@@ -1,7 +1,7 @@
 # v4: search as state + policy
 
-v4 keeps every v3 role and rule (`../v3/EVIDENCE.md`). Its only change is how a lead picks what to do
-next. Optimization is a search over an **archive** of measured nodes (`bin/archive.py`). Each round the lead
+v4 changes how the lead picks what to do next. Optimization is a search over an **archive**
+of measured nodes (`bin/archive.py`). Each round the lead
 reads a **strategy package** (`search/<name>/STRATEGY.md` + optional `policy.py`; examples `hillclimb`, `evo`, `avo`) and writes its **decision** as data
 (`decisions/round_<n>.json`, checked by `bin/check_decision.py`: mutate / fresh / combine / measure / investigate / ship / custom / stop, each with a reason and,
 later, its outcome).

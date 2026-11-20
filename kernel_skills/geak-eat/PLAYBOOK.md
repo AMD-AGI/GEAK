@@ -37,13 +37,12 @@ the optimizations is the team's job. Everything here is advice: the score and yo
   closed it. Useful once the team starts declaring ceilings.
 - **Knowledge synthesizer**: keeps `LEARNINGS.md` (facts with evidence) and `SYNTHESIS.md` (the current
   plan joining everyone's findings), and makes sure every next prompt points at them.
-Patterns proven in earlier runs (evidence in `@SK@/v2/EVIDENCE.md`): measure where the time goes before
+Earlier runs recorded in `@SK@/geak-eat/lessons.md` informed these practices. Measure where the time goes before
 optimizing; challenge every declared ceiling with an independent probe; one fresh-architecture role at a design
 bottleneck (plateau + one design family + headroom to the roof); cut work by regime / size band; validate the steering tool against an
 official; ship first, every iteration; adversarial audit every iteration; map the deployed path early.
-The v2 role skills under `@SK@/v2/` encode these and can be copied into role prompts.
-Starter role prompts from the earlier fixed design (`geak-engineer`, `geak-integrate-verify` under
-`@SK@`) may be copied into role prompts when they fit.
+For example, use `@SK@/v4/geak-engineer/SKILL.md` for an implementer's deliverables
+or the diff audit in `@SK@/v4/geak-ship/SKILL.md` for an independent reviewer.
 
 ## Memory every team must keep
 - `LEARNINGS.md`: what was measured, under which regime, with the eval line or log path.

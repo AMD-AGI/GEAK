@@ -24,14 +24,17 @@ bash $KW/scripts/materialize_workspace.sh --src $INPUT --dst $DEST/.work/orig  #
 printf '%s\n' .work/ 'eat/log/.supervisor_*' .torch_ext/ __pycache__/ build/ '*.so' > .gitignore
 mkdir -p eat solutions && git init -q
 ```
-Find the instrument the way `$SK/geak-benchmark/SKILL.md` setup steps 2–4 do: reuse the harness,
-detect GPUs per job, run the engagement probe. Write `eat/cmd.env`:
+Reuse the task's harness and confirm its required GPU count from the task and launcher.
+Follow the harness selection and engagement probe in the [v4 benchmark skill](../v4/geak-benchmark/SKILL.md#modesetup).
+Write the following settings to `eat/cmd.env`.
 - extracted task with `unittest.py` printing `GEAK_WEIGHTED_SPEEDUP`: `CORRECTNESS_CMD=""`,
   `BENCH_CMD='python3 unittest.py'`, `PAIRING=in_process`, `EDITABLE="kernel_src"`;
 - otherwise: the correctness and benchmark commands, `PAIRING=interleave`, `EDITABLE="<paths>"`, and
   `LAT_REGEX` if the output is not `GEAK_RESULT_LATENCY_MS=<ms> <case>`;
-- always `GPU="pool:<n>:$GPUS"`, `EVAL_TIMEOUT=<s>`, optional `HOLDOUT_CMD` (correctness on shapes
-  outside the scored set; use one if the oracle can build them).
+- for single-GPU evaluations, write the allocated comma-separated IDs as `GPU` in `cmd.env`.
+  This checkout's `gpu_lock.sh` leases one device from that set per invocation. A multi-rank
+  evaluation requires a launcher that leases the full required device group.
+  Set `EVAL_TIMEOUT` in seconds and supply `HOLDOUT_CMD` when the oracle supports held-out shapes.
 
 `eat/env.sh`: export `EAT_ROOT=$DEST`, `EAT_WORK=$DEST/.work`, `EAT_GPUS="${EAT_GPUS:-<GPUS as space
 list>}"`, `GEAK_SK=$SK`, `GEAK_KW=$KW`, plus whatever the harness needs (venv, `PYTHONPATH`, caches).
@@ -65,9 +68,9 @@ Follow EAT's `SKILL.md` §4: `tail .work/eat.log`, `eat/log/BUDGET.md`, `solutio
 ## 5. Verify the result
 1. `EVAL_REPS=7 bash eat/eval.sh` on the shipped state. For iteration commits use EAT's
    `ops/verify_iter.py`.
-2. Spawn one independent subagent with `$SK/geak-integrate-verify/SKILL.md`'s `MODE=final` audit
-   checklist (step 2) on `git diff` of the editable paths against `.work/orig`. It must not see the
-   team's notes before forming its own judgment.
+2. Give an independent reviewer the shipped diff against `.work/orig`, the frozen task and
+   the [v4 ship audit](../v4/geak-ship/SKILL.md#modefinal). Check edit scope, source binding,
+   correctness and deployment behavior. The reviewer records a verdict before reading the team's notes.
 3. Report: verified score ± noise, audit result, held-out result, cost, iterations, patch path.
 
 ## 6. Harvest (this is how the harness itself evolves)

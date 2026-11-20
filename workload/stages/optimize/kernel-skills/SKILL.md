@@ -16,8 +16,7 @@ from the [kernel skills package](../../../../kernel_skills/README.md) imported f
 candidates, records decisions and dispatches the benchmark, roofline, investigator,
 engineer and ship roles. It uses `evo` by default. A plan can name `hillclimb` or
 `avo` in the attempt guidance (`EXTRA_STEER`). Record the strategy in the decisions.
-The package also contains the earlier role sets and the standalone EAT instructions.
-This workload entry invokes v4 directly.
+For a standalone Evolving Agent Teams run, use the [EAT skill](../../../../kernel_skills/geak-eat/SKILL.md).
 
 ## Running one attempt
 

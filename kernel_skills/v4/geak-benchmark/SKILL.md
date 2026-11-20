@@ -26,7 +26,8 @@ plus `GPUS` (setup), `ID` (measure) or `IDS=<x>,<y>` (xover). `KW` = `$SK/../ker
    that fails only because of it): run them on the baseline now, list them in the COMMANDMENT with the
    reason, and tell geak-ship. Ship must re-establish their intent on every shipped candidate.
 6. `RUN/cmd.env`:
-   - `GPU` (`pool:1:<ids>`; group specs only for multi-GPU jobs);
+   - `GPU` (the allocated comma-separated IDs for a single-GPU eval with this checkout's lock script.
+     In workload runs, use the device set and measurement procedure supplied by the worker);
    - `CORRECTNESS_CMD`, `BENCH_CMD`, `FAST_CMD` (below);
    - `PAIRING=interleave|in_process`;
    - `GEAK_GPU_RUN_TIMEOUT`, `GEAK_GPU_POOL_WAIT`;
