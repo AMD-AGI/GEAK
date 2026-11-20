@@ -23,13 +23,26 @@ stage = load("stage")
 target = load("target")
 
 
-def cfg_with(selection, top_k=None, pct=None):
-    params = {"selection": selection}
-    if top_k is not None:
-        params["selection_top_k"] = top_k
-    if pct is not None:
-        params["selection_overall_pct_gt"] = pct
-    return {"stages": {"profile": {"params": params}}}
+class FinalReportTest(unittest.TestCase):
+    def test_cmd_all_renders_the_report_once_more_after_the_last_stage(self):
+        cfg = {"order": ["baseline"], "run_root": "/tmp/does-not-matter"}
+        calls = []
+        with patch.object(stage, "load_state", return_value={}), \
+             patch.object(stage, "start_reporter", return_value=None), \
+             patch.object(stage, "stop_reporter"), \
+             patch.object(stage, "run_order", return_value=7), \
+             patch.object(stage, "render_final_report", side_effect=calls.append):
+            rc = stage.cmd_all(cfg, SimpleNamespace(stages=[]))
+        self.assertEqual(rc, 7)
+        self.assertEqual(calls, [cfg])
+
+    def test_render_uses_the_run_root_and_never_changes_the_return_code(self):
+        with tempfile.TemporaryDirectory() as root:
+            stage.render_final_report({"run_root": root})
+            self.assertTrue(Path(root, "REPORT.md").exists())
+        with patch.dict(sys.modules, {"report": SimpleNamespace(
+                main=lambda argv: (_ for _ in ()).throw(RuntimeError("boom")))}):
+            stage.render_final_report({"run_root": "/nonexistent"})      # must not raise
 
 
 class NamingTest(unittest.TestCase):

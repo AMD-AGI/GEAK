@@ -622,6 +622,21 @@ def cmd_all(cfg, args):
         return run_order(cfg, args, order, state)
     finally:
         stop_reporter(reporter)
+        render_final_report(cfg)
+
+
+def render_final_report(cfg):
+    """Render REPORT.md once more after the last stage, whatever the outcome.
+
+    The periodic reporter renders every interval_sec; a run that finishes between two ticks
+    otherwise leaves a REPORT.md that predates its own last stage. One campaign's report
+    stopped sixteen minutes before applyback finished, so the stage that makes the only
+    end-to-end claim was missing from the run's report."""
+    try:
+        import report
+        report.main(["--run-root", resolve_path(cfg["run_root"])])
+    except Exception as exc:                 # reporting must never change the run's rc
+        print("final report render failed: %s" % exc, file=sys.stderr)
 
 
 def report_settings(cfg):
