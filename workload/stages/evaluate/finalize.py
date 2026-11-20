@@ -182,17 +182,19 @@ def main(integration=None):
         return fail("bench_summary.json has no admissible fresh stock_control; measure "
                     "the unchanged stack in this A/B before comparing the candidate",
                     status="blocked")
-    # The comparison must be complete: every arm ran the configured number of repeats. A
-    # finalize that fires while a later arm is still measuring would otherwise grade a partial
-    # A/B and report it as ok. Runs that configure no `repeats` are not judged here.
+    # The candidate must have run the configured number of repeats. A finalize that fires while
+    # a later candidate arm is still measuring would otherwise grade a partial A/B and report it
+    # as ok. The fresh stock control is not held to `repeats`: the overlay-ab method asks for one
+    # admissible unchanged arm, which may be a single run. Scenarios that configure no `repeats`
+    # are not judged here.
     want = params.get("repeats")
     if isinstance(want, int) and not isinstance(want, bool) and want > 0:
-        have_candidate, have_stock = arm_repeats(summary), arm_repeats(base)
-        if have_candidate < want or have_stock < want:
-            return fail("the A/B is incomplete: candidate has %d of %d configured repeats and "
-                        "the stock control %d of %d. Wait for the remaining arms and finalize "
-                        "again, or lower params.repeats if fewer repeats are intended."
-                        % (have_candidate, want, have_stock, want), status="blocked")
+        have_candidate = arm_repeats(summary)
+        if have_candidate < want:
+            return fail("the A/B is incomplete: the candidate has %d of %d configured repeats. "
+                        "Wait for the remaining candidate arms and finalize again, or lower "
+                        "params.repeats if fewer repeats are intended." % (have_candidate, want),
+                        status="blocked")
     base_tp, base_key = pick_throughput(base)
     if base_tp is None:
         return fail("stock_control contains no finite positive throughput (tried %s)"

@@ -1,4 +1,4 @@
-"""A comparison is graded only when every arm ran the configured number of repeats."""
+"""A comparison is graded only when the candidate ran the configured number of repeats."""
 import json
 import os
 import subprocess
@@ -51,10 +51,12 @@ class CompleteComparisonTest(unittest.TestCase):
         self.assertIn("candidate has 1 of 2", res["notes"])
         self.assertFalse((self.out / "ab.json").exists())
 
-    def test_incomplete_stock_control_blocks(self):
+    def test_a_single_stock_control_run_is_enough(self):
+        # overlay-ab asks for one admissible unchanged arm; it need not repeat `repeats` times
+        res = self.finalize(arm(99.0, repeats=3), arm(100.0), {"repeats": 3})
+        self.assertEqual(res["status"], "ok")
         res = self.finalize(arm(99.0, repeats=3), arm(100.0, repeats=1), {"repeats": 3})
-        self.assertEqual(res["status"], "blocked")
-        self.assertIn("stock control 1 of 3", res["notes"])
+        self.assertEqual(res["status"], "ok")
 
     def test_legs_count_stands_in_for_a_missing_repeats_field(self):
         done = self.finalize(arm(99.0, legs=2), arm(100.0, legs=2), {"repeats": 2})
