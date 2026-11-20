@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Read a weighted oracle's extraction timings before a correctness run overwrites them.
 
-Supports inline MOE/AR results and the WOA/HCB report/record sidecars. An unusable
+Supports inline MOE/AR results, the WOA/HCB report/record sidecars and the result of a
+generated unittest.py (ut_runner.py: string gates, rows under "timing"). An unusable
 result is a normal outcome: next_run=full tells setup to measure once instead.
 """
 
@@ -36,16 +37,23 @@ def read_baseline(workspace):
             raise ValueError("workload has duplicate case identifiers")
         result = _read(workspace / "run/ut_result.json")
         timing = result["gates"]["timing"]
+        inline = "run/ut_result.json:gates.timing.per_case"
+        # The generated unittest.py (ut_runner.py) writes every gate as a string and keeps the timed
+        # rows under the top-level "timing".
+        generated = timing == "pass" and isinstance(result.get("timing"), dict)
+        if generated:
+            timing = {"ok": True, "per_case": result["timing"].get("per_case")}
+            inline = "run/ut_result.json:timing.per_case"
         if result.get("exit_code") != 0 or timing.get("ok") is not True:
             raise ValueError("extraction run did not pass timing")
         if result.get("ok") is False or any(
             isinstance(g, dict) and g.get("ok") is False for g in result["gates"].values()
-        ):
+        ) or (generated and any(g != "pass" for g in result["gates"].values())):
             raise ValueError("extraction run has a failed gate")
 
         # Try every declared source: some oracles retain an empty inline list
         # alongside a complete sidecar. Do not guess an unreferenced old file.
-        sources = [("run/ut_result.json:gates.timing.per_case", timing.get("per_case"))]
+        sources = [(inline, timing.get("per_case"))]
         for key in ("report", "record"):
             ref = timing.get(key)
             if isinstance(ref, str) and ref:

@@ -115,5 +115,48 @@ class ExtractionBaselineTests(unittest.TestCase):
         self.assertEqual(reader.read_baseline(self.workspace)["next_run"], "full")
 
 
+    def generated(self, rows=None, **gates):
+        """run/ut_result.json as the generated unittest.py (ut_runner.py) writes it: every gate is a
+        string and the timed rows are under the top-level "timing"."""
+        self.write("run/ut_result.json", {
+            "exit_code": 0, "ok": True, "generated_by": "ut_runner.py v1",
+            "gates": {"contract": "pass", "correctness": "pass", "timing": "pass", "receipt": "pass", **gates},
+            "timing": {"per_case": self.rows if rows is None else rows, "weighted": 1.01},
+        })
+
+    def test_generated_ut_result_is_usable(self):
+        self.generated()
+        out = reader.read_baseline(self.workspace)
+        self.assertTrue(out["usable"], out)
+        self.assertEqual(out["next_run"], "correctness")
+        self.assertEqual(out["source"], "run/ut_result.json:timing.per_case")
+        self.assertEqual(out["per_case"], self.rows)
+
+    def test_generated_ut_result_with_a_failed_gate(self):
+        for gate in ("contract", "correctness", "receipt"):
+            for value in ("fail", "env", "incomplete"):
+                with self.subTest(gate=gate, value=value):
+                    self.generated(**{gate: value})
+                    out = reader.read_baseline(self.workspace)
+                    self.assertFalse(out["usable"])
+                    self.assertEqual(out["next_run"], "full")
+
+    def test_generated_ut_result_missing_a_workload_case(self):
+        self.generated(rows=self.rows[:1])
+        out = reader.read_baseline(self.workspace)
+        self.assertFalse(out["usable"])
+        self.assertEqual(out["next_run"], "full")
+
+    def test_hand_written_result_with_a_string_among_its_gates_is_read_as_before(self):
+        self.write("run/ut_result.json", {
+            "exit_code": 0, "ok": True,
+            "gates": {"correctness": {"ok": True}, "timing": {"ok": True, "per_case": self.rows},
+                      "profile": "skipped"},
+        })
+        out = reader.read_baseline(self.workspace)
+        self.assertTrue(out["usable"], out)
+        self.assertEqual(out["source"], "run/ut_result.json:gates.timing.per_case")
+
+
 if __name__ == "__main__":
     unittest.main()
