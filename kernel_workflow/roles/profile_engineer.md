@@ -11,7 +11,7 @@ policy inputs: use a product's table peaks only for `calibrated-<product>`, and 
 `peaks.md` row for `tabulated-<gfx>`; for any `unknown-*` status, report measured
 durations/counters without assigning numeric peaks. `calibrated-w7900` (Radeon Pro W7900)
 permits the W7900 table peaks in `amd_rdna3.md` §1 (memory, FP16 and INT8 matrix, FP32 vector);
-report BF16 and FP8 kernels on the memory axis.
+report BF16, FP8 and INT4 kernels on the memory axis.
 Use the physical CU count for grid/occupancy context.
 `COUNTER_GUIDANCE` is sent on the W7900 only (`amd_rdna3.md` §4). When it is
 `unavailable`, classify from kernel-trace durations, per-case latency and dispatch

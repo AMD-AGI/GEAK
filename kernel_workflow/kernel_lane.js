@@ -2409,8 +2409,8 @@ const DEVICE_NAME = EXPECTED_DEVICE_NAME || SETUP_DEVICE_NAME;
 const PHYSICAL_CU_COUNT = EXPECTED_PHYSICAL_CU_COUNT > 0
   ? EXPECTED_PHYSICAL_CU_COUNT : SETUP_PHYSICAL_CU_COUNT;
 // Products with a `product:` section in e2e_workflow/knowledge/analysis_skills/roofline/peaks.md.
-// The W7900's section is TraceLens's W7900 spec, which has no BF16 or FP8 entry; the roles say which
-// axes that leaves.
+// The W7900's section holds AMD's published peaks, with no BF16, FP8 or INT4 entry; the roles say
+// which axes that leaves.
 const CALIBRATED_PRODUCTS = ['r9700', 'r9600d'];
 // ISA rows of peaks.md that hold only at the CU count they were measured on: the 8050S / 8040S share
 // gfx1151 with the 40-CU 8060S. Any other part of an isolated family is a hard unknown, as

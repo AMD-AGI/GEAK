@@ -4,7 +4,7 @@ A deterministic **Workflow** (JS-orchestrated multi-agent pipeline) that raises 
 serving throughput** of an LLM on AMD Instinct MI GPUs and the validated Radeon AI PRO R9700
 (gfx1201, vLLM or SGLang only). Generic gfx1201 is an ISA identity, not a supported serving product.
 The Radeon Pro W7900 (gfx1100, target `w7900`) is vLLM-only, with product-scoped roofline peaks
-that have no BF16 or FP8 entry; any other gfx1100 board is refused.
+that have no BF16, FP8 or INT4 entry; any other gfx1100 board is refused.
 It is a *system layer* built on top of — and recursively
 calling — the UNCHANGED single-kernel `kernel_workflow` (`../kernel_workflow/`). The single-kernel workflow's
 quality is preserved verbatim; this layer adds everything above the kernel: profiling a running

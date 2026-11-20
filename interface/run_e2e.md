@@ -210,14 +210,15 @@ behavior.
 requires `expected_gfx=gfx1100`. `gfx1100` with any other target is refused, whether
 it comes from the explicit pair, `GEAK_GPU_IDENTITY_JSON` or the probe. An explicit
 `w7900` pin must also agree with the probe whenever `rocminfo` is available. The
-W7900 defaults to vLLM, uses its own product-scoped roofline peaks (no BF16 or
-FP8 entry), and does not inherit any R9700 calibration.
+W7900 defaults to vLLM, uses its own product-scoped roofline peaks (no BF16, FP8
+or INT4 entry), and does not inherit any R9700 calibration.
 
 `gpu_perf_level` declares the amdgpu performance level the operator set on the
-serving cards. GEAK does not read it itself: the sysfs getter returns `EPERM`
-while a card is runtime-suspended. The value is lower-cased and forwarded as the
-workflow arg of the same name to every kernel lane; when it is absent, nothing is
-forwarded. Only the W7900 acts on it: gfx1100 counters read correctly only at
+serving cards. GEAK does not read it itself: the sysfs getter fails (`EBUSY` or
+`EPERM`, depending on the driver) while a card is runtime-suspended. The value is
+lower-cased and forwarded as the workflow arg of the same name to every kernel
+lane; when it is absent, nothing is forwarded. Only the W7900 acts on it: gfx1100
+counters read correctly only at
 `profile_standard` (amd-smi `STABLE_STD`), so `profile_standard`, `stable_std` or
 `AMDSMI_DEV_PERF_LEVEL_STABLE_STD` gives a lane with profiling on
 `COUNTER_GUIDANCE=gfx1100-safe-set` and any other value, or none, gives

@@ -65,13 +65,14 @@ on-box benchmark and the TechLead's judgment are the only deciders.
 
 Sources, in order of preference: hardware whitepapers & arch docs (CDNA3 gfx942 / CDNA4 gfx950 ISA,
 **RDNA4 gfx1201 WMMA** when `rocminfo` says gfx1201, RDNA 3.5 WMMA when it says gfx115x,
-**RDNA3 gfx1100 WMMA** (FP16/BF16/INT8/INT4) when it says gfx1100, ROCm arch reference,
+**RDNA3 gfx1100 WMMA** (FP16/BF16/INT8; INT4 not validated) when it says gfx1100, ROCm arch reference,
 NVIDIA Hopper/Blackwell) → peer-reviewed papers (arXiv, MLSys, PPoPP, OSDI,
 ASPLOS, SC) → vendor engineering blogs (ROCm Blog, NVIDIA Dev Blog, Triton/PyTorch dev notes) →
 GitHub source ONLY when the question is "show me a known-fast implementation". Reading random repos
 is a substitute for thinking; prefer mechanism over "best practices". On gfx1201 and gfx115x
 (WMMA, wave32), reject directions that require MFMA, MX block-scale, or wave64 occupancy tables.
-On gfx1100, propose directions built on wave32, gfx11 WMMA with FP16/BF16/INT8/INT4, 64 KiB LDS
+On gfx1100, propose directions built on wave32, gfx11 WMMA with FP16/BF16/INT8 (INT4 is not
+validated), 64 KiB LDS
 per workgroup and the rocprofv3 kernel trace.
 
 ## Tools you use

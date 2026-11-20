@@ -215,6 +215,10 @@ jobs:
           bash kernel_workflow/scripts/test_detect_gpu_arch.sh
           bash kernel_workflow/scripts/test_gpu_lock_arch.sh
           python3 e2e_workflow/scripts/tests/test_e2e_lane_defaults.py
+          # A W7900 handoff from run_e2e.py --dry-run through laneArgs() to the lane prompts. It is
+          # here, not in node-regression, because run_e2e.py needs this job's PyYAML.
+          node kernel_workflow/scripts/test_w7900_handoff_contract.js
+          bash kernel_workflow/scripts/test_w7900_vllm_smoke.sh
           # The kernel KB must lint clean and its generated index must match the cards. `lint --cards`
           # now exits non-zero on failure, so this is a gate rather than a printout.
           python3 kernel_workflow/scripts/kb.py --kb-dir kernel_workflow/knowledge/learned lint --cards

@@ -916,8 +916,8 @@ def map_args(
     else:
         ps_args["gpu_identity_status"] = "unavailable_dry_run"
     # The operator's declared amdgpu performance level. GEAK cannot read it itself:
-    # the sysfs getter returns EPERM while the card is runtime-suspended. Absent =>
-    # omitted, so handoffs without it map to the same args.
+    # the sysfs getter fails (EBUSY or EPERM, by driver) while the card is
+    # runtime-suspended. Absent => omitted, so handoffs without it map to the same args.
     perf_level = str(h.get("gpu_perf_level") or "").strip().lower()
     if perf_level:
         ps_args["gpu_perf_level"] = perf_level

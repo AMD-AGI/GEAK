@@ -81,7 +81,7 @@ Your target may be expressed as "% of roofline". Estimate the ceiling, then driv
    when `ROOFLINE_STATUS` is `calibrated-<product>` or `tabulated-<gfx>`;
    pair them with measured on-box rates when available. On the W7900
    (`calibrated-w7900`) use the published W7900 peaks in `amd_rdna3.md` §1: memory, FP16 and
-   INT8 WMMA, FP32 vector. A BF16 or FP8 kernel uses the memory axis.
+   INT8 WMMA, FP32 vector. A BF16, FP8 or INT4 kernel uses the memory axis.
 1. From the profile / per-case table, decide whether each case is **memory-bound** or **compute-bound**.
 2. **Memory-bound ceiling**: `min_time ≈ bytes_moved / mem_BW` — use this card's achievable memory
    bandwidth (~0.7–0.85× nameplate; e.g. ≈5.3 TB/s on MI300X, ~6 on MI325X, ~8 on MI350/355; see the

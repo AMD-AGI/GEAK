@@ -505,7 +505,7 @@ const DISCOVER_INTRO = GPU_FAMILY.isolate
   'STANDALONE kernel bake-off — there is NO live server (do not try to launch or capture from one).\n' +
   `${GPU_FAMILY.name} / ${LANE_GFX} ISOLATION: do NOT consult learned KB, expert skills, AITER CDNA win cards, or CK/AITER offline tune.\n` +
   'Do NOT inject MFMA / FNUZ / Instinct guidance.' +
-  (LANE_GFX === 'gfx1100' ? ' On gfx1100, plan lanes on wave32 WMMA with FP16, BF16, INT8 or INT4 inputs.' : '') +
+  (LANE_GFX === 'gfx1100' ? ' On gfx1100, plan lanes on wave32 WMMA with FP16, BF16 or INT8 inputs (INT4 is not validated).' : '') +
   ' Discover existing impls by measuring the frozen oracle only.\n' +
   '(1) Tier-A DISCOVER: bench candidate backends on the immutable oracle in OP_TASK_DIR (HIP/Triton/hipBLASLt).\n' +
   '(2) SKIP Tier-B AITER/CK env tune — those inputs are CDNA-calibrated.\n' +

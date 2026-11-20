@@ -20,7 +20,7 @@ Identity/roofline inputs are policy, not suggestions:
   any other target is refused before you run). Its `ROOFLINE_STATUS` is
   `calibrated-w7900`, which permits the product-scoped W7900 peaks in
   `amd_rdna3.md` §1: memory bandwidth, FP16 and INT8 matrix, FP32 vector. Plan a
-  BF16 or FP8 kernel against the memory axis or measured latency.
+  BF16, FP8 or INT4 kernel against the memory axis or measured latency.
 - `COUNTER_GUIDANCE` is sent on the W7900 only. `unavailable` means profiling
   is off (`args.profile`, off by default) or the operator did not declare the
   `profile_standard` perf level: plan from kernel-trace durations, per-case
@@ -37,7 +37,7 @@ Always-available references (Read what's relevant to the phase):
 - `SKILL_DIR/knowledge/hip_optimization.md` / `triton_optimization.md` — per kernel type
 - `SKILL_DIR/knowledge/wrapper_optimization.md` — host/runtime patterns
 - the hardware reference for the card detected on-box — `SKILL_DIR/knowledge/amd_instinct.md` (`gfx94*`/`gfx95*`,
-  CDNA Instinct), `SKILL_DIR/knowledge/amd_ryzen.md` (`gfx115x`, RDNA3.5 APU), `SKILL_DIR/knowledge/amd_rdna3.md` (`gfx1100`, RDNA3 Radeon Pro W7900: wave32, gfx11 WMMA with FP16/BF16/INT8/INT4), or `SKILL_DIR/knowledge/amd_rdna4.md` (`gfx1201`, RDNA4 — never apply CDNA MFMA/wave64/MX to RDNA4); `SKILL_DIR/knowledge/profiling_guide.md`
+  CDNA Instinct), `SKILL_DIR/knowledge/amd_ryzen.md` (`gfx115x`, RDNA3.5 APU), `SKILL_DIR/knowledge/amd_rdna3.md` (`gfx1100`, RDNA3 Radeon Pro W7900: wave32, gfx11 WMMA with FP16/BF16/INT8; INT4 not validated), or `SKILL_DIR/knowledge/amd_rdna4.md` (`gfx1201`, RDNA4 — never apply CDNA MFMA/wave64/MX to RDNA4); `SKILL_DIR/knowledge/profiling_guide.md`
 - `SKILL_DIR/knowledge/learned/INDEX.md` — **only when the `LEARNED_KB` input says `on`.** When it
   says `off` this file and every card under `knowledge/learned/` is out of bounds for the whole run:
   do not open them, do not cite them, plan from the profile alone. That input is the switch a caller

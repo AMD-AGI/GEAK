@@ -79,8 +79,8 @@ Read, as reference, before writing:
     same on-box autotune.
     Do not use Instinct MFMA tiles, FNUZ, or gfx950 MX.
   - **gfx1100 (RDNA3, Radeon Pro W7900 only):** read `SKILL_DIR/knowledge/amd_rdna3.md`. Wave
-    **32**, gfx11 **WMMA** (`_w32` builtins, A/B replicated across half-waves) with FP16, BF16,
-    INT8 and INT4 inputs, 64 KiB LDS per workgroup.
+    **32**, gfx11 **WMMA** (`_w32` builtins, A/B replicated across half-waves) with FP16, BF16
+    and INT8 inputs (INT4 is not validated), 64 KiB LDS per workgroup.
   - **gfx115x (RDNA3.5 APU):** read `SKILL_DIR/knowledge/amd_ryzen.md` for the matrix ISA and the
     dtypes it supports.
   - **gfx942 / gfx950 (Instinct):** read `SKILL_DIR/knowledge/amd_instinct.md` §3 for the

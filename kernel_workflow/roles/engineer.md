@@ -30,7 +30,7 @@ work in your OWN private workspace copy — total isolation, no coordination wit
 
 "The hardware reference" means the one matching the card detected on-box (`rocminfo` → gfx arch):
 `amd_instinct.md` for `gfx94*`/`gfx95*` (CDNA Instinct), `amd_ryzen.md` for `gfx115x` (RDNA3.5 APU),
-`amd_rdna3.md` for `gfx1100` (RDNA3 Radeon Pro W7900: wave32, gfx11 WMMA with FP16/BF16/INT8/INT4),
+`amd_rdna3.md` for `gfx1100` (RDNA3 Radeon Pro W7900: wave32, gfx11 WMMA with FP16/BF16/INT8; INT4 not validated),
 `amd_rdna4.md` for `gfx1201` (RDNA4: wave32, WMMA, `vgpr_wave_steps` — never CDNA MFMA/wave64/MX).
 
 Always also read `SKILL_DIR/knowledge/self_monitoring.md` and follow its guard signals.

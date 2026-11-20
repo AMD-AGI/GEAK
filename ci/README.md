@@ -90,6 +90,7 @@ ci/
 |------|------|
 | `gpu_dstate_check.sh` | host-side GPU-wedge pre-check: scans `/proc` (touches no GPU) for tasks stuck in uninterruptible **D-state** in the amdgpu/kfd path. Runs BEFORE the probe so a hung driver fails fast instead of hanging the probe itself. |
 | `gpu_healthcheck.sh` | GPU preflight probe run INSIDE the framework image: `rocminfo` + a tiny torch matmul on GPU 0. Fast, timeout-capped (`--kill-after` escalates to SIGKILL). |
+| `w7900_vllm_smoke.sh` | **opt-in** Radeon Pro W7900 runtime smoke, run INSIDE the W7900 vLLM image with one card exposed, after `gpu_healthcheck.sh`: exact W7900 identity (`gpu_identity.py` + `detect_gpu_arch`), `vllm serve --dtype float16`, the card's perf level (read from sysfs, never set) through a `run_e2e.py --dry-run` handoff as `gpu_perf_level`, and a short `vllm bench serve`. Writes `w7900_vllm_smoke.json`. Not in L0 (needs the card); `kernel_workflow/scripts/test_w7900_vllm_smoke.sh` checks its refusals there. |
 | `setup_claude.sh` | Step D: install Claude into `$CLAUDE_HOME`, install `claude_agent_sdk`, probe `claude -p`. |
 | `claude_setup.sh` | install + configure Claude Code (global AMD LiteLLM proxy). Re-run every container start (ephemeral fs). |
 

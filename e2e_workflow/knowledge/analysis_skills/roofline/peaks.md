@@ -86,13 +86,19 @@ l2_bytes: 6291456              # 6 MB, HIP l2CacheSize
 mall_bytes: 100663296          # 96 MB Infinity Cache
 ```
 
-The figures are TraceLens's bundled `W7900.json`: AMD's published peaks that the
+The figures are AMD's published peaks from the
 [W7900](https://www.amd.com/en/products/graphics/workstations/radeon-pro/w7900.html) and
 [W7900 Dual Slot](https://www.amd.com/en/products/graphics/workstations/radeon-pro/w7900-dual-slot.html)
-product pages agree on. The two boards differ only in the cooler. There is **no** `bf16`
-key: AMD lists no BF16 figure, so BF16 rows get no compute-axis ceiling (use the memory
-axis). There is no `fp8`, `fp4` or MX key: RDNA3 WMMA has no such path. Other gfx1100
-boards (W7800, RX 7900) stay unknown until they have their own `product:` section.
+product pages, read on 2026-11-20. Both list 96 CUs, FP32 vector 61.3 TFLOPs, FP16 matrix
+123 TFLOPs, INT8 matrix 123 TOPs, INT4 matrix 245 TOPs, 864 GB/s and 96 MB Infinity Cache; the
+L2 size is HIP's `l2CacheSize`. The two boards differ only in the cooler. (The pages disagree on
+the FP16 *vector* rate, 61.3 against 123 TFLOPs; no entry here uses it.) There is **no**
+`bf16` key: AMD lists no BF16 figure, so BF16 rows get no compute-axis ceiling (use the memory
+axis). There is no `fp8`, `fp4` or MX key: RDNA3 WMMA has no such path. There is **no**
+`int4` key either: `roofline_tools.py` has no INT4 dtype, and INT4 WMMA has not been validated
+on this board with the current ROCm path. W4A16 (GPTQ/AWQ) kernels usually dequantize to FP16
+WMMA, so rate them on the memory axis. Other gfx1100 boards (W7800, RX 7900) stay unknown until
+they have their own `product:` section.
 
 The FP16 ridge is ~142 FLOP/byte (`123e12 / 864e9`). A reused working set that fits the
 96 MB Infinity Cache can report effective bandwidth above 864 GB/s; that is cache

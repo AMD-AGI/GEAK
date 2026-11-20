@@ -19,7 +19,7 @@ GEAK targets AMD Instinct MI GPUs (CDNA, e.g. gfx942 / gfx950; the on-box card i
 on RDNA3.5 client parts (gfx1151 / Radeon 8060S) and the validated RDNA4 product Radeon AI PRO R9700
 (gfx1201). gfx1201 is an ISA shared by other products; it does not by itself select R9700 images,
 calibrated peaks, or serving policy. The RDNA3 Radeon Pro W7900 (gfx1100, target `w7900`) is
-supported fail-closed: vLLM only, published W7900 roofline peaks without BF16 or FP8, and any
+supported fail-closed: vLLM only, published W7900 roofline peaks without BF16, FP8 or INT4, and any
 other gfx1100 board is refused. It is driven by
 Claude Code and orchestrated by deterministic JS Workflows. It ships two workflows, each for a different scenario:
 

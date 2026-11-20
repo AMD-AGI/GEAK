@@ -5,7 +5,7 @@ discrete RDNA 3, `gfx1100`, Navi 31). GEAK uses it when the identity check in §
 pair. On the W7900, kernels use:
 
 - **wave32** (§2);
-- **gfx11 WMMA** with FP16, BF16, INT8 and INT4 inputs (§3);
+- **gfx11 WMMA** with FP16, BF16 and INT8 inputs; INT4 is not validated (§3);
 - **64 KiB of LDS per workgroup**, with the occupancy table in §2;
 - the **`rocprofv3` kernel trace** for timing, plus the **12-metric safe set** when
   `COUNTER_GUIDANCE=gfx1100-safe-set` (§4);
@@ -40,13 +40,22 @@ ROCR_VISIBLE_DEVICES=<physical-id> rocminfo
 |-------|------------------|--------|
 | Arch / gfx | RDNA3, `gfx1100` (Navi 31) | `rocminfo` |
 | Compute units | 96 | `rocminfo` |
-| Memory | 48 GB GDDR6, 864 GB/s | AMD figures (TraceLens `W7900.json`) |
-| Infinity Cache | 96 MB | AMD product page |
+| Memory | 48 GB GDDR6, 864 GB/s | AMD product pages |
+| Infinity Cache | 96 MB | AMD product pages |
 | L2 cache | 6 MB | HIP `l2CacheSize` |
-| Matrix FP16 | ~123 TFLOP/s | AMD figures (TraceLens `W7900.json`) |
+| Matrix FP16 | ~123 TFLOP/s | AMD product pages |
 | Matrix BF16 | not published | AMD lists no BF16 figure |
-| Matrix INT8 | ~123 TOPS | AMD figures (TraceLens `W7900.json`) |
-| Vector FP32 | ~61.3 TFLOP/s | AMD figures (TraceLens `W7900.json`) |
+| Matrix INT8 | ~123 TOPS | AMD product pages |
+| Matrix INT4 | 245 TOPS published; not validated, no roofline ceiling | AMD product pages; §3 |
+| Vector FP32 | ~61.3 TFLOP/s | AMD product pages |
+
+The AMD product pages are
+[Radeon PRO W7900](https://www.amd.com/en/products/graphics/workstations/radeon-pro/w7900.html) and
+[Radeon PRO W7900 Dual Slot](https://www.amd.com/en/products/graphics/workstations/radeon-pro/w7900-dual-slot.html),
+read on 2026-11-20. Both list 96 CUs, 61.3 TFLOPs FP32 vector, 123 TFLOPs FP16 matrix, 123 TOPs
+INT8 matrix, 245 TOPs INT4 matrix, 864 GB/s and 96 MB Infinity Cache. The same values are the
+`product: w7900` section of `e2e_workflow/knowledge/analysis_skills/roofline/peaks.md`, without
+INT4.
 
 `ROOFLINE_STATUS=calibrated-w7900` means GEAK uses these product-scoped published peaks. They
 are datasheet numbers, not peaks measured on this box, so label the denominator you used.
@@ -57,9 +66,9 @@ are datasheet numbers, not peaks measured on this box, so label the denominator 
   not impossible GDDR bandwidth.
 - Compute-bound: `min_time ≈ FLOPs / 123e12` for dense FP16 WMMA, `OPs / 123e12` for INT8 WMMA,
   and `FLOPs / 61.3e12` for FP32 vector math.
-- **BF16 and FP8 kernels:** rate them on the memory axis (864 GB/s) and by measured latency. The
-  compute peaks above are for FP16 and INT8 WMMA and FP32 vector math; FP8 data runs as FP16
-  WMMA after dequantization (§3).
+- **BF16, FP8 and INT4 kernels:** rate them on the memory axis (864 GB/s) and by measured
+  latency. The compute peaks above are for FP16 and INT8 WMMA and FP32 vector math; FP8 data
+  runs as FP16 WMMA after dequantization, and INT4 is not validated (§3).
 - The FP16 ridge is about **142 FLOP/byte** (`123e12 / 864e9`): an FP16 kernel below it is
   memory-bound on this board.
 
@@ -95,8 +104,13 @@ Re-derive on a new ROCm with
 **Guard W7900 matrix code on `gfx1100` and use the builtins, types and layout below: they are
 what compiles and computes correctly on this ISA.**
 
-- **WMMA input types: FP16, BF16, INT8 and INT4**, dense. FP16/BF16 accumulate into FP32 (or
-  FP16/BF16); INT8/INT4 accumulate into INT32.
+- **WMMA input types: FP16, BF16 and INT8**, dense. FP16/BF16 accumulate into FP32 (or
+  FP16/BF16); INT8 accumulates into INT32.
+- **INT4 is not validated.** gfx11 has an INT4 WMMA (`v_wmma_i32_16x16x16_iu4`), and AMD
+  publishes 245 TOPS for it, but no INT4 matrix kernel has been run and checked on the W7900 with
+  the current ROCm path, and the roofline has no INT4 ceiling (§1). W4A16 (GPTQ/AWQ) kernels
+  usually dequantize the INT4 weights to FP16 in the operand load and run FP16 WMMA: rate them on
+  the memory axis and by measured latency.
 - **FP8 models:** keep the weights in compact FP8 storage, dequantize them to FP16/BF16 in the
   operand load (apply the block scale there) and run FP16/BF16 WMMA. Triton lowers an FP8
   `tl.dot` the same way, to FP16 WMMA (`v_wmma_f32_16x16x16_f16`), so FP8 storage saves memory
@@ -132,7 +146,8 @@ what compiles and computes correctly on this ISA.**
 - **`COUNTER_GUIDANCE=gfx1100-safe-set`**: profiling is on and the level was declared as
   `profile_standard`. Use
   exactly these 12 Metrix metrics, the ones IntelliKit validated on a Radeon Pro W7900
-  (AMDResearch/intellikit#<TBD>):
+  (AMDResearch/intellikit#203, merged as `1260c08f`; listed under "gfx1100" in
+  IntelliKit's `metrix/README.md`):
 
   | Metrics | What they measure on gfx1100 |
   |---------|------------------------------|
@@ -146,7 +161,7 @@ what compiles and computes correctly on this ISA.**
     reports `Architecture: gfx1100` with no "backend unavailable" note, and lists
     `memory.lds_bank_conflict_percent` without `memory.l2_hit_rate`: that is the listing of a
     Metrix with that change. Otherwise, follow the `unavailable` path. GEAK's `pyproject.toml`
-    pins upstream IntelliKit `2f61453a`, from before that change, so run the check each time.
+    pins upstream IntelliKit `2f61453a`, from before #203, so run the check each time.
   - Then collect them after the kernel trace, for example
     `PROFILER_PRIORITY=metrix METRIX_ARGS="-m GPUBusy,OccupancyPercent,memory.hbm_read_bandwidth,memory.hbm_write_bandwidth" bash "$SKILL_DIR/scripts/profile_kernel.sh" ...`.
   - The `memory.hbm_*` metrics count L2-to-fabric requests, and the 96 MB Infinity Cache can
@@ -165,8 +180,9 @@ Start cold: use learned cards tagged `platforms: ['gfx1100']`, and tag new wins
 1. **NEVER** set `HIP_VISIBLE_DEVICES` inline with profiler commands — always go through `gpu_lock.sh`.
 2. Wavefront-level ops operate on **32** threads.
 3. Matrix math is gfx11 **WMMA** (`_w32` builtins, A and B replicated across both half-waves).
-4. WMMA inputs are FP16, BF16, INT8 and INT4; FP8 data is dequantized to FP16/BF16 first.
+4. WMMA inputs are FP16, BF16 and INT8; INT4 is not validated (§3); FP8 data is dequantized to
+   FP16/BF16 first.
 5. Size the grid to the DETECTED CU count (96 on the W7900).
 6. With `ROOFLINE_STATUS=calibrated-w7900`, use the §1 peaks: memory, FP16 and INT8 WMMA, FP32
-   vector. Rate BF16 and FP8 kernels on the memory axis.
+   vector. Rate BF16, FP8 and INT4 kernels on the memory axis.
 7. Proceed only with `device_target=w7900` on `gfx1100` (§0).

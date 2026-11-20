@@ -294,7 +294,7 @@ const W7900_FREEZE = {
     ok(!('gpu_perf_level' in lane), 'an undeclared perf level is not forwarded', lane.gpu_perf_level);
     const discover = (trace.prompts.find((p) => p.label.startsWith('op_benchmarker')) || {}).prompt || '';
     ok(discover.includes('W7900 / gfx1100 ISOLATION'), 'Discover gets the W7900 isolation intro');
-    ok(discover.includes('On gfx1100, plan lanes on wave32 WMMA with FP16, BF16, INT8 or INT4 inputs.'),
+    ok(discover.includes('On gfx1100, plan lanes on wave32 WMMA with FP16, BF16 or INT8 inputs (INT4 is not validated).'),
       'Discover is told which WMMA inputs gfx1100 lanes use');
     ok(!discover.includes('R9700 / gfx1201 ISOLATION'), 'Discover does not call the W7900 an R9700');
   }
@@ -360,11 +360,12 @@ const W7900_FREEZE = {
                           'calibrated-w7900', 'Matrix BF16 | not published', 'COUNTER_GUIDANCE',
                           'gfx1100-safe-set', 'profile_standard', 'memory.hbm_read_bandwidth',
                           'memory.lds_bank_conflict_percent', 'memory.l2_hit_rate', 'metrix list metrics',
-                          '2f61453a', 'FP16, BF16, INT8 and INT4', '64 KiB', 'rocprofv3 --kernel-trace']) {
+                          '2f61453a', 'FP16, BF16 and INT8', 'INT4 is not validated', 'Matrix INT4 | 245 TOPS',
+                          'AMDResearch/intellikit#203', '64 KiB', 'rocprofv3 --kernel-trace']) {
       ok(rdna3.includes(needle), `amd_rdna3.md mentions ${needle}`);
     }
     for (const other of ['R9700', 'RDNA4', 'CDNA', 'Instinct', 'gfx12', 'MFMA', '160 KiB',
-                         'Unsupported on gfx1100']) {
+                         'Unsupported on gfx1100', 'W7900.json', '<TBD>']) {
       ok(!rdna3.includes(other), `amd_rdna3.md describes the W7900 without ${other}`);
     }
     ok(!/MFMA is available|use MFMA/i.test(rdna3), 'amd_rdna3.md does not recommend MFMA');
