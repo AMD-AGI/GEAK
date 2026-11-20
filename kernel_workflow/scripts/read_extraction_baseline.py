@@ -25,6 +25,15 @@ def _positive(value):
             and math.isfinite(value) and value > 0)
 
 
+def _needs_timing(case, served):
+    """generate_ut.py's rule for a generated UT: an observed case with call mass in a served regime."""
+    try:
+        mass = float(case.get("effective_calls"))
+    except (TypeError, ValueError):
+        return False
+    return mass > 0 and (not served or str(case.get("regime") or "").strip().lower() in served)
+
+
 def read_baseline(workspace):
     workspace = Path(workspace).resolve()
     try:
@@ -44,6 +53,11 @@ def read_baseline(workspace):
         if generated:
             timing = {"ok": True, "per_case": result["timing"].get("per_case")}
             inline = "run/ut_result.json:timing.per_case"
+            # Such a UT must time an observed case only when the case has call mass in a served regime;
+            # the baseline is every case it timed.
+            served = {str(r).strip().lower() for r in
+                      (meta.get("served_regimes") or meta["workload"].get("served_regimes") or [])}
+            expected = [_case_id(c) for c in cases if _needs_timing(c, served)]
         if result.get("exit_code") != 0 or timing.get("ok") is not True:
             raise ValueError("extraction run did not pass timing")
         if result.get("ok") is False or any(
@@ -82,8 +96,16 @@ def read_baseline(workspace):
                 by_id[sig] = row
             else:
                 if set(expected) <= by_id.keys():
-                    return {"usable": True, "next_run": "correctness", "source": source,
-                            "per_case": [by_id[s] for s in expected]}
+                    out = {"usable": True, "next_run": "correctness", "source": source,
+                           "per_case": list(by_id.values()) if generated else [by_id[s] for s in expected]}
+                    world = result.get("world_size")
+                    if generated and isinstance(world, int) and world > 1:
+                        # The rows are valid, but a multi-rank lane owes each rank's time from a run of
+                        # its own (benchmark_engineer.md step 5a): one full run, not the correctness-only one.
+                        out["next_run"] = "full"
+                        out["note"] = ("multi-rank result: time one full UT run of your own for the "
+                                       "per-rank baseline (benchmark_engineer.md step 5a)")
+                    return out
         raise ValueError("no declared timing source covers every workload case with positive finite timings")
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         return {"usable": False, "next_run": "full", "reason": str(exc)}
