@@ -19,6 +19,7 @@ Finish callable bindings, case geometry/weights, editable leaves and device requ
 before freezing and running the full native UT and delivery gate. Use
 `workload/engine/campaign/run_task_entry.py <task-dir>` in the pinned runtime so the
 task's `unittest.py` cannot shadow Python's standard library.
+Carry this required entry command into each authoring lane's task guidance.
 Qualify that a semantics-preserving edit to a declared leaf remains runnable while native
 negative controls still detect incorrect outputs. The oracle and harness remain frozen.
 
