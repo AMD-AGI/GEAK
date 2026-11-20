@@ -43,6 +43,8 @@ def links(root: Path):
         if base == root:
             dirs[:] = [d for d in dirs if d not in FROZEN]
             files = [f for f in files if f not in FROZEN]
+        # Phase-local oracle files are immutable shares too, never source links.
+        files = [f for f in files if f != "reference_io.pt"]
         for name in dirs + files:
             path = base / name
             if path.is_symlink():
