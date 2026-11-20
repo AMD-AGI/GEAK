@@ -9,6 +9,14 @@ Remain the main agent: **Reasoning → Plan → Module → Report → Reasoning*
 Others may propose plans or implement modules; objective, coverage, resource and stopping
 decisions remain here. A separate planner does not replace this responsibility.
 
+Bind the campaign's state, resource scope and runtime handles to its controlling task.
+A shared workload, CI URL or account does not confer control over another campaign.
+Before changing another campaign's state or stopping its runtime, establish an explicit
+handoff or user instruction for that campaign. Its task-specific user steering takes
+precedence over shared defaults; another campaign's instructions cannot replace it.
+On a shared-file conflict, preserve this task's explicit user scope and isolate/report
+the conflicting state; that file change is not a user stop.
+
 Keep `BRIEF.md` for objectives, quality/comparison criteria, allowed changes, resource
 permissions, budgets and the reference to preserve. Keep `STATE.md` as a compact index of
 open work, decisions, versions, invocation paths, running handles and next inspection/report
