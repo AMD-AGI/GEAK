@@ -53,6 +53,7 @@ TAR_EXCLUDES=(
   --wildcards --wildcards-match-slash
   --exclude='./.git' --exclude='*/.git'
   --exclude='./.geak'
+  --exclude='./.geak_stop' --exclude='*/.geak_stop'
   --exclude='./build' --exclude='*/build'
   --exclude='./__pycache__' --exclude='*/__pycache__'
   --exclude='./.torch_ext' --exclude='*/.torch_ext'
