@@ -50,12 +50,12 @@ scaffolded task directory into a UT whose every gate passes on the installed bas
    control per editable leaf; `meta.workload.serving_weight_model.evidence_path`. Then
    `python3 $SKILL_ROOT/ut_contracts/scaffold_ut.py sync-meta --task $TASK_DIR`.
 4. **CPU lint until clean:** `python3 $TASK_DIR/ut_contract.py $TASK_DIR`.
-5. **Iterate on the boundary cases:** `python3 "$SKILL_ROOT/scripts/ut_wave.py" gpu -- python3 "$TASK_DIR/unittest.py" --quick`. It runs
+5. **Iterate on the boundary cases:** `python3 "$SKILL_ROOT/scripts/ut_wave.py" gpu -- python3 "$WORKLOAD_ROOT/engine/campaign/run_task_entry.py" "$TASK_DIR" unittest.py --quick`. It runs
    every gate except timing on the smallest, middle and largest case of each phase and a
    few server calls, one draw, and writes `run/ut_report.quick.json`. It never passes;
    it is how you find a wrong `call()`, a hook, a bound or a control in minutes instead of
    an hour. Fix and rerun until every gate it runs passes.
-6. **Qualify the UT:** by default run `python3 "$SKILL_ROOT/scripts/ut_wave.py" gpu -- python3 "$TASK_DIR/unittest.py" --validation-mode correctness --reuse`.
+6. **Qualify the UT:** by default run `python3 "$SKILL_ROOT/scripts/ut_wave.py" gpu -- python3 "$WORKLOAD_ROOT/engine/campaign/run_task_entry.py" "$TASK_DIR" unittest.py --validation-mode correctness --reuse`.
    Every non-timing gate must pass. Preserve weighted shapes and the timing API, but
    perform no timing measurements and report `performance_measured: false`.
    Fix failures and reuse unchanged passing gates. A quick run never substitutes for

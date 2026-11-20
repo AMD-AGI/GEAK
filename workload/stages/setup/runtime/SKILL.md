@@ -10,6 +10,11 @@ prepare the runtime specified by the plan using its native setup and resource to
 Resolve the actual image/source versions, workload inputs, tool entrypoints and resource
 availability. Use the selected benchmark's readiness checks when preparing a measurement;
 [measure](../../baseline/measure/SKILL.md) describes the bundled benchmark path.
+Carry the configured runner's trust-store dependencies into its worker runtime along
+with credential handles; the image's trust store may differ from the host's.
+After a runner startup failure, test its configured request in the worker runtime
+before redispatching the affected batch; a TLS handshake does not establish API availability.
+Preserve the failure and choose another suitable runner if preparation remains blocked.
 Follow resource selectors through native consumers that remask them; launcher affinity
 does not prove physical isolation. Resolve unwritable runtime state through its owner's
 supported controls before changing pinned sources.

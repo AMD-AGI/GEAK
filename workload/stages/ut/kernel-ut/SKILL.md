@@ -14,7 +14,8 @@ which kernels form a task, or know how many configs a case's weight pools: every
 would unblock it.
 
 Set `SKILL_ROOT` to this directory, `SHARED_TOOLS` to `$SKILL_ROOT/shared` and `EVAL_DIR`
-to this stage's output (`$OUT`). Read
+to this invocation's absolute output path (`$OUT`) before task construction; relative
+exported paths change meaning under a container's working directory. Read
 [setup](references/setup.md), [UT contracts](ut_contracts/README.md),
 [source extraction](references/source-extraction.md),
 [task authoring](references/task-authoring.md) and
@@ -71,6 +72,11 @@ python3 "$SKILL_ROOT/scripts/ut_wave.py" wait  --eval-dir "$EVAL_DIR" --timeout 
 
 One CPU agent lane per task writes and fixes its own task directory
 ([UT lane](references/ut-lane.md)); `--author-workers` controls author concurrency.
+Run a task's entry in the pinned runtime with
+`python3 "$WORKLOAD_ROOT/engine/campaign/run_task_entry.py" <task-dir> unittest.py ...`, so
+the task's `unittest.py` cannot shadow Python's standard library; the lane guidance carries
+this command. Lane progress and reports stay under the task's `run/`; administrative
+outputs must not make tested inputs stale.
 The wave leases GPUs only for each `ut_wave.py gpu -- <command>`.
 The call passes its resources and environment explicitly: `--gpus` is this call's
 allocation and `--serving` the deployment's `serving.json`, whose `env` and

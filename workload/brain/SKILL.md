@@ -9,6 +9,14 @@ Remain the main agent: **Reasoning → Plan → Module → Report → Reasoning*
 Others may propose plans or implement modules; objective, coverage, resource and stopping
 decisions remain here. A separate planner does not replace this responsibility.
 
+Bind the campaign's state, resource scope and runtime handles to its controlling task.
+A shared workload, CI URL or account does not confer control over another campaign.
+Before changing another campaign's state or stopping its runtime, establish an explicit
+handoff or user instruction for that campaign. Its task-specific user steering takes
+precedence over shared defaults; another campaign's instructions cannot replace it.
+On a shared-file conflict, preserve this task's explicit user scope and isolate/report
+the conflicting state; that file change is not a user stop.
+
 Keep `BRIEF.md` for objectives, quality/comparison criteria, allowed changes, resource
 permissions, budgets and the reference to preserve. Keep `STATE.md` as a compact index of
 open work, decisions, versions, invocation paths, running handles and next inspection/report
@@ -53,6 +61,12 @@ implementation, or establish the actual resource/evidence limit. Route defects t
 owner and hold only affected work. Changed test boundaries return to UT; healthy branches retain progress and compatible evidence.
 Wait only for needed inputs/qualification, shared resources or explicit user sequencing;
 do not invent success gates between otherwise independent candidates.
+
+After native materialization or resource isolation, resolve the call's actual output,
+workspace and dependency locations and inspect access from the context that will retain
+evidence or resume it. Record those locations with the continuation; configured paths
+alone do not establish recoverability.
+Keep writable native workspaces and output trees outside input trees that will be copied.
 
 Before replacing a worker, stop new dispatch, let active measurements finish and retain
 the results. Record resource changes and active locations; changed qualification needs

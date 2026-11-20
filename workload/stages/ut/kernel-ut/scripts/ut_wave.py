@@ -593,7 +593,8 @@ def lane_prompt(wave, row, st, attempt, cfg, deadline):
     ]
     lines += ["GPU MODE: on-demand. This author container is CPU-only and holds no GPU lease.",
               "For EVERY GPU operation (imports needing GPU, compile, quick, full validation), use:",
-              'python3 "$SKILL_ROOT/scripts/ut_wave.py" gpu -- python3 "$TASK_DIR/unittest.py" <flags>',
+              'python3 "$SKILL_ROOT/scripts/ut_wave.py" gpu -- python3 '
+              '"$WORKLOAD_ROOT/engine/campaign/run_task_entry.py" "$TASK_DIR" unittest.py <flags>',
               "The default request is required_gpu_count=%d; --count N may request more for sharding."
               % row['need'],
               "Use --env K=V for command-specific environment; cwd defaults to TASK_DIR.",
