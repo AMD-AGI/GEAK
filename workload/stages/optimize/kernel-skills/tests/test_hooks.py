@@ -1,8 +1,10 @@
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """Exercise the v4 attempt handoff and frozen UT on CPU."""
+import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,7 +15,7 @@ SKILLS = ROOT / "kernel_skills"
 
 
 class KernelSkillsHooks(unittest.TestCase):
-    def test_prompt_passes_worker_inputs_to_the_v4_lead(self):
+    def test_prompt_delegates_to_the_kernel_supervisor(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp) / "work with spaces"
             prompt = Path(tmp) / "prompt"
@@ -26,10 +28,48 @@ class KernelSkillsHooks(unittest.TestCase):
                        EXTRA_STEER=steer, PROMPT_OUT=str(prompt))
             subprocess.run(["bash", METHOD / "prompt.sh"], env=env, check=True)
             text = prompt.read_text()
-            for value in (METHOD / "SKILL.md", SKILLS / "v4/geak-lead/SKILL.md",
+            for value in (METHOD / "SKILL.md", SKILLS / "v4/kernel-supervisor/SKILL.md",
                           run / "attempt_2/kernel-skills", run / "HANDOFF.md",
                           "GPUS=0,1", "KERNEL_SRC_ALL=main.py nested/helper.py", steer):
                 self.assertIn(str(value), text)
+
+    def test_round_team_can_change_and_combine_assignments(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            decision = Path(tmp) / "decision.json"
+            cmd = [sys.executable, SKILLS / "bin/check_decision.py", "--run", tmp,
+                   "--decision", decision, "--strategy", SKILLS / "v4/search/evo"]
+            investigate = dict(op="investigate", mode="instrument", question="Which timer?",
+                               why="Two native timing samples disagree")
+            measure = dict(op="measure", nodes=["c000"], why="Compare against the frozen UT")
+
+            def check(team, actions, *, require_team=True, max_heavy=None):
+                doc = dict(round=1, strategy="evo", actions=actions)
+                if team is not None:
+                    doc["team"] = team
+                decision.write_text(json.dumps(doc))
+                options = ["--require-team"] if require_team else []
+                if max_heavy is not None:
+                    options.extend(["--max-heavy", str(max_heavy)])
+                return subprocess.run(cmd + options, capture_output=True, text=True)
+
+            solo = {"timing_analyst": "Use benchmark and investigator. Report timing to the supervisor."}
+            split = {"analyst": "Send the diagnosis to verifier.", "verifier": "Rerun the frozen UT."}
+            for team, actions in [
+                (solo, [dict(investigate, owner="timing_analyst"), dict(measure, owner="timing_analyst")]),
+                (split, [dict(investigate, owner="analyst"), dict(measure, owner="verifier")]),
+                ({}, [dict(op="stop", why="Attempt budget exhausted")]),
+            ]:
+                result = check(team, actions)
+                self.assertEqual(result.returncode, 0, result.stdout)
+            bad = check(split, [dict(measure, owner="timing_analyst")])
+            self.assertEqual(bad.returncode, 1)
+            self.assertIn("has no assignment", bad.stdout)
+            self.assertNotEqual(check(None, [measure]).returncode, 0)
+            self.assertEqual(check(None, [measure], require_team=False).returncode, 0)
+            sequential = [dict(measure, owner="verifier")] * 3
+            self.assertEqual(check(split, sequential).returncode, 0)
+            self.assertNotEqual(check(split, sequential, max_heavy=2).returncode, 0)
+            self.assertNotEqual(check(None, sequential, require_team=False).returncode, 0)
 
     def test_role_workspace_measures_against_the_phase_local_frozen_fixture(self):
         with tempfile.TemporaryDirectory() as tmp:

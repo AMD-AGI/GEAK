@@ -4,8 +4,9 @@ Every role reads this file first. `SK` = `kernel_skills/`, `KW` = `$SK/../kernel
 
 ## Files and communication
 - Facts with evidence (command, log path, numbers) go to `RUN/LEARNINGS.md`, appended as you go.
-- Messages for other roles go to `RUN/inbox.md` as `- (<from> → <to|all>, <UTC time>) <message>`. Read it at
-  every step boundary. The lead does not relay messages between roles.
+- Follow the supervisor's round assignment for recipients, timing and handoff paths. The
+  standalone lead uses `RUN/inbox.md` at step boundaries with entries of the form
+  `- (<from> → <to|all>, <UTC time>) <message>`.
 - If the Write tool refuses a file, write it with a Bash heredoc (`cat > file <<'EOF'`). Never return a
   report only as text: it must be on disk.
 - Keep `RUN/<your-dir>/progress.md` current: step, UTC time, what is running (pid, log path), next command.

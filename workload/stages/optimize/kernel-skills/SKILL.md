@@ -1,6 +1,6 @@
 ---
 name: kernel-skills
-description: Optimize a qualified kernel with GEAK's v4 role skills, candidate archive and search strategies using the workload's frozen native UT.
+description: Delegate a qualified kernel to a supervisor that assembles each round's team from v4 role skills and delivers a candidate through workload's frozen native UT.
 ---
 
 # Kernel skills
@@ -8,17 +8,17 @@ description: Optimize a qualified kernel with GEAK's v4 role skills, candidate a
 Select `stages.optimize.skill=kernel-skills` or name this skill in the plan. Follow
 the [Optimize kernel calls](../README.md#kernel-calls) for task admission, dispatch,
 cold verification and delivery. Pass this directory to the scheduler as `--skill-root`.
-The runner needs file, shell and subagent tools for the lead and independent roles.
+The runner needs file, shell and subagent tools for the supervisor and its delegates.
 
-Each worker attempt invokes the [v4 lead](../../../../kernel_skills/v4/geak-lead/SKILL.md)
-from the [kernel skills package](../../../../kernel_skills/README.md) imported from
-`feat/kernel-roles-skills` at `b7135788`. The lead selects parents from measured
-candidates, records decisions and dispatches the benchmark, roofline, investigator,
-engineer and ship roles. It uses `evo` by default. A plan can name `hillclimb` or
-`avo` in the attempt guidance (`EXTRA_STEER`). Record the strategy in the decisions.
-For a standalone Evolving Agent Teams run, use the [EAT skill](../../../../kernel_skills/geak-eat/SKILL.md).
+For a one-kernel delegation, Brain supplies the task working copy, objective, qualified
+baseline/UT, permitted edits, device set, budget and report destination in the call's
+`PLAN.md`. Forward its path and evidence locations through `EXTRA_STEER`; use the
+configured worker hooks for each attempt. In a full campaign the scheduler dispatches
+each admitted kernel separately. Each session runs the [kernel supervisor](../../../../kernel_skills/v4/kernel-supervisor/SKILL.md).
+The supervisor selects the v4 skills, team and handoffs from evidence each round.
+The search strategy defaults to `evo`; the plan may select `hillclimb` or `avo`.
 
-## Running one attempt
+## Worker contract
 
 Read the prior handoff and worker status. Give every role the following workload
 contract along with its [v4 instructions](../../../../kernel_skills/v4/COMMON.md).
@@ -59,12 +59,19 @@ contract along with its [v4 instructions](../../../../kernel_skills/v4/COMMON.md
    For a task whose native binding requires its canonical path, follow the existing
    [frozen UT procedure](../kernel-dynamic-loop/stages/verify/frozen-ut/SKILL.md)
    and hold the slot lock across installation, measurement and restoration.
-4. Follow the [search shell](../../../../kernel_skills/v4/search/SHELL.md) through the
-   independent ship audit. After an accepted final verdict, run
+4. After the independent reviewer accepts the candidate with the v4 ship audit, run
    `python3 "$SOURCE_TREE" check "$RUN/orig/kernel_src" "$ws/kernel_src" --allowed "$KERNEL_SRC_ALL"`
    on the exact verified workspace. Exit 1 reports permitted changes. Deliver those
    with `python3 "$SOURCE_TREE" copy "$ws/kernel_src" "$INPUT/kernel_src"`.
    If the audit fails or time runs out before verification, retain the starting
    source. Record the verdict, archive, decision and receipt paths,
    costs and unfinished work in the worker's `HANDOFF.md`. The worker remeasures the
-   delivery and owns KEEP/revert. Optimize owns the final cold repeats.
+   delivery and owns KEEP/revert.
+
+## Complete the call
+
+After search, Optimize runs its [cold verification](../README.md#cold-verification)
+and delivers `optimized.json` and `REPORT.md` for the declared scope. Return the
+accepted source identity and cold receipts, or the measured no-gain, failure or
+unfinished work with its evidence and cost. Brain uses that result to decide on
+Apply back and serving evaluation.

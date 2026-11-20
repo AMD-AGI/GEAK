@@ -2,14 +2,16 @@
 """Check one round's search decision before dispatch (the search shell's "check" step).
 
 Usage: check_decision.py --run RUN --decision RUN/decisions/round_<n>.json --strategy SK/v4/search/<name>
-                         [--gpus N] [--max-heavy K]
+                         [--gpus N] [--max-heavy K] [--require-team]
 Checks:
   1. schema (v4/search/decision.schema.json; uses `jsonschema` when installed, else built-in checks);
   2. ops are within the strategy's `## Actions used` section (STRATEGY.md);
   3. referenced nodes exist (`ORIGINAL` / `c000` or `RUN/cands/<id>`), and parents of mutate / combine have a patch;
   4. custom roles exist under the strategy's `roles/`;
-  5. GPU-heavy actions (mutate, fresh, combine, measure) ≤ max-heavy (default: 2 per GPU, at least 2);
+  5. GPU-heavy actions respect --max-heavy (standalone default: 2 per GPU, at least 2).
+     Supervisor rounds can schedule several actions in sequence on the worker's locked slot.
   6. at most one `stop`, and `stop` is alone.
+  7. with --require-team, every working action has an owner on the supervisor's round team.
 Exit 0 = OK (warnings may be printed), 1 = errors (printed one per line).
 """
 import argparse, json, os, re, sys
@@ -46,6 +48,8 @@ def main():
     ap.add_argument("--run", required=True); ap.add_argument("--decision", required=True)
     ap.add_argument("--strategy", required=True); ap.add_argument("--gpus", type=int, default=1)
     ap.add_argument("--max-heavy", type=int)
+    ap.add_argument("--require-team", action="store_true",
+                    help="check the supervisor's role assignments before dispatch")
     a = ap.parse_args()
     err, warn = [], []
     d = json.load(open(a.decision))
@@ -61,12 +65,29 @@ def main():
     except Exception as e:  # noqa: BLE001  (jsonschema.ValidationError)
         err.append(f"schema: {getattr(e, 'message', e)}")
     acts = d.get("actions") or []
+    if not isinstance(acts, list) or any(not isinstance(act, dict) for act in acts):
+        err.append("actions must be a list of objects")
+        acts = []
+    team = d.get("team", {})
+    if a.require_team:
+        if not acts:
+            err.append("a supervisor round needs a working action or stop")
+        if not isinstance(team, dict):
+            err.append("team must map role names to assignments")
+            team = {}
+        for role, brief in team.items():
+            if not role.strip() or not isinstance(brief, str) or not brief.strip():
+                err.append(f"team role {role!r} needs a name and a nonempty assignment")
     ops = declared_ops(a.strategy)
     if ops is None:
         warn.append("strategy has no '## Actions used' section; op set not checked")
     for i, act in enumerate(acts):
         op = act.get("op")
         tag = f"action {i} ({op})"
+        if a.require_team and op != "stop":
+            owner = act.get("owner")
+            if not isinstance(owner, str) or owner not in team:
+                err.append(f"{tag}: owner {owner!r} has no assignment on this round's team")
         if op not in VERBS:
             err.append(f"{tag}: unknown op"); continue
         if ops is not None and op not in ops:
@@ -87,8 +108,10 @@ def main():
         if op == "custom" and not os.path.exists(os.path.join(a.strategy, "roles", f"{act.get('role')}.md")):
             err.append(f"{tag}: custom role {act.get('role')} not found in {a.strategy}/roles/")
     heavy = sum(1 for x in acts if x.get("op") in HEAVY)
-    cap = a.max_heavy or max(2, 2 * a.gpus)
-    if heavy > cap:
+    cap = a.max_heavy
+    if cap is None and not a.require_team:
+        cap = max(2, 2 * a.gpus)
+    if cap is not None and heavy > cap:
         err.append(f"{heavy} GPU-heavy actions > {cap} for {a.gpus} GPU(s)")
     stops = [x for x in acts if x.get("op") == "stop"]
     if stops and len(acts) > 1:

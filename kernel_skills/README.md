@@ -2,13 +2,14 @@
 
 ## v4
 
-Select `stages.optimize.skill=kernel-skills` in a workload scenario to run v4 on a qualified
-kernel. The worker supplies the frozen UT, assigned GPUs and attempt budget. For a standalone
-run, give the lead the task directory (`INPUT`) and allocated GPU IDs (`GPUS`).
-[Workload entry](../workload/stages/optimize/kernel-skills/SKILL.md) · [Lead skill](v4/geak-lead/SKILL.md)
+Select `stages.optimize.skill=kernel-skills` to have workload Brain delegate one qualified
+kernel to a supervisor. Each round it chooses roles, combines v4 skills, defines handoffs
+and dispatches the team. The worker supplies the frozen UT, assigned GPUs and budget.
+[Workload entry](../workload/stages/optimize/kernel-skills/SKILL.md) · [Kernel supervisor](v4/kernel-supervisor/SKILL.md)
 
-The lead selects parent candidates from the measurement archive and dispatches the benchmark,
-roofline, investigator, engineer and ship roles. Each round records its decisions in
+For a standalone v4 run, give the [lead](v4/geak-lead/SKILL.md) the task directory
+(`INPUT`) and allocated GPU IDs (`GPUS`). Both entry points reuse the candidate archive,
+benchmark, roofline, investigator, engineer and ship skills. Each round records its decisions in
 `decisions/round_<n>.json`. The supplied search strategies are `evo` (default), `hillclimb`
 and `avo`. [Search strategies](v4/search/SHELL.md) · [Offline replay](v4/EVIDENCE.md)
 

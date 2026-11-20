@@ -11,7 +11,7 @@ A local improvement does not establish serving gain.
 | Skill | Method |
 | --- | --- |
 | [geak-kernel-workflow](geak-kernel-workflow/SKILL.md) | Existing Kernel Workflow runtime and roles; default kernel method |
-| [kernel-skills](kernel-skills/SKILL.md) | v4 role skills search a measured candidate archive using a pluggable strategy (default `evo`) |
+| [kernel-skills](kernel-skills/SKILL.md) | A kernel supervisor forms a team each round using v4 skills, candidate evidence and a search strategy (default `evo`) |
 | [kernel-dynamic-loop](kernel-dynamic-loop/SKILL.md) | Repeated reasoning over interchangeable kernel modules |
 | [oob](oob/SKILL.md) | Native coding tools for a qualified kernel or declared system experiment |
 

@@ -6,6 +6,11 @@
   "properties": {
     "round": {"type": "integer", "minimum": 0},
     "strategy": {"type": "string"},
+    "team": {
+      "type": "object",
+      "description": "This round's role names and dispatch briefs, chosen by the kernel supervisor.",
+      "additionalProperties": {"type": "string", "minLength": 1}
+    },
     "policy_proposals_used": {"type": "array", "items": {"type": "integer"}},
     "actions": {"type": "array", "items": {
       "type": "object",
@@ -13,6 +18,7 @@
       "properties": {
         "op": {"enum": ["mutate", "fresh", "combine", "measure", "investigate", "ship", "custom", "stop"]},
         "why": {"type": "string", "minLength": 10},
+        "owner": {"type": "string", "description": "Name of this action's executor in team."},
         "parent": {"type": "string"}, "parents": {"type": "array", "items": {"type": "string"}},
         "kind": {"enum": ["merge", "dispatch"]}, "cut": {"type": "string"}, "direction": {"type": "string"},
         "refs": {"type": "array", "items": {"type": "string"}}, "retain": {"enum": ["best", "development"]},

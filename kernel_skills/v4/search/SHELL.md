@@ -44,6 +44,11 @@ Node `tags` are free-form key/values a strategy may ask executors to set (e.g. `
 Every action also carries `why` (citing state) and gets `outcome` filled at round end (new node ids,
 status, score delta, whether shipped).
 
+The executor column gives the standalone lead's assignments. In workload, the
+[kernel supervisor](../kernel-supervisor/SKILL.md) records its own `team` and an
+`owner` per working action and dispatches them through the runner. The search
+strategy still defines the operations and candidate relationships.
+
 ## 4. One round (the shell's loop)
 1. **observe**: rebuild the archive and core views; load cap, past decisions, strategy state.
 2. **policy hook**: run `policy.py` if present; keep its proposals and state.

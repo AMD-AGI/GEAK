@@ -8,13 +8,14 @@ set -euo pipefail
 METHOD="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GEAK_ROOT="${GEAK_ROOT:-$(cd "$METHOD/../../../.." && pwd)}"
 SK="$GEAK_ROOT/kernel_skills"
-LEAD="$SK/v4/geak-lead/SKILL.md"
-[[ -r "$LEAD" ]] || { echo "Missing v4 lead skill: $LEAD" >&2; exit 2; }
+SUPERVISOR="$SK/v4/kernel-supervisor/SKILL.md"
+[[ -r "$SUPERVISOR" ]] || { echo "Missing kernel supervisor skill: $SUPERVISOR" >&2; exit 2; }
 
 cat > "$PROMPT_OUT" <<EOF
-Follow $METHOD/SKILL.md, section "Running one attempt", as the lead in $LEAD.
-Pass the workload measurement and delivery instructions to the roles. Use these
-literal values when invoking tools. The runner need not export them.
+You are workload Brain's kernel supervisor for $K. Read $SUPERVISOR and follow it.
+Use $METHOD/SKILL.md for the worker's measurement and delivery contract. Design and
+dispatch the team for each round. Pass each role its assigned v4 skills and the worker
+contract. Use these literal values when invoking tools. The runner need not export them.
 
 METHOD=$METHOD
 SK=$SK
