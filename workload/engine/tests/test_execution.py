@@ -98,6 +98,29 @@ class ExecutionTests(unittest.TestCase):
         self.assertIn('GEAK_GPU_RENDER_DEVICES=renderD151', command)
         self.assertIn('GPU_IDS=0', command)
 
+    def test_local_backend_pins_physical_gpus_with_rocr_and_logical_ids_with_hip(self):
+        # ROCR renumbers the physical GPUs it keeps and HIP then indexes that filtered list, so
+        # HIP must carry the logical ids. Physical ids in both leave every slot except the one
+        # holding GPU 0 with no visible device.
+        for gpus, rocr, logical in [([0], '0', '0'), ([3], '3', '0'), ([7], '7', '0'),
+                                    ([2, 3], '2,3', '0,1'), ([6, 7], '6,7', '0,1')]:
+            with self.subTest(gpus=gpus):
+                backend = scheduler.LocalBackend(str(self.root / ('local-%s' % rocr)))
+                seen = {}
+
+                def popen(argv, env=None, **kwargs):
+                    seen.update(env)
+                    return type('Proc', (), {'pid': 12345, 'poll': lambda self: None})()
+
+                stale = {'HIP_VISIBLE_DEVICES': '5', 'CUDA_VISIBLE_DEVICES': '5'}
+                with patch.dict(scheduler.os.environ, stale), \
+                     patch.object(scheduler.subprocess, 'Popen', side_effect=popen):
+                    self.assertTrue(backend.start('task', gpus, {}))
+                self.assertEqual(seen['ROCR_VISIBLE_DEVICES'], rocr)
+                self.assertEqual(seen['HIP_VISIBLE_DEVICES'], logical)
+                self.assertEqual(seen['CUDA_VISIBLE_DEVICES'], logical)
+                self.assertEqual(seen['GPU_IDS'], logical)
+
     def test_missing_device_does_not_remove_a_container(self):
         backend = scheduler.DockerBackend(str(self.root))
         backend.render_paths = []

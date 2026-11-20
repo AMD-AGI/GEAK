@@ -342,9 +342,16 @@ class LocalBackend(Backend):
         e = dict(os.environ, **env)
         # The local backend can only pin via env. The agent can override it — which is
         # exactly why production uses docker.
+        # ROCR_VISIBLE_DEVICES renumbers the physical GPUs it keeps, and HIP_VISIBLE_DEVICES
+        # then indexes that already-filtered list. So ROCR takes the physical ids and HIP the
+        # logical ones, exactly as the container backend below addresses its slot. Setting HIP
+        # to the physical ids as well selects index N of an N-element-or-shorter list, and
+        # every slot but the one holding GPU 0 fails with "No HIP GPUs are available".
+        logical_ids = ",".join(str(i) for i in range(len(gpus)))
         e["ROCR_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpus)
-        e["HIP_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpus)
-        e["GPU_IDS"] = ",".join(str(i) for i in range(len(gpus)))
+        e["HIP_VISIBLE_DEVICES"] = logical_ids
+        e["CUDA_VISIBLE_DEVICES"] = logical_ids   # torch reads it too; an inherited value would stack
+        e["GPU_IDS"] = logical_ids
         logf = os.path.join(self.work_root, "logs", kernel)
         os.makedirs(logf, exist_ok=True)
         out = open(os.path.join(logf, "spawn.log"), "a")
