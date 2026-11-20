@@ -55,7 +55,76 @@ def check_identity(out, run_root):
     return applied, None
 
 
+def profile_scope(run_root):
+    """The profile delivery's coverage when it was partial (a budget salvage), else None.
+
+    A partial delivery proceeds downstream on purpose, so everything applyback says is
+    about the delivered tasks only. The verdict is computed exactly as for a full
+    delivery; this only states its scope where a reader would otherwise take it for the
+    whole campaign's."""
+    res = evaluation.read_json(os.path.join(run_root, "profile", "out", "result.json"))
+    if not isinstance(res, dict) or res.get("delivery") != "partial":
+        return None
+    m = res.get("metrics") or {}
+    if HERE not in sys.path:
+        sys.path.insert(0, HERE)
+    import points as point_selection
+    covered = sorted(point_selection.ut_configs(point_selection.tasks_dir_of(run_root)))
+    return {"profile_delivery": "partial",
+            "delivered_tasks": m.get("delivered_tasks"),
+            "covered_configs": covered,
+            "uncaptured_configs": m.get("uncaptured_configs"),
+            "blocked_identities": m.get("blocked_identity_ids"),
+            "verdict_scope": "the delivered tasks and the configs their UTs cover only; "
+                             "not a full-campaign verdict"}
+
+
+def label_partial(out, scope):
+    """Write the partial-coverage scope into ab.json, result.json and REPORT.md."""
+    caveat = ("PARTIAL COVERAGE: the profile delivery was partial (budget salvage), so this "
+              "comparison covers only the delivered tasks %s and the configs their UTs "
+              "cover %s; configs never captured: %s; selected identities left blocked: %s. "
+              "It is not a full-campaign verdict."
+              % (scope["delivered_tasks"], scope["covered_configs"],
+                 scope["uncaptured_configs"], scope["blocked_identities"]))
+    ab_path = os.path.join(out, "ab.json")
+    ab = evaluation.read_json(ab_path)
+    if isinstance(ab, dict) and ab:
+        ab["profile_delivery"] = scope
+        with open(ab_path, "w") as fh:
+            json.dump(ab, fh, indent=1, ensure_ascii=False)
+    res_path = os.path.join(out, "result.json")
+    res = evaluation.read_json(res_path)
+    if isinstance(res, dict) and res:
+        res["delivery"] = "partial"
+        res.setdefault("metrics", {})["profile_delivery"] = "partial"
+        res["notes"] = (caveat + " " + (res.get("notes") or "")).strip()
+        with open(res_path, "w") as fh:
+            json.dump(res, fh, indent=2, ensure_ascii=False)
+            fh.write("\n")
+    report = os.path.join(out, "REPORT.md")
+    if os.path.exists(report):
+        with open(report) as fh:
+            text = fh.read()
+        with open(report, "w") as fh:
+            fh.write("> **%s**\n\n%s" % (caveat, text))
+
+
 def main():
+    """Judge the stage, then state its scope when the profile delivery was partial.
+
+    Per-point legs of a multi-config A/B are labelled once, at the top level."""
+    rc = judge()
+    out = os.environ.get("OUT")
+    if out and not os.environ.get("APPLYBACK_POINT"):
+        run_root = os.environ.get("RUN_ROOT") or os.path.dirname(os.path.dirname(out))
+        scope = profile_scope(run_root)
+        if scope:
+            label_partial(out, scope)
+    return rc
+
+
+def judge():
     out = os.environ.get("OUT")
     if not out:
         print("run this inside the environment run.py prepares", file=sys.stderr)

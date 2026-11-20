@@ -404,6 +404,9 @@ def render(snap, prev, acts, tick, rows=None):
     done = [r for r in (rows or []) if r["status"] not in ("-", "running")]
     if done:
         L += ["", "Results so far:"]
+        L += ["  - **partial coverage**: `%s` delivered only part of its scope (budget "
+              "salvage); every result after it covers only what it delivered"
+              % r["stage"] for r in done if r.get("delivery") == "partial"]
         for r in done:
             keys = list(r["metrics"])[:4]
             L.append("  - **%s** `%s` — %s%s"

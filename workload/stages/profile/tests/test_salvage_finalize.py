@@ -152,6 +152,70 @@ class SalvageFinalizeTests(unittest.TestCase):
         self.assertEqual(res["status"], "blocked")
         self.assertIn("minimum_qualified_tasks=2", res["notes"])
 
+    def test_partial_blocked_when_results_lists_a_moved_task_as_delivered(self):
+        # tB was moved out of tasks/ but results.json still names it as kB's owner.
+        self.salvage()
+        (self.out / "tasks_unqualified" / "tB" / "kernel_src").mkdir(parents=True)
+        self.results({"kA": "tA", "kB": "tB", "kC": None}, tasks=("tA", "tB"))
+        res = self.finalize()
+        self.assertEqual(res["status"], "blocked")
+        self.assertIn("kB", res["notes"])
+        self.assertIn("tB", res["notes"])
+
+
+def _load(name, path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.path.insert(0, str(Path(path).parent))
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.path.pop(0)
+    return mod
+
+
+class SalvageDownstreamTests(unittest.TestCase):
+    """No path hands an unqualified (moved) task to optimize or applyback.
+
+    The readers below take the directory listing of tasks/ as the delivery; the
+    salvage's `tasks_unqualified/`, a stale `results.json` row and a roofline-style order
+    file naming a moved task must not bring it back."""
+
+    def setUp(self):
+        tmp = tempfile.mkdtemp(prefix="profile_salvage_down_")
+        self.addCleanup(shutil.rmtree, tmp)
+        self.out = Path(tmp) / "profile" / "out"
+        for root, name, cfg in ((self.out / "tasks", "tA", "c4"),
+                                (self.out / "tasks_unqualified", "tB", "c64")):
+            td = root / name
+            (td / "kernel_src").mkdir(parents=True)
+            write(td / "meta.json", {"workload": {"cases": [{"config_id": cfg}]}})
+        # A stale record that still lists the moved task, with the larger share.
+        write(self.out / "results.json", {"tasks": [
+            {"task": "tA", "selection_pct_gpu_time": 5.0},
+            {"task": "tB", "selection_pct_gpu_time": 50.0}]})
+        write(self.out / "task_plan.json", {"tasks": [{"name": "tB"}, {"name": "tA"}]})
+        write(self.out / "order.json", {"kernels": [
+            {"task": "tB", "expected_e2e_gain_pct": 9.0},
+            {"task": "tA", "expected_e2e_gain_pct": 1.0}]})
+
+    def test_scheduler_schedules_only_tasks_dirs(self):
+        sched = _load("scheduler_salvage_test",
+                      SLOT.parents[1] / "engine" / "campaign" / "scheduler.py")
+        tasks = str(self.out / "tasks")
+        self.assertEqual(sched.discover_tasks(tasks, order_by="share"), ["tA"])
+        self.assertEqual(sched.discover_tasks(tasks, order_file=str(self.out / "order.json"),
+                                              order_by="roofline"), ["tA"])
+
+    def test_applyback_covers_only_delivered_configs(self):
+        pts = _load("points_salvage_test", SLOT.parent / "applyback" / "points.py")
+        self.assertEqual(pts.ut_configs(str(self.out / "tasks")), {"c4": ["tA"]})
+        top = {"multi_config": True, "points": [{"point_id": "c4"}, {"point_id": "c64"}],
+               "measure_order": ["c4", "c64"]}
+        sel = pts.select(top, str(self.out / "tasks"), "covered")
+        self.assertEqual((sel["points"], sel["required"]), (["c4"], ["c4"]))
+
 
 if __name__ == "__main__":
     unittest.main()

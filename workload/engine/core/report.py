@@ -118,6 +118,29 @@ def status_label(row):
     return row["status"]
 
 
+def coverage_caveat(root, rows):
+    """Lines stating, before any number, that a stage delivered only part of its scope.
+
+    A partial delivery (result.json `delivery: "partial"`, CONTRACT 3.2) proceeds
+    downstream on purpose, so every later figure in this report -- the optimize counts,
+    the end-to-end delta -- is about the delivered part only. Saying so in one table cell
+    is not enough; it goes above the headline."""
+    L = []
+    for r in rows:
+        if r.get("delivery") != "partial":
+            continue
+        m = (rj(root, r["stage"], "out", "result.json") or {}).get("metrics") or {}
+        facts = ["%s %s" % (label, m[key]) for key, label in
+                 (("delivered_tasks", "delivered tasks"),
+                  ("blocked_identity_ids", "blocked identities"),
+                  ("uncaptured_configs", "configs never captured")) if key in m]
+        L.append("> **Partial coverage** — `%s` delivered only part of its scope "
+                 "(budget salvage)%s. Every result after it, including the end-to-end "
+                 "verdict, covers only what it delivered and is not a full-campaign "
+                 "result.\n" % (r["stage"], (": " + "; ".join(facts)) if facts else ""))
+    return L
+
+
 def stage_table(rows, limit=4):
     L = ["| Stage | Skill | Status | Key metrics |", "| --- | --- | --- | --- |"]
     for r in rows:
@@ -160,6 +183,7 @@ def main(argv=None):
 
     # --- The contract view: every stage, whatever its skill.
     rows = stage_rows(root, state)
+    L.extend(coverage_caveat(root, rows))
     admitted = {row['stage'] for row in rows if row['status'] == 'ok'}
     L.append("## Stages\n")
     L.extend(stage_table(rows))

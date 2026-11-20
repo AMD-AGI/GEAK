@@ -582,6 +582,7 @@ def main(params_override=None, require_serving_coverage=True):
     missing_configs = uncaptured_configs(ranking)
     artifacts["salvage"] = SALVAGE_MARKER
     metrics.update(delivery="partial",
+                   delivered_tasks=[e["name"] for e in qualified],
                    blocked_identity_ids=blocked_ids,
                    uncaptured_configs=missing_configs,
                    tasks_moved_unqualified=len(

@@ -285,6 +285,12 @@ The mechanism is generic (`engine/core/agent_stage.py`, prompt frame
 `engine/core/prompt/salvage.md`); what may be delivered is this slot's, in
 [salvage.md](salvage.md), and `finalize.py` judges the result:
 
+- **When it starts:** whenever the normal budget or attempts run out without an `ok`,
+  whatever the last normal attempt ended with -- `blocked`, `fail`, or no valid
+  `result.json` at all. It does not try to tell a budget problem from a real defect;
+  the salvage finalize below is the safety net, and it delivers only tasks whose GPU UT
+  and delivery gate both passed. (A stage that reports `blocked` twice with budget still
+  left has given its answer and does not salvage.)
 - On entry the driver writes `$OUT/salvage.json` and logs `[agent] budget spent; entering
   salvage ...`. While that marker exists, every later `run.py all` / `run.py run profile`
   resumes the salvage with what is left of its budget and attempts (each session is
@@ -304,10 +310,15 @@ The mechanism is generic (`engine/core/agent_stage.py`, prompt frame
   is fully qualified (a red or incomplete one left there blocks it), and every selected
   identity is owned by a task or carries a stated blocker. All other checks are the same
   as for a full delivery. Without the marker nothing changes.
-- Downstream needs no special case: optimize schedules the directories under `tasks/`,
-  and applyback's `points: "covered"` measures the configs named by those tasks' UT cases,
-  so uncaptured configs and moved tasks are not in either. The run report shows the stage
-  as `ok (partial delivery)`.
+- A partial delivery proceeds downstream, labelled. Optimize schedules only the
+  directories under `tasks/` (never `tasks_unqualified/`, `task_plan.json` or
+  `results.json` rows without a directory), and applyback's `points: "covered"` measures
+  only the configs named by those tasks' UT cases. Applyback's verdict is computed as
+  usual, but its `ab.json` gains a `profile_delivery` block (delivered tasks, covered and
+  uncaptured configs, blocked identities, `verdict_scope`), its `result.json` carries
+  `delivery: "partial"` and its notes and `REPORT.md` open with a `PARTIAL COVERAGE`
+  caveat. The run report shows the stage as `ok (partial delivery)` and states the
+  caveat above the stage table; the periodic progress report repeats it.
 
 ## What the delivery must contain
 

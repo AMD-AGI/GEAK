@@ -254,6 +254,28 @@ class PartialDeliveryReportingTests(unittest.TestCase):
         self.assertEqual(rows[0]["status"], "ok")        # still admitted downstream
         self.assertIn("| ok (partial delivery) |", "\n".join(report.stage_table(rows)))
 
+    def test_campaign_report_states_the_caveat_above_the_numbers(self):
+        import report
+        self.result(delivery="partial", metrics={"delivered_tasks": ["tA"],
+                                                 "uncaptured_configs": ["c64"],
+                                                 "blocked_identity_ids": ["kB"]})
+        (self.root / "STATE.json").write_text(json.dumps(
+            {"stages": {"profile": {"status": "ok", "delivery": "partial"}}}))
+        report.main(["--run-root", str(self.root)])
+        text = (self.root / "REPORT.md").read_text()
+        caveat = text.index("**Partial coverage**")
+        self.assertLess(caveat, text.index("## Stages"))
+        self.assertIn("configs never captured ['c64']", text)
+        self.assertIn("not a full-campaign result", text)
+
+    def test_full_delivery_report_has_no_caveat(self):
+        import report
+        self.result()
+        (self.root / "STATE.json").write_text(json.dumps(
+            {"stages": {"profile": {"status": "ok"}}}))
+        report.main(["--run-root", str(self.root)])
+        self.assertNotIn("Partial coverage", (self.root / "REPORT.md").read_text())
+
     def test_full_delivery_row_is_unchanged(self):
         import report
         self.result()
