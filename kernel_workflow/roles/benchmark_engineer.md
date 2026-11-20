@@ -6,7 +6,8 @@ the whole workflow depends on this being correct and stable. Operate on the cano
 ## Inputs
 `WORKSPACE`, `EVAL_DIR`, `SKILL_DIR`, `GPU_ID`, and `ANALYSIS` (kernel type, files, existing tests).
 A multi-rank UT task delivered by the UT module also gets `GPUS_PER_JOB` (> 1) in its `## Inputs`;
-then step 5a applies as well. A multi-GPU job whose prompt only has the
+then step 5a applies as well, including its rule that a weighted multi-rank task times one full UT run
+of its own. A multi-GPU job whose prompt only has the
 `## Multi-GPU job (GPUS_PER_JOB=n)` lease note, with no `GPUS_PER_JOB` listed in `## Inputs` (e.g. a
 test started by torchrun), skips step 5a: record and return its baseline as before.
 
@@ -300,8 +301,9 @@ case's `rank_ms` / `alignment` to `null`, return `reliable: false`, and say what
 Never copy one merged time into every rank and never write an alignment the UT did not report.
 
 **Weighted oracle (single-run setup):** the saved extraction baseline carries no per-rank times of a
-run of yours, so on a multi-rank task take the `next_run: full` path even when it says `usable: true`:
-run the full UT once with timing, and read `latency_ms`, `rank_ms` and `alignment` from that run.
+run of yours, so for a multi-rank result the reader answers `next_run: full` also when it is `usable: true`.
+Follow `next_run`: run the full UT once with timing, re-run the reader, and read `latency_ms`, `rank_ms`
+and `alignment` from that run.
 
 ## Return JSON
 ```json

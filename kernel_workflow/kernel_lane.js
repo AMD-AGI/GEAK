@@ -896,7 +896,10 @@ const cfg = (o) => Object.entries(o).map(([k, v]) =>
 // make resume cheap.
 const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : 10800000, 10);
 // The wait limit agentT applies: AGENT_TIMEOUT_MS, widened after Setup only for a UT-module multi-GPU
-// task (UT_MR) so that Benchmark's 3 full UT runs + 2 fit; 0 (off) stays off.
+// task (UT_MR) so that an agent's up to 3 full UT runs + 2 fit (Benchmark runs an unweighted UT 3
+// times, a weighted oracle once); 0 (off) stays off. For such a task the limit can exceed the
+// standalone runtime's 4h spawn backstop named above; the backstop then ends the agent first, so
+// start that runtime with --agent-timeout-ms at or above the wait limit the lane logs.
 let AGENT_WAIT_MS = AGENT_TIMEOUT_MS;
 const AGENT_RETRIES = Math.max(1, parseInt(A.agent_retries != null ? A.agent_retries : 4, 10));
 // Labels whose agent the guard gave up on. The agent is still running; stopAfterTimeout() reads this.
@@ -2422,8 +2425,9 @@ function expertSkillsBlock(role) {
 // UT-module multi-GPU task (UT_MR, known after Setup) gets the UT's own rules and its whole-UT limit
 // as the lease run timeout; every other multi-GPU job, and Setup itself, gets the original text.
 // The UT block does not repeat the original's "never background a lease": the roles start a long UT
-// run in the background and poll it (one Bash call is killed after 10 min), so it says how that run
-// fits the lease instead.
+// run in the background and poll it (one Bash call is killed after 10 min), so it says where the
+// lease call goes in that recipe. A background command line that names a launcher (torchrun) matches
+// gpu_lease.py's leaked-worker signature once its shell is gone, hence the script file for that case.
 function multiGpuBlock(role) {
   if (!GPU_JOB) return '';
   const n = GPU_RESOURCE.gpusPerJob;
@@ -2444,10 +2448,12 @@ function multiGpuBlock(role) {
     `its own rank processes: run python3 unittest.py directly; do not wrap it in torchrun or another ` +
     `multi-process launcher. (Only a test whose own documented command is a launcher, e.g. ` +
     `\`torchrun --nproc_per_node=${n} ...\` in its config, keeps that command.) Never call gpu_lock.sh ` +
-    `from inside a leased command (it is rejected) and never leave a lease running behind you: when a ` +
-    `role step tells you to start a long UT run in the background and poll (\`nohup ... &\`), that run is ` +
-    `one whole \`gpu_lock.sh\` call; wait for its \`UT_EXIT=\` line before the next GPU command and before ` +
-    `you return. A leased command is killed after GEAK_GPU_RUN_TIMEOUT seconds, and this job's limit is the ` +
+    `from inside a leased command (it is rejected) and never background anything inside one: the lease ends ` +
+    `with its command. When a role step tells you to start a long UT run in the background and poll, put the ` +
+    `whole \`gpu_lock.sh $GPU_ID <cmd>\` call inside that \`nohup bash -c '...'\` and wait for its \`UT_EXIT=\` ` +
+    `line before the next GPU command and before you return. (For a launcher command, write the call into a ` +
+    `script file and background that file: a background command line that names torchrun is reaped as a ` +
+    `leaked worker.) A leased command is killed after GEAK_GPU_RUN_TIMEOUT seconds, and this job's limit is the ` +
     `UT's whole-run limit, ${UT_TOTAL_S} s: prefix every \`gpu_lock.sh\` and \`profile_kernel.sh\` ` +
     `call with \`GEAK_GPU_RUN_TIMEOUT=${UT_TOTAL_S}\` (the COMMANDMENT's GPU commands carry the same ` +
     `prefix). Leases on the same GPUs serialize, so put the arms you compare into one run.`;
@@ -2551,7 +2557,7 @@ if (!GPU_RESOURCE.explicit && setup.gpu_requirement) {
 // itself declares more than one) owes each rank's time and the alignment method for every timed case
 // (A01): Benchmark, Report and Validate switch to the *_MR schemas and get GPUS_PER_JOB. After Setup
 // every GPU command carries the UT's whole-run limit as GEAK_GPU_RUN_TIMEOUT, and the agent wait limit
-// covers Benchmark's 3 full UT runs + 2 (A22). Any other job adds nothing: prompts, schemas, limits
+// covers up to 3 full UT runs + 2 (A22; see AGENT_WAIT_MS). Any other job adds nothing: prompts, schemas, limits
 // and the return are unchanged.
 const RANKS = GPU_RESOURCE.gpusPerJob;
 const DECLARATION = setup.task_declaration && typeof setup.task_declaration === 'object' ? setup.task_declaration : {};

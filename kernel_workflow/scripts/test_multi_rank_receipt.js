@@ -223,6 +223,8 @@ const PINNED = {
   torchrun_declared1: 'e032039f97320d245addd5c98e3f2f9cde289dca2f5576bab183c1aba82cbbc4',
   wf_neg: 'a30ec7e55a26c1c78a4f7a779b25bb33476f2eaf13ad5588d713c54a62ff3e81',
   wf_neg_rounds: '3b1be9e98c286f455512406a42ddbbb48c37888bc768a568d3904d6c84e9a430',
+  single_no_baseline: '59956eb0ec2545afc34768d34b2945b101cf52cba20909257e4d58476c52edcd',
+  wf_neg_no_baseline: '9a6ab4df391547bd77a79205cd3dbce171ccabcabcd1a6f7897ca6345ab00316',
   wf_neg_profile_on: '8e2ab446fa482e18b6836fd71be125d4cc44dfb2faf69b13594769210a426b37',
   gen: '70d27a758583f821639d40a53943f4a4e3635acd3fabffe5ec0748a20924bba0',
 };
@@ -271,7 +273,7 @@ function asMain(run, mainBlock) {
     return { label: c.label, prompt: p, schema: JSON.stringify(schema), wait: run.calls[0].wait };
   });
   v.logs = run.logs.filter((l) => !l.startsWith('UT-module multi-GPU task: '));
-  v.result = Object.fromEntries(Object.entries(run.result || {}).filter(([k]) => !MR_RETURN_KEYS.includes(k)));
+  v.result = run.result && Object.fromEntries(Object.entries(run.result).filter(([k]) => !MR_RETURN_KEYS.includes(k)));
   return v;
 }
 // Compares `expected` (this lane's run brought to main's form) with main's run of the same args and
@@ -331,6 +333,15 @@ const itemsOf = (schema, key) => schema.properties[key].items;
     const r = await runLane(BODY, SINGLE, answers);
     await sameAsMain('single_declared4', SINGLE, answers, plainAsMain(r, 'single-GPU, declared 4'),
       'a task declaring 4 GPUs run on one GPU: main\'s lane');
+  }
+  {
+    // Benchmark returns no baseline: main first stops the lane's leftover GPU work, then fails. So does this lane.
+    const answers = { ...SINGLE_DEFAULTS, ...setupWith({ task_declaration: declNone(WF_NEG_TASK) }), 'benchmark_engineer': null };
+    const nb = await runLane(BODY, SINGLE, answers);
+    ok(nb.error && nb.error.message === 'Benchmark setup failed: no baseline recorded' && nb.calls.at(-1).label === 'stop:lane',
+       'no baseline: the stop step runs last, then the lane fails with main\'s error', nb.error && nb.error.message);
+    await sameAsMain('single_no_baseline', SINGLE, answers, plainAsMain(nb, 'single-GPU, no baseline'),
+      'single-GPU without a baseline: main\'s lane');
   }
 
   // -------------------------------------------------------------------------
@@ -410,9 +421,11 @@ const itemsOf = (schema, key) => schema.properties[key].items;
       'HIP_VISIBLE_DEVICES to the leased ids, so start every rank inside that one call. ' + SENTENCE + ' ' +
       '(Only a test whose own documented command is a launcher, e.g. `torchrun --nproc_per_node=4 ...` in ' +
       'its config, keeps that command.) Never call gpu_lock.sh from inside a leased command (it is rejected) ' +
-      'and never leave a lease running behind you: when a role step tells you to start a long UT run in the ' +
-      'background and poll (`nohup ... &`), that run is one whole `gpu_lock.sh` call; wait for its `UT_EXIT=` ' +
-      'line before the next GPU command and before you return. A leased command is killed after GEAK_GPU_RUN_TIMEOUT ' +
+      'and never background anything inside one: the lease ends with its command. When a role step tells you ' +
+      'to start a long UT run in the background and poll, put the whole `gpu_lock.sh $GPU_ID <cmd>` call inside ' +
+      'that `nohup bash -c \'...\'` and wait for its `UT_EXIT=` line before the next GPU command and before you ' +
+      'return. (For a launcher command, write the call into a script file and background that file: a background ' +
+      'command line that names torchrun is reaped as a leaked worker.) A leased command is killed after GEAK_GPU_RUN_TIMEOUT ' +
       'seconds, and this job\'s limit is the UT\'s whole-run limit, 3600 s: prefix every `gpu_lock.sh` and ' +
       '`profile_kernel.sh` call with `GEAK_GPU_RUN_TIMEOUT=3600` (the COMMANDMENT\'s GPU commands carry the ' +
       'same prefix). Leases on the same GPUs serialize, so put the arms you compare into one run.';
@@ -446,6 +459,12 @@ const itemsOf = (schema, key) => schema.properties[key].items;
     await sameAsMain('wf_neg_rounds', rounds, { 'director:validate': { ...DEFAULTS['director:validate'], timing_receipt: receipt(true) } },
       asMain(r, mainBlock), 'with an optimization round: the same differences only (the engineer prompt gains the block)');
 
+    const nbNeg = await runLane(BODY, WF_NEG, { 'benchmark_engineer': null });
+    ok(nbNeg.error && nbNeg.error.message === 'Benchmark setup failed: no baseline recorded' &&
+       nbNeg.calls.at(-1).label === 'stop:lane' && nbNeg.call('benchmark_engineer').schema === nbNeg.exposed.BENCH_SCHEMA_MR,
+       'wf_neg without a baseline: the multi-rank schema was asked, the stop step runs last, main\'s error');
+    await sameAsMain('wf_neg_no_baseline', WF_NEG, { 'benchmark_engineer': null }, asMain(nbNeg, mainBlock),
+      'wf_neg without a baseline: the same differences from main only');
     const prof = await runLane(BODY, { ...WF_NEG, profile: 'on' });
     ok(!neg.call('profile_engineer:baseline') && prof.call('profile_engineer:baseline') &&
        prof.call('profile_engineer:baseline').prompt.endsWith(UT_BLOCK),
@@ -643,19 +662,24 @@ const itemsOf = (schema, key) => schema.properties[key].items;
   console.log('\n# H. the Benchmark role under main\'s single-run setup of a weighted oracle');
   {
     const role = fs.readFileSync(path.join(WF_DIR, 'roles/benchmark_engineer.md'), 'utf8');
-    const weighted = role.indexOf('**Weighted oracle:** skip the 3 runs.');
-    const step5a = role.indexOf('### 5a. Multi-rank UT tasks: per-rank baseline');
-    const ret = role.indexOf('## Return JSON');
-    ok(weighted > 0 && step5a > weighted && ret > step5a,
-       'step 5 ends with main\'s weighted-oracle paragraph; step 5a follows it, before Return JSON');
-    const s5a = role.slice(step5a, ret);
+    const step5 = role.indexOf('\n### 5. ');
+    const step5a = role.indexOf('\n### 5a. Multi-rank UT tasks: per-rank baseline');
+    const ret = role.indexOf('\n## Return JSON');
+    ok(step5 > 0 && step5a > step5 && ret > step5a && !role.slice(step5 + 1, step5a).includes('\n### ') &&
+       !role.slice(step5a + 1, ret).includes('\n### '),
+       'step 5a directly follows the whole of step 5 and is the last step before Return JSON');
+    const flat = (t) => t.replace(/\s+/g, ' ');   // the wording, whatever the line wrapping
+    const s5a = flat(role.slice(step5a, ret));
     ok(s5a.includes('over your timed runs (3, or the single run of a weighted oracle)') && !s5a.includes('over your 3 runs'),
        'step 5a reads the per-rank baseline from the timed runs there are: 3, or a weighted oracle\'s single run');
     ok(s5a.includes('**Weighted oracle (single-run setup):**') &&
-       s5a.includes('take the `next_run: full` path even when it says `usable: true`') &&
+       s5a.includes('the reader answers `next_run: full` also when it is `usable: true`') &&
        s5a.includes('read `latency_ms`, `rank_ms` and `alignment` from that run'),
        'a multi-rank task times one full UT run of its own, also when the saved extraction baseline is usable');
-    ok(role.includes('top-level `timing.per_case` of a generated `unittest.py`'),
+    const inputs = flat(role.slice(role.indexOf('\n## Inputs'), role.indexOf('\n**WORKLOAD ALIGNMENT.**')));
+    ok(inputs.includes('including its rule that a weighted multi-rank task times one full UT run of its own'),
+       'the Inputs paragraph points a multi-rank task at that rule');
+    ok(flat(role).includes('top-level `timing.per_case` of a generated `unittest.py`'),
        'the result layouts the role names for the baseline reader include the generated unittest.py\'s');
   }
 
