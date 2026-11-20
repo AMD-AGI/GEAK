@@ -6,6 +6,13 @@ Produce an isolated candidate under the [invocation contract](../CONTRACT.md#dir
 **Acceptance:** the selected method preserves the module's verification and budget contract.
 A local improvement does not establish serving gain.
 
+A task from the UT stage is correctness-qualified only (`validation_mode: "correctness"`,
+`performance_measured: false`): its weighted shapes and timing implementation are ready,
+but no baseline latency or 1.0 ratio was measured. For the shared driver, evaluate with
+`unittest.py --validation-mode performance --reuse` (the bare command also defaults to
+performance), reusing unchanged correctness gates, and measure the baseline/candidate pair
+before reporting a speedup or keeping a candidate.
+
 ## Implementations
 
 | Skill | Method |
@@ -21,7 +28,7 @@ Kernel methods share the contract below. Historical method labels remain in thei
 ## Kernel calls
 
 Use separate working copies of the plan's qualified tasks and a fresh scheduler work
-root. The sequential driver supplies the full configured Profile delivery; a smaller
+root. The sequential driver supplies the full configured UT delivery (`$TASKS_DIR`); a smaller
 direct scope does not establish full-campaign completion. Roofline orders the tasks by
 expected system savings; unknown bounds retain task-plan order and do not remove work.
 

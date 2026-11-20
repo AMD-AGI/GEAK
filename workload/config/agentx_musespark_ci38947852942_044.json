@@ -298,7 +298,7 @@
       }
     },
     "profile": {
-      "skill": "kernel-extract",
+      "skill": "kernel-profile",
       "mode": "agent",
       "params": {
         "selection": "Explicit deeper discovery: per-phaseTop10ANDwhole-workloadGPUshare>0.5%; retain all useful nonoverlapping supported tasks, including later queue entries beyond8slots. Reconcile every material phase and live family.",
@@ -314,7 +314,11 @@
         "agent_attempts": 4,
         "prior_campaign": "/shared_nfs/zihao/kernel_agent/ax/GEAK/workload/campaigns/agentx_musespark_ci38947852942_289_20261021",
         "agent_brief": "Read the current workload/PRINCIPLES.md, selected slot README/SKILL.md and this campaign AGENTS.md. Root coordinates all resource changes and GPU leases. New campaign begins with zero credit. Preserve all evidence; no vendor edits. All configured policy knobs must match actual receipts. Fresh044baseline/census and final source binding must validate compatible old captures. Author/finalize paths and metadata before native qualification. Do not copy previous qualification receipts. Keep inventory, task completion, GPU UT and delivery consistency claims separate. Report all source blockers and uncovered mass.",
-        "coverage_admission": "conditional_model_support",
+        "coverage_admission": "conditional_model_support"
+      }
+    },
+    "ut": {
+      "params": {
         "minimum_qualified_tasks": 8
       }
     },

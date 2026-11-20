@@ -184,15 +184,25 @@ def main(argv=None):
     weights = regime_weights(rows)
     bounds = bound_by_time(rows)
 
-    sel = read_json(os.path.join(inp or "", "selection_targets.json"))
+    # The GPU shares that rank tasks: an explicit params.selection (the profile's
+    # selection_targets.json) or, for the sequential driver, the copy in $IN.
+    sel_path = params.get("selection") or os.path.join(inp or "", "selection_targets.json")
+    if not os.path.isabs(sel_path) and params.get("selection"):
+        sel_path = os.path.join(os.environ.get("RUN_ROOT") or "", sel_path)
+    sel = read_json(sel_path)
     plan = read_json(os.path.join(inp or "", "task_plan.json"), {})
     plan_idx = task_dir_index(plan)
     members = {name: identities for name, identities in task_records(plan) if name}
+    if not os.path.isfile(sel_path):
+        return emit(status="blocked", artifacts={},
+                    notes="no share evidence at %s: pass the profile's selection_targets.json "
+                          "as params.selection; without GPU shares there is no expected e2e "
+                          "gain to rank by." % sel_path)
     idx = target_index(sel)
     if not idx:
         return emit(status="fail", artifacts={},
-                    notes="upstream %s/selection_targets.json has no targets, so there is "
-                          "no GPU share to read and no expected e2e gain to rank by." % inp)
+                    notes="%s has no targets, so there is no GPU share to read and no "
+                          "expected e2e gain to rank by." % sel_path)
 
     tasks_root = os.path.join(inp or "", "tasks")
     task_order = list(members)
@@ -330,7 +340,7 @@ def main(argv=None):
         status = "blocked"
         notes.append("these analysis entries have no matching UT directory under the "
                      "upstream tasks/, so the optimize stage cannot claim them: %s. Fill in "
-                     "the profile stage's task directories first." % ", ".join(missing_task))
+                     "the UT stage's task directories first." % ", ".join(missing_task))
     incomplete = [name for name, analysis in analyses.items() if not analysis["processed"]]
     if incomplete or not kernels:
         status = "blocked"

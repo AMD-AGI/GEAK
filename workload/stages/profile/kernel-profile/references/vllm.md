@@ -1,0 +1,115 @@
+# vLLM observation and bounded profiling
+
+Use this path for vLLM AgentX extraction. `server.log` throughput summaries do not
+contain per-iteration request geometry. Do not parse them as SGLang batch rows,
+invent `decode_log_interval`, or turn average ISL/OSL into observed call weights.
+The Nov 2 DeepSeek-V4.1-Flash and Nov 5 Qwen3-8B-FP8 runs both hit this mismatch;
+the latter also sent the SGLang `/generate` RPC to vLLM and received HTTP 404.
+
+## Record the workload
+
+Prefer iteration evidence from the completed baseline. For an owned serving run,
+install the bundled observer before the workers import vLLM:
+
+```bash
+export GEAK_ITERATION_LOG_DIR="$EVAL_DIR/iterations"
+export PYTHONPATH="$SKILL_ROOT/scripts/vllm_observer${PYTHONPATH:+:$PYTHONPATH}"
+# Run the user's serving launcher with the unchanged model, TP and graph settings.
+```
+
+The observer wraps `vllm.v1.worker.gpu_worker.Worker.annotate_profile`, preserving
+its return value. The installed scheduler output must expose `scheduled_new_reqs`,
+`scheduled_cached_reqs.is_context_phase`, computed-token counts and scheduled-token
+counts (validated on the pinned vLLM DeepSeek-V4.1-Flash image). Builds without the hook
+continue serving with a diagnostic and no iteration evidence. They must supply an
+equivalent observer; do not claim full coverage from an empty log.
+Only CPU metadata is recorded: timestamp, rank, phase, query and prior context
+length. No prompt content, request IDs, tensor values or arbitrary object reprs.
+It chains the next `sitecustomize`, preserving the serving overlays. The default
+byte cap is 256 MiB per worker (`GEAK_ITERATION_LOG_MAX_BYTES`); exhaustion writes
+an error record, continues serving and makes the affected observation fail parsing.
+For separate P/D engines or DP instances use distinct directories and retain their
+engine/rank scopes; do not merge unrelated rank-0 streams into one distribution.
+
+```bash
+python3 "$SKILL_ROOT/scripts/observed_workload.py" \
+  --log "$EVAL_DIR"/iterations/rank0_pid*.jsonl --log-format vllm-iterations \
+  --window-start '<measured UTC start>' --window-end '<measured UTC end>' \
+  --out "$EVAL_DIR/observed_workload.json"
+```
+
+Each record is one iteration; no log-interval multiplier is applied. Mixed steps
+are owned once by PREFILL with total scheduled M, retaining the per-request split.
+Prior computed tokens are context extent, not prefix-cache hits. Cache hit rate
+and graph mode are left unknown rather than inferred from these records.
+`--accept-len` is the measured acceptance used only for the decode cross-check;
+with mixed steps, completed output tokens need an independent phase reconciliation.
+Pass the effective chunk limit and graph capture sizes from the installed server
+configuration to sampling; requested concurrency is not observed batch size.
+vLLM has no `/get_server_info`: `probe_server.py` reads both from the engine log into
+`server_info.json` (V2 runner decode graphs are request counts; V1 capture sizes count
+tokens and are used only without speculation). Copy the observation server's file to
+`evidence/server_info.json`.
+
+If an old baseline has only aggregate logs, its missing geometry cannot be restored
+by changing a parser flag. Reuse compatible recorded evidence or take a bounded,
+explicitly labelled observation under the actual workload. Keep its interval and
+coverage separate from the saved baseline score; do not silently rerun a full replay.
+
+## Execute a point
+
+```bash
+python3 "$SKILL_ROOT/scripts/serving_probe.py" \
+  --framework vllm --served-model '<served model name>' \
+  --base-url http://127.0.0.1:8000 --points "$EVAL_DIR/sampling_points.json" \
+  --point-id de_2 --trace-dir "$EVAL_DIR/traces/de_2" \
+  --iteration-log-dir "$EVAL_DIR/iterations" --vocab-size '<actual vocabulary size>' \
+  --expect-files '<worker rank count>' --out "$EVAL_DIR/de_2.journal.json"
+```
+
+vLLM requests use `/v1/completions` with token-ID prompts. Occupancy uses fresh
+worker observations when supplied, otherwise vLLM running-request and token
+counters. `/start_profile` receives `profile_prefix` and `max_iterations`;
+`/stop_profile` closes the window. Enable the torch profiler at server launch,
+including shape and detailed phase annotations on builds that expose them.
+Builds with `ignore_frontend` otherwise also trace the API server into the same
+directory (`*.async_llm.*`, CPU events only); the probe disables it and never links
+such a file as a rank.
+On builds without the per-request profiler fields, use the existing time-bounded
+vLLM serving adapter and explicitly account for that alternative capture scope.
+
+The trace directory above is a point subdirectory of the server's configured
+profiler root. vLLM writes prefix-named files to that root; the probe links the
+current point's new traces into its subdirectory. Request and window limits remain
+finite. No SGLang abort RPC is sent to vLLM; finite requests must drain before the
+next point. A trace must contain actual GPU kernels at the requested phase/shape.
+The GPU lease and serving lifecycle rules in setup/capture still apply.
+
+For the pipeline's probe launcher, create `serving.json` with
+`probe_server.py init --framework vllm --out ...`, then fill the real deployment
+parameters. `framework: vllm` selects the vLLM CLI, keeps declared graph mode by
+default, and installs the observer. The state records the model and iteration-log
+directory; `run_points.py` forwards them to each point. The template's profiler
+configuration can be overridden for the installed vLLM version. A probe observation
+is not automatically the baseline's workload distribution.
+
+## Launch evidence on vLLM
+
+A decode kernel replayed from a CUDA graph names no op and no frame; `run_points.py`
+asks `probe_server.py` for eager windows, chosen so that every such kernel is asked for at
+a point that replayed it (DSpark runs the id-rows MoE GEMMs only at batch 2). A kernel
+asked for there and still absent takes another path eagerly (a graph-only one-shot
+all-reduce) and stays without an entry.
+
+With `--enable-dbo`, prefills of at least `--dbo-prefill-token-threshold` tokens run as
+micro-batches in threads started for that step. The observer turns on the profiler's
+`profile_all_threads`, which keeps their torch ops; the Python tracer still records no
+frames there. Selected prefill kernels without frames get one serial window on the same
+server, at the largest observed prefill below the threshold (`<point>@serial`, frames and
+ops only, never in the ledger). Code that only the micro-batch path runs (DBO's SDMA
+hand-offs) does not launch there and stays without an entry; name it from source at review.
+
+Kernels launched straight through `hipModuleLaunchKernel` (amd_kernels, FlyDSL) have no
+host op on any thread, so no operand dims: their case shapes come from the phase shape.
+`source_map.py` lists `amd_kernels` with the serving packages, so its entries, not the
+vLLM caller, are the operators.

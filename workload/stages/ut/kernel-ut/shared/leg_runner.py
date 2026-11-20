@@ -1,0 +1,565 @@
+#!/usr/bin/env python3
+"""Run ONE measurement leg of a kernel task. WHICH leg is decided ONLY by the overlay on PYTHONPATH.
+
+  baseline leg   PYTHONPATH=<task>/baseline_overlay    -> the REAL online serving stack (install +
+                 every already-accepted kernel). Nothing in the task dir can change what it imports.
+  candidate leg  PYTHONPATH=<task>/_cand_overlay       -> that SAME stack + exactly ONE entry built
+                 from kernel_src/ (meta.candidate_bind).
+
+Both legs execute THIS file and the task's OWN cases.py, so `speedup = baseline_ms / candidate_ms` is
+always measured against the live path, whatever LANGUAGE the candidate is written in.
+
+Modes: list (bucket sigs) | resolve (leg identity, for the direction assert) | time | oracle |
+server_calls (replay the entry calls the probe server recorded, run/server_calls.json).
+
+oracle / oracle-worker take an oracle PATH (--oracle-path, or "path" in a worker request; default
+`call`): `call` records cases.call, any other name records cases.ORACLES[name](args) -- e.g. the
+split path of a whole-layer monokernel (each stage launched on its own). A name the task's cases.py
+does not define prints UT_HARNESS_INCOMPLETE and exits 3: the UT is incomplete, not the kernel.
+Driven by harness_lib.measure_legs and ut_driver.py — a unittest.py should not invoke it directly.
+
+Before anything else a leg sets meta.leg_env (apply_leg_env: per-leg values such as a source-keyed
+cache directory) and imports meta.server_preimports, so the kernel compiles in the import
+environment the server gives it (sglang rebinds triton.next_power_of_2 at import). With
+COMPILE_WATCH_OUT set, the leg records every Triton variant it compiles (compile_watch.py) and
+writes them there on exit; ut_driver compares the baseline's set with the server's.
+"""
+import argparse
+import importlib
+import importlib.util
+import json
+import os
+import sys
+import weakref
+import time
+
+_STARTED = time.perf_counter()
+_SETUP = {}
+
+SENTINEL = "UT_HARNESS_INCOMPLETE"
+_HERE = os.path.dirname(os.path.abspath(__file__))
+# this file lives IN the task dir next to a file named unittest.py — drop it from sys.path before
+# torch is imported, or that file shadows stdlib unittest.
+sys.path[:] = [p for p in sys.path if os.path.abspath(p or ".") != _HERE]
+
+
+def _load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _resolve(dotted_attr):
+    mod_name, _, attr = dotted_attr.partition(":")
+    obj = importlib.import_module(mod_name)
+    for part in attr.split("."):
+        if part:
+            obj = getattr(obj, part)
+    return obj
+
+
+_DISPATCH_IMPLS = {}
+
+
+def _observe_dispatch_registration():
+    """Retain successful Python registrations before serving imports run.
+
+    AITER's torch_compile_guard returns a wrapper in torch_guard.py, including
+    when an operator was already registered. Its declared module or a discarded
+    candidate closure therefore cannot identify the body the dispatcher uses.
+    """
+    import functools
+    import torch
+    impl = torch.library.Library.impl
+    if getattr(impl, "_geak_dispatch_observer", False):
+        return
+
+    @functools.wraps(impl)
+    def observed(lib, op_name, fn, dispatch_key="", *args, **kwargs):
+        result = impl(lib, op_name, fn, dispatch_key, *args, **kwargs)
+        if lib.ns == "aiter" and isinstance(op_name, str):
+            name = op_name if "::" in op_name else lib.ns + "::" + op_name
+            key = dispatch_key or lib.dispatch_key
+            _DISPATCH_IMPLS[(name, key)] = (weakref.ref(lib), fn)
+        return result
+
+    observed._geak_dispatch_observer = True
+    torch.library.Library.impl = observed
+
+
+def _closure(fn):
+    return {name: cell.cell_contents for name, cell in
+            zip(fn.__code__.co_freevars, fn.__closure__ or ())}
+
+
+def _aiter_registered_body(fn):
+    """Resolve only the known AITER adapter; unknown/missed registrations fail closed."""
+    qual = "torch_compile_guard.<locals>.decorator.<locals>."
+    if (getattr(fn, "__qualname__", "") != qual + "wrapper_custom"
+            or not getattr(fn, "__module__", "").endswith("torch_guard")):
+        return None
+    name = "aiter::" + _closure(fn)["loadName"]
+    registration = _DISPATCH_IMPLS.get((name, "CUDA"))
+    if registration is None or registration[0]() is None:
+        raise RuntimeError("no observed live CUDA registration for " + name)
+    import torch
+    if not torch._C._dispatch_has_kernel_for_dispatch_key(name, "CUDA"):
+        raise RuntimeError("CUDA registration no longer exists for " + name)
+    body = registration[1]
+    if getattr(body, "__qualname__", "") not in (
+            qual + "outer_wrapper", qual + "outer_wrapper_dummy"):
+        raise RuntimeError("unrecognized registered AITER body for " + name)
+    wrapper = _closure(body).get("wrapper")
+    if getattr(wrapper, "__qualname__", "") != qual + "wrapper":
+        raise RuntimeError("unrecognized registered AITER forwarding closure for " + name)
+    original = _closure(wrapper).get("func")
+    if not callable(original) or not hasattr(original, "__code__"):
+        raise RuntimeError("missing registered AITER implementation for " + name)
+    return {"module": original.__module__,
+            "file": os.path.realpath(original.__code__.co_filename),
+            "qualname": original.__qualname__, "dispatch": name + "/CUDA"}
+
+
+def _identity(target_callable):
+    """Where this leg's callable ACTUALLY came from. The two legs must not report the same tuple."""
+    try:
+        fn = _resolve(target_callable)
+        registered = _aiter_registered_body(fn)
+        if registered is not None:
+            return registered
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+    mod = getattr(fn, "__module__", "") or ""
+    f = ""
+    try:
+        f = getattr(sys.modules.get(mod), "__file__", "") or ""
+    except Exception:
+        pass
+    if not f:
+        try:
+            f = getattr(importlib.import_module(target_callable.split(":")[0]), "__file__", "") or ""
+        except Exception:
+            pass
+    return {"module": mod, "file": os.path.realpath(f) if f else "",
+            "qualname": getattr(fn, "__qualname__", repr(fn))}
+
+
+def _snapshot(out):
+    """Detach one op's output for the oracle blob.
+
+    Attention entries commonly return `(out, lse)` and some return a dict, so a bare `out.detach()`
+    raises AttributeError and — through `_run_leg` — surfaces as a generic non-zero-exit RuntimeError
+    instead of naming the shape of the return value. Recurse over the container instead. Containers
+    are matched BEFORE the tensor duck-check: a namedtuple carries both."""
+    if isinstance(out, tuple) and hasattr(out, "_fields"):
+        return type(out)(*(_snapshot(o) for o in out))
+    if isinstance(out, (tuple, list)):
+        return type(out)(_snapshot(o) for o in out)
+    if isinstance(out, dict):
+        return {k: _snapshot(v) for k, v in out.items()}
+    if hasattr(out, "detach"):
+        return out.detach().clone().cpu()
+    if out is None or isinstance(out, (int, float, bool, str)):
+        return out
+    raise TypeError(
+        f"oracle cannot record a {type(out).__name__} returned by the op — cases.call must return a "
+        "tensor, or a tuple/list/dict of tensors")
+
+
+# Process-wide knobs a kernel can change from inside its own module. In a UT the op runs
+# alone, so a change here is invisible; in a server every other op then runs under it (a
+# candidate that switched on torch TunableOp for its own GEMM re-routed every GEMM of the
+# process and faulted all ranks on the first real prefill, 2026-11-06).
+_STATE_CALLABLES = (
+    ("torch", ("mm", "bmm", "matmul", "addmm", "baddbmm", "_scaled_mm", "einsum", "softmax")),
+    ("torch.nn.functional", None),
+    ("torch.Tensor", ("matmul", "__matmul__", "mm", "bmm", "softmax")),
+)
+
+
+def _process_state():
+    """A comparable snapshot of process-wide state: environment, torch backend and BLAS
+    selection, TunableOp, precision and determinism switches, and the identity of the shared
+    torch callables other ops dispatch through. Values that cannot be read are recorded as
+    such rather than dropped, so an unreadable knob still shows up if it starts to differ."""
+    state = {"env:" + k: v for k, v in os.environ.items()}
+    torch = sys.modules.get("torch")
+    if torch is None:
+        return state
+
+    def put(key, fn):
+        try:
+            state[key] = repr(fn())
+        except Exception as exc:  # noqa: BLE001
+            state[key] = "<unreadable %s>" % type(exc).__name__
+
+    put("torch.default_dtype", torch.get_default_dtype)
+    put("torch.float32_matmul_precision", torch.get_float32_matmul_precision)
+    put("torch.deterministic_algorithms", torch.are_deterministic_algorithms_enabled)
+    put("torch.num_threads", torch.get_num_threads)
+    m = torch.backends.cuda.matmul
+    for attr in ("allow_tf32", "allow_fp16_reduced_precision_reduction",
+                 "allow_bf16_reduced_precision_reduction"):
+        put("torch.backends.cuda.matmul." + attr, lambda attr=attr: getattr(m, attr))
+    put("torch.backends.cuda.preferred_blas_library", torch.backends.cuda.preferred_blas_library)
+    put("torch.backends.cuda.preferred_linalg_library", torch.backends.cuda.preferred_linalg_library)
+    for attr in ("enabled", "benchmark", "deterministic", "allow_tf32"):
+        put("torch.backends.cudnn." + attr, lambda attr=attr: getattr(torch.backends.cudnn, attr))
+    tunable = getattr(getattr(torch, "cuda", None), "tunable", None)
+    if tunable is not None:
+        for fn in ("is_enabled", "tuning_is_enabled", "record_untuned_is_enabled", "get_filename",
+                   "get_max_tuning_duration", "get_max_tuning_iterations"):
+            if hasattr(tunable, fn):
+                put("torch.cuda.tunable." + fn, getattr(tunable, fn))
+        if hasattr(tunable, "get_results"):
+            put("torch.cuda.tunable.results", lambda: len(tunable.get_results()))
+    for owner, names in _STATE_CALLABLES:
+        try:
+            obj = torch
+            for part in owner.split(".")[1:]:
+                obj = getattr(obj, part)
+        except AttributeError:
+            continue
+        for name in names or [n for n in dir(obj) if not n.startswith("_")]:
+            fn = getattr(obj, name, None)
+            if callable(fn):
+                state["callable:%s.%s" % (owner, name)] = "%s@%x" % (
+                    getattr(fn, "__qualname__", type(fn).__name__), id(fn))
+    return state
+
+
+def apply_leg_env(task, meta):
+    """Set the task's per-leg environment (meta.leg_env) and return it.
+
+    meta.leg_env = "<file>:<function>" names a function in a task file (e.g.
+    "rank_harness:leg_env") that returns {name: value} for variables whose value depends on which
+    leg this is -- a cache directory keyed by the bytes of the source this leg resolves, so an
+    edited candidate never loads the baseline's stale binary. It runs first, before
+    server_preimports and before the process_state snapshot, so such a variable is part of both
+    snapshots and never reads as a change the leg made while it ran; anything set later still
+    does. The function must work out its values without importing the bound module (find the
+    package with importlib.util.find_spec), or that module's import-time code would run before
+    the snapshot and escape the process_state gate."""
+    decl = meta.get("leg_env")
+    if not decl:
+        return {}
+    fname, sep, fn = str(decl).partition(":")
+    fname = fname[:-3] if fname.endswith(".py") else fname
+    if not sep or not fname or not fn or os.sep in fname:
+        raise SystemExit(f"meta.leg_env {decl!r}: expected '<task file>:<function>'")
+    env = getattr(_load(fname, os.path.join(task, fname + ".py")), fn)()
+    if not isinstance(env, dict) or not all(isinstance(k, str) and isinstance(v, str)
+                                            for k, v in env.items()):
+        raise SystemExit(f"meta.leg_env {decl!r} must return a dict of str -> str, got {env!r}")
+    os.environ.update(env)
+    return env
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--task", required=True)
+    ap.add_argument("--mode", required=True,
+                    choices=("list", "resolve", "time", "oracle", "oracle-worker", "server_calls"))
+    ap.add_argument("--bucket", default="")
+    ap.add_argument("--out", default="")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--draws", type=int, default=0)
+    ap.add_argument("--sigs", default=None,
+                    help="oracle: comma list of random-case sigs to run (a shard); "
+                         "server_calls: call ids to replay")
+    ap.add_argument("--target-callable", default="", help="identity probe only; defaults to meta target")
+    ap.add_argument("--oracle-path", default="call",
+                    help="oracle: `call` (cases.call) or a key of cases.ORACLES")
+    a = ap.parse_args()
+
+    task = os.path.abspath(a.task)
+    with open(os.path.join(task, "meta.json")) as fh:
+        meta = json.load(fh)
+    leg_env = apply_leg_env(task, meta)
+    targets = [meta.get("target_callable", ""), a.target_callable,
+               *(meta.get("phase_target_callables") or {}).values()]
+    if any(t.startswith("aiter.") for t in targets):
+        _observe_dispatch_registration()
+    watch_out = os.environ.get("COMPILE_WATCH_OUT")
+    cw = None
+    if watch_out:
+        cw = _load("compile_watch", os.path.join(task, "compile_watch.py"))
+        cw.install(out_dir="", frames=0)
+    for mod in meta.get("server_preimports") or []:
+        try:
+            importlib.import_module(mod)
+        except Exception as exc:
+            raise SystemExit(f"server_preimports: import {mod} failed: {type(exc).__name__}: {exc}")
+    state_out = os.environ.get("PROCESS_STATE_OUT")
+    before = _process_state() if state_out else None
+    _SETUP['environment_and_preimports_s'] = time.perf_counter() - _STARTED
+    try:
+        _run(a, task, meta)
+    finally:
+        if cw is not None:
+            cw.dump(watch_out)
+        if state_out:
+            with open(state_out, "w") as fh:
+                json.dump({"before": before, "after": _process_state(), "leg_env": sorted(leg_env)}, fh)
+
+
+def _server_calls(a, task, meta):
+    """Replay every recorded entry call; per call: outputs (return value + every operand the
+    call wrote) or the error. Progress goes to <out>.progress so a crash names its call.
+
+    `meta.ut_contract.server_call_postprocess` names a function in the task's `cases.py`
+    (`server_call_postprocess(call, args, kwargs, ret)`) applied to the return value before
+    it is snapshotted. It exists for an entry whose return is only partly defined: a routed
+    MoE expert kernel allocates its output with torch.empty and writes only the rows that
+    land on this rank, and the deployed caller masks the rest by the same routing and never
+    reads them. Those elements hold whatever the allocator held, so they differ between two
+    identical calls of the UNMODIFIED entry and no candidate -- including the identity --
+    can match them. The hook is task source, frozen in the snapshot, outside the candidate
+    overlay and therefore byte-identical in both legs: it reduces both legs' returns the
+    same way, from the recorded call's own operands, and cannot hide a difference in the
+    region the caller does read."""
+    cw = sys.modules.get("compile_watch") or _load("compile_watch",
+                                                   os.path.join(task, "compile_watch.py"))
+    torch = importlib.import_module("torch")
+    ev = meta.get("server_evidence") or {}
+    with open(os.path.join(task, ev["server_calls"])) as fh:
+        doc = json.load(fh)
+    cases = _load("cases", os.path.join(task, "cases.py"))
+    make_server_object = getattr(cases, "make_server_object", None)
+    entry = _resolve(meta["target_callable"])
+    budget = float((meta.get("ut_contract") or {}).get("server_call_budget_gib", 16)) * 2**30
+    post = None
+    if (meta.get("ut_contract") or {}).get("server_call_postprocess"):
+        cases = _load("cases", os.path.join(task, "cases.py"))
+        post = getattr(cases, "server_call_postprocess", None)
+        if post is None:
+            raise SystemExit("meta.ut_contract.server_call_postprocess is set but cases.py "
+                             "defines no server_call_postprocess(call, args, kwargs, ret)")
+    results = {}
+    only = set(a.sigs.split(",")) if a.sigs is not None else None
+    for k, call in enumerate(doc["calls"]):
+        if only is not None and call["id"] not in only:
+            continue
+        with open(a.out + ".progress", "w") as fh:
+            fh.write(call["id"])
+        row = {"id": call["id"], "kernel": call.get("kernel")}
+        data = cw.call_data(call, lambda rel: torch.load(os.path.join(task, rel)))
+        try:
+            args, kwargs, named, notes = cw.materialize_call(call, data, seed=int(a.seed) + k,
+                                                             budget=budget,
+                                                             make_server_object=make_server_object)
+        except cw.Unreplayable as exc:
+            results[call["id"]] = dict(row, status="unreplayable", why=str(exc))
+            continue
+        before = {n: cw.storage_fingerprint(t) for n, t in named.items()}
+        try:
+            ret = entry(*args, **kwargs)
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+        except Exception as exc:
+            results[call["id"]] = dict(row, status="error", notes=notes,
+                                       why=f"{type(exc).__name__}: {str(exc)[-1500:]}")
+            continue
+        mutated = {n: cw.snapshot_output(t) for n, t in named.items()
+                   if cw.storage_fingerprint(t) != before[n]}
+        if post is not None:
+            try:
+                ret = post(call, args, kwargs, ret)
+            except Exception as exc:
+                results[call["id"]] = dict(
+                    row, status="error", notes=notes,
+                    why="server_call_postprocess: %s: %s" % (type(exc).__name__, str(exc)[-1000:]))
+                continue
+            row["postprocessed"] = True
+        results[call["id"]] = dict(row, status="ok", notes=notes,
+                                   outputs={"return": cw.snapshot_output(ret), "mutated": mutated})
+        del args, kwargs, named, ret
+    torch.save(results, a.out)
+    print(json.dumps({"out": a.out, "n": len(results),
+                      "status": {s: sum(r["status"] == s for r in results.values())
+                                 for s in ("ok", "error", "unreplayable")}}))
+
+
+def timing_rows(cases, h, meta, bucket='', sigs=None, metadata_only=False):
+    """Stream one case's operands; modern factories filter before allocation."""
+    modern = callable(getattr(cases, 'timing_specs', None)) and callable(getattr(cases, 'make_timing_case', None))
+    requested = sigs.split(',') if sigs is not None else None
+    if modern:
+        specs = list(cases.timing_specs(h, meta))
+        if bucket:
+            specs = [c for c in specs if c['sig'] == bucket]
+        if requested is not None:
+            order = {sig: i for i, sig in enumerate(requested)}
+            specs = sorted((c for c in specs if c['sig'] in order), key=lambda c: order[c['sig']])
+        for spec in specs:
+            yield spec if metadata_only else cases.make_timing_case(spec)
+    else:
+        # Existing hand-written tasks retain their own factory semantics. They
+        # can implement the two metadata/factory hooks to avoid eager allocation.
+        for case in cases.timing_cases(h, meta):
+            if (not bucket or case['sig'] == bucket) and (requested is None or case['sig'] in requested):
+                yield case
+
+
+def _run(a, task, meta):
+    if a.mode == "server_calls":
+        _server_calls(a, task, meta)
+        return
+    if a.mode == "resolve":
+        print(json.dumps(_identity(a.target_callable or meta["target_callable"])))
+        return
+    if a.target_callable:
+        raise SystemExit("--target-callable is only valid with --mode resolve")
+    if a.oracle_path != "call" and a.mode != "oracle":
+        raise SystemExit("--oracle-path is only valid with --mode oracle (a worker reads it per request)")
+
+    imports_started = time.perf_counter()
+    h = _load("harness_lib", os.path.join(task, "harness_lib.py"))
+    cases = _load("cases", os.path.join(task, "cases.py"))
+    _SETUP['task_import_s'] = time.perf_counter() - imports_started
+    regime = meta.get("regime", {})
+
+    if a.mode == "list":
+        print(json.dumps({"sigs": [c["sig"] for c in timing_rows(cases, h, meta, metadata_only=True)]}))
+        return
+
+    call = cases.call
+    if meta.get("phase_regimes") is None and h.deployment_compile_mode(regime):
+        call = h.compiled_op(call, regime)
+    graph = h.deployment_graph_mode(regime)
+
+    def case_execution(case):
+        phase_regimes = meta.get("phase_regimes")
+        if phase_regimes is None:
+            return call, graph
+        phase = case.get("regime", "")
+        if not isinstance(phase_regimes, dict) or not isinstance(phase_regimes.get(phase), dict):
+            raise ValueError(f"missing phase_regimes entry for {phase!r}")
+        phase_regime = phase_regimes[phase]
+        phase_call = cases.call
+        if h.deployment_compile_mode(phase_regime):
+            phase_call = h.compiled_op(phase_call, phase_regime)
+        return phase_call, h.deployment_graph_mode(phase_regime)
+
+    if a.mode == "time":
+        rt = _load("rank_timing", os.path.join(task, "rank_timing.py")) \
+            if (meta.get("timing") or {}).get("kind") == "rank_chain" else None
+        if rt is not None:
+            # Whole-layer monokernel with in-kernel peer exchanges: every rank times its own graph
+            # replays of a chain of layers (rank_timing.py); this process only spawns the ranks.
+            spec = rt.chain_spec(meta)
+            out = [rt.time_bucket(task, c, meta, spec) for c in rt.timed_rows(task, a.bucket)]
+            print(json.dumps({"cases": out, "identity": _identity(meta["target_callable"])}))
+            return
+        import gc
+        init_started = time.perf_counter()
+        torch = h._torch()
+        have_cuda = torch.cuda.is_available()
+        if have_cuda:
+            torch.cuda.init()
+            h.sync(torch)
+        _SETUP['runtime_init_s'] = time.perf_counter() - init_started
+        sel = iter(timing_rows(cases, h, meta, a.bucket, a.sigs))
+        out = []
+        while True:
+            input_started = time.perf_counter()
+            try:
+                c = next(sel)
+            except StopIteration:
+                break
+            h.sync(torch)
+            inputs_s = time.perf_counter() - input_started
+            case_call, case_graph = case_execution(c)
+            timing_started = time.perf_counter()
+            r = h.time_op(lambda c=c: case_call(c["args"]), graph=case_graph, detail=True)
+            timing_s = time.perf_counter() - timing_started
+            row = {"sig": c["sig"], "regime": c.get("regime", ""), "m": c.get("m"),
+                   "ms": (r or {}).get("ms"), "wall_ms": (r or {}).get("wall_ms"),
+                   "timer": (r or {}).get("timer"),
+                   # Which cache condition produced `ms`. A decode A/B read under 'write-evict' is
+                   # not comparable to one read under 'read-evict' (1.40 vs 1.12 on MI355X --
+                   # see harness_lib.cache_policy), so the two must never be folded together.
+                   "cache_condition": (r or {}).get("cache_condition"),
+                   **({'error': r['error']} if r and r.get('error') else {}),
+                   "diagnostics": dict((r or {}).get('stages_s') or {}, inputs_s=inputs_s,
+                                       time_op_s=timing_s)}
+            # Whether `ms` is device work or host dispatch latency (time_op's three states:
+            # True / False / ABSENT). Dropping it here is how a host-bound UT passed the timing
+            # gate; carry both keys or neither.
+            if r and "primed" in r:
+                row["primed"], row["host_ms"] = r["primed"], r.get("host_ms")
+            out.append(row)
+            # Do not keep previous operands alive while constructing the next
+            # case. JIT/autotune state stays warm; unused tensor storage is freed.
+            cleanup_started = time.perf_counter()
+            del c, case_call, r
+            # A full scan of Torch/SGLang's long-lived Python heap per shape
+            # can cost hundreds of ms. Refcounts release normal tensor owners;
+            # collect new cycles here and periodically scan older generations.
+            gc.collect(0)
+            if len(out) % 32 == 0:
+                gc.collect()
+            if have_cuda:
+                h.sync(torch)
+                torch.cuda.empty_cache()
+                row['diagnostics']['live_tensor_bytes_after'] = torch.cuda.memory_allocated()
+            row['diagnostics']['cleanup_s'] = time.perf_counter() - cleanup_started
+        print(json.dumps({"cases": out, "identity": _identity(meta["target_callable"]),
+                          "process": dict(_SETUP, child_s=time.perf_counter() - _STARTED)}))
+        return
+
+    torch = h._torch()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    def oracle_fn(path):
+        """The callable an oracle path records. `call` keeps the deployed execution (compile mode,
+        phase regimes); a named path is the task's own reference, called as written."""
+        if path == "call":
+            return None
+        fn = (getattr(cases, "ORACLES", None) or {}).get(path)
+        if not callable(fn):
+            print("%s: oracle path %r is not defined in cases.ORACLES (has %s); the task's contract "
+                  "names it, so cases.py must provide it. This is a UT generation defect, not a "
+                  "kernel failure." % (SENTINEL, path,
+                                       sorted(getattr(cases, "ORACLES", None) or {}) or "none"),
+                  flush=True)
+            sys.exit(3)
+        return fn
+
+    def oracle(seed, draws, sigs, output, path="call"):
+        named = oracle_fn(path)
+        blob = {}
+        only = set(sigs) if sigs is not None else None
+        for shape in cases.random_shapes(h, meta):
+            if only is not None and shape["sig"] not in only:
+                continue
+            case_call = named or case_execution(shape)[0]
+            for i in range(max(1, draws)):
+                rng = torch.Generator(device=device).manual_seed(int(seed) + i)
+                out = case_call(shape["make_inputs"](rng))
+                blob[f"{shape['sig']}|{i}"] = _snapshot(out)
+        torch.save(blob, output)
+        cache = getattr(cases, "_WEIGHTS", None)
+        stats = ({"hits": cache.hits, "misses": cache.misses, "resident_bytes": cache.bytes}
+                 if cache is not None else None)
+        return {"out": output, "n": len(blob), **({"path": path} if path != "call" else {}),
+                **({"weight_cache": stats} if stats else {})}
+
+    if a.mode == "oracle-worker":
+        # One overlay per process. The controller sends one bounded batch at a time
+        # and consumes/deletes its output before requesting the next batch.
+        for line in sys.stdin:
+            request = json.loads(line)
+            result = oracle(request["seed"], request["draws"], request["sigs"], request["out"],
+                            request.get("path") or "call")
+            print("GEAK_ORACLE_BATCH " + json.dumps(result), flush=True)
+        return
+    result = oracle(a.seed, a.draws or int(meta.get("random_draws", 3)),
+                    a.sigs.split(",") if a.sigs is not None else None, a.out, a.oracle_path)
+    print(json.dumps(result))
+
+
+
+if __name__ == "__main__":
+    main()

@@ -6,7 +6,7 @@ description: Optimize a frozen-harness unit-test task with GEAK's own kernel_wor
 # geak-kernel-workflow
 
 The **default** implementation of the optimize stage. It hands each task directory
-extracted by the profile stage (`tasks/<kernel>/`, containing `unittest.py`, `meta.json`,
+extracted by the UT stage (`tasks/<kernel>/`, containing `unittest.py`, `meta.json`,
 `cases.py` and `kernel_src/`) to GEAK's `kernel_workflow/kernel_workflow.js`, which edits
 the task's declared kernel sources.
 
@@ -79,4 +79,4 @@ implementation, so replacing the implementation does not require rewriting them.
 - A working runner (`runners/CONTRACT.md`). With credentials missing the runner returns
   78 and the worker stops immediately, rather than spending the time budget on retries
   that cannot succeed.
-- Task directories come from the profile stage and already contain `kernel_src/`.
+- Task directories come from the UT stage and already contain `kernel_src/`.

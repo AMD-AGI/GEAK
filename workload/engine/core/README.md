@@ -40,6 +40,7 @@ The driver supplies its context through these environment variables:
 | `OUT` | This stage's artifact directory, `$RUN_ROOT/<stage>/out` |
 | `CONFIG`, `PARAMS` | Merged config and stage parameters as read-only JSON |
 | `RUNNER` | Agent CLI adapter |
+| `TASKS_DIR` | Only with root config `task_source_stage`: `$RUN_ROOT/<task_source_stage>/out/tasks`, the configured task producer (e.g. `ut`) that optimize and applyback consume |
 
 Write artifacts to `OUT`. Parameters override implementation defaults.
 Resolve other upstream inputs explicitly through `RUN_ROOT`, not by splicing paths

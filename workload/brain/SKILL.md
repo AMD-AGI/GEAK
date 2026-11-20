@@ -39,7 +39,8 @@ preserve the inputs and evidence of in-flight calls.
    or resolve an uncertainty that changes the plan; consult
    [experience](experience/README.md). Missing evidence can justify a bounded probe, not a claim
    that the opportunity is absent.
-2. Write `PLAN.md` under the [module contract](../stages/CONTRACT.md). Reuse qualified
+2. Write `PLAN.md` under the [module contract](../stages/CONTRACT.md); each module's
+   README states the inputs its call needs, and Brain writes them. Reuse qualified
    inputs; investigate missing prerequisites or observed defects within the affected call,
    rather than adding a separate readiness stage to every route.
 3. Bind invocation options to their native prerequisites and actual receipts; similar

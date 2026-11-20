@@ -34,7 +34,7 @@
       }
     },
     "profile": {
-      "skill": "kernel-extract",
+      "skill": "kernel-profile",
       "params": {
         "selection": "per-phase Top 5 AND overall GPU-time share > 3%",
         "max_targets": null,

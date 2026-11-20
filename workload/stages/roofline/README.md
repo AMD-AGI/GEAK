@@ -5,8 +5,11 @@ or search priority. Provide explicit task/case evidence and a separate analysis 
 a scoped input view preserves its original ownership and whole-workload shares.
 The report informs Brain; it does not force a search or establish E2E gain.
 
-**Input** `$IN` = profile's out (`selection_targets.json` for shares, `tasks/<name>/` for
-runnable unit tests).
+**Input** `$IN` = the UT stage's out (`tasks/<name>/` for runnable unit tests,
+`task_plan.json`), and the profile's `selection_targets.json` for GPU shares: pass it as
+`params.selection` (the sequential driver may instead carry it into `$IN`, e.g.
+`scaffold_tasks.py --selection`). A UT request does not imply it; without it the call is
+`blocked`, not ranked.
 **Output** `$OUT/roofline.json`: per-kernel `roofline_pct`, `attainable_speedup` and
 `bound_type`, plus the **ranking key `expected_e2e_gain_pct`**.
 

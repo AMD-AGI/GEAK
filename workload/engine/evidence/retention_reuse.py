@@ -209,8 +209,9 @@ def copy_bytes(source, target, size):
 
 def scope(task, destination):
     task, destination = Path(task).absolute(), Path(destination).absolute()
-    if task.parent.name != 'tasks' or task.parent.parent.name != 'out' or task.parent.parent.parent.name != 'profile':
-        raise ValueError('task is not in a declared campaign profile/out/tasks scope')
+    if (task.parent.name != 'tasks' or task.parent.parent.name != 'out'
+            or task.parent.parent.parent.name not in ('ut', 'profile')):
+        raise ValueError('task is not in a declared campaign ut/out/tasks scope')
     run = task.parents[3]
     owners = [p for p in destination.parents if p.name == task.name and p.parent.name == 'runs'
               and p.is_relative_to(run / 'optimize/out')]
