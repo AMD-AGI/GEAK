@@ -148,14 +148,26 @@ def selftest():
 
 
 if __name__ == "__main__":
-    args = sys.argv[1:]
-    if "--selftest" in args:
+    if "--selftest" in sys.argv[1:]:
         sys.exit(selftest())
-    if not args:
-        print(__doc__)
-        print("usage: pipeline_survey.py <root> [<root> ...]   # a tree of plain-Triton sources\n"
-              "       pipeline_survey.py --selftest", file=sys.stderr)
-        sys.exit(2)
-    rows = walk(args)
+    # NO HARDCODED ROOT. This used to default to one developer's absolute path
+    # (`<abs-path>/<user>/<vendor-lib>/ops/triton`), which shipped into every emitted gluon pack: it leaked
+    # a username, and on any other box it is a path that cannot exist -- so the tool walked nothing
+    # and printed `[]`, which reads exactly like "surveyed, found no pipelined kernels". A default
+    # that silently answers the wrong question is worse than no default.
+    roots = sys.argv[1:] or [p for p in (os.environ.get("TILE_PIPELINE_SURVEY_ROOTS") or "")
+                             .split(os.pathsep) if p]
+    if not roots:
+        sys.exit("usage: pipeline_survey.py <root> [<root> ...]   (or set "
+                 "TILE_PIPELINE_SURVEY_ROOTS=<path>[:<path>...])\n"
+                 "       pipeline_survey.py --selftest\n"
+                 "  the roots are the kernel trees to survey, e.g. an installed vendor kernel "
+                 "library's ops/triton directory in THIS environment -- no portable default")
+    missing = [p for p in roots if not os.path.isdir(p)]
+    if missing:
+        sys.exit(f"pipeline_survey.py: not a directory: {', '.join(missing)}. A root that does not "
+                 f"exist would make this print [] , which is indistinguishable from a survey that "
+                 f"ran and found nothing")
+    rows = walk(roots)
     rows.sort(key=lambda r: (not r["FORM_A_swp"], -r["dots"], r["file"]))
     print(json.dumps(rows, indent=2))

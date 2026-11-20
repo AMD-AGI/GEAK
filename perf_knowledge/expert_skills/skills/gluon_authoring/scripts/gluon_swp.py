@@ -6,12 +6,13 @@ No upstream `gluon_to_ttgir` calls `add_schedule_loops` / `add_pipeline` -- chec
 the Python pass list omits them. So the pipeline is reachable, and the question is only how
 you reach it.
 
-WHY NOT THE ENV VAR THE PACK USED TO NAME. `TRITON_GLUON_SWP_PIPELINE`,
-`TRITON_GLUON_COOP_LDS` and `TRITON_GLUON_PINGPONG` are additions to a VENDOR FORK's
-`GetEnv.h`; no upstream version reads them. Measured on clean 3.7.1 and 3.8.0: setting them
-is **tolerated and inert** -- so is a knob invented on the spot -- which is the worst
-outcome available. Nothing errors, nothing changes, and a null result reads as "this
-technique does not work here" instead of "that variable does not exist in this build".
+WHY NOT AN ENV VAR AT ALL. Names of the form `TRITON_GLUON_SWP_PIPELINE` /
+`TRITON_GLUON_COOP_LDS` / `TRITON_GLUON_PINGPONG` circulate for this. A three-way search --
+upstream `main`, the `v3.8.0` tag, and every tag of the vendor fork lineage, plus
+`git log --all -S` over both repositories -- finds **no referent for any of them**. They are
+not a fork feature we lack; they name nothing. And an env var no installed code reads is
+**tolerated and inert**: nothing errors, nothing changes, and a null result reads as "this
+technique does not work here" instead of "that variable does not exist".
 
 WHY NOT PATCH `compiler.py`. It works (`patch_reinject.py` does exactly that and is kept
 for when you want the pass list itself on disk to read), but it edits an installed file:
@@ -26,6 +27,21 @@ changes, a read-only or system-wide install is fine, and the effect ends with th
     import gluon_swp
     with gluon_swp.pipelined(2):            # or gluon_swp.enable(2) / .disable()
         out = my_gluon_kernel[grid](...)
+
+THERE IS ALSO A SUPPORTED UPSTREAM SEAM, and for new work prefer it: 3.8.0 exposes
+`knobs.runtime.add_stages_inspection_hook`, which the AMD backend invokes from `add_stages`
+WITH the `language` argument -- so a hook can test for `Language.GLUON` and replace
+`stages["ttgir"]` with a wrapper. Upstream documents that pattern (including regenerating a
+stage's source to splice a pass at an arbitrary point) and ships tests for it. It reaches the
+same IR this module does, through an extension point that is not going to move under you, and
+its return value is the `(key, hash)` pair Triton folds into the compile cache -- which is the
+one correctness detail this module has to solve by hand (see `cache_tag` below). This module
+stays as the reference implementation of WHICH passes to run and in what order; the hook is
+the better place to put them.
+
+What is NOT a reason to prefer either: an earlier note in this pack claimed a wrapper was
+impossible because `gluon_to_ttgir` builds its pass manager inline. Neither mechanism inserts
+into that pass manager -- both run a second one over its result.
 
 THREE CONDITIONS THE KERNEL MUST MEET, or this changes nothing at all:
 
@@ -159,7 +175,7 @@ def applied() -> list:
     return list(_APPLIED)
 
 
-def _post_pipeline_tail(C, pm, recipe, ns, pingpong, arch):
+def _post_pipeline_tail(C, pm, recipe, ns, pingpong, arch, async_copy=False):
     """Append `recipe`'s post-pipeline passes to `pm`; return the names applied."""
     tg, agt = C.passes.ttgpuir, C.amd.passes.ttgpuir
     done = []
@@ -171,6 +187,22 @@ def _post_pipeline_tail(C, pm, recipe, ns, pingpong, arch):
             return
         fn(pm, *args)
         done.append(name)
+
+    # `add_pipeline`'s PAIR, and not part of any recipe. Plain's make_ttgir runs
+    #     add_pipeline(pm, use_async_copy, ...)
+    #     if use_async_copy: add_coalesce_async_copy(pm, arch)
+    # so passing `ac` to the pipeliner without this leaves the
+    # `ttg.async_copy_global_to_local` it just emitted uncoalesced, which does not survive
+    # LLVM lowering. It runs for EVERY recipe including "none", because it pairs with the
+    # pipeline rather than with the tail.
+    #
+    # Why this was invisible until CDNA4: `ac` defaults to `is_async_copy_enabled(arch)`, and
+    # that is False on gfx942 (`hardware/cdna3-gfx942.md`), so the pipeliner never took the
+    # async path there and the missing pass had nothing to omit. On gfx950 it is the backend's
+    # own default. The byte-identical-TTGIR verification this module carries was run across
+    # Triton MINORS, not across arch generations.
+    if async_copy:
+        opt(agt, "add_coalesce_async_copy", arch)
 
     if recipe == "none":
         return done
@@ -267,7 +299,7 @@ def enable(num_stages: int, *, buffer_ops: bool = False, pingpong: bool | None =
         C.amd.passes.ttgpuir.add_optimize_dot_operands(pm, arch)
         C.amd.passes.ttgpuir.add_schedule_loops(pm, ns)
         C.amd.passes.ttgpuir.add_pipeline(pm, ac, pp)
-        _APPLIED[:] = _post_pipeline_tail(C, pm, _STATE["post"], ns, pp, arch)
+        _APPLIED[:] = _post_pipeline_tail(C, pm, _STATE["post"], ns, pp, arch, ac)
         if _STATE["buffer_ops"]:
             # plain's ORDER: pipeline first, buffer conversion after. Restoring it is what
             # lets an anchor be written with gl.load (which the pipeliner can see) and still
@@ -326,11 +358,57 @@ if __name__ == "__main__":
                 fails.append(name)
 
         print("gluon_swp selftest")
+
+        # --- offline: the add_pipeline / add_coalesce_async_copy pairing ---------------
+        # Runs BEFORE the backend probe, because the bug it pins is arch-conditional and the
+        # box that would surface it (gfx950) is not the box this usually runs on. A fake
+        # backend records the calls, so the pairing is checkable with no ROCm at all.
+        class _Rec:
+            def __init__(self, missing=()):
+                self.calls = []
+                self._missing = set(missing)
+
+            def __getattr__(self, name):
+                if name in self._missing:
+                    raise AttributeError(name)
+                return lambda *a: self.calls.append((name, a))
+
+        def _fake(missing=()):
+            agt = _Rec(missing)
+            C = type("C", (), {})()
+            C.amd = type("amd", (), {})()
+            C.amd.passes = type("p", (), {})()
+            C.amd.passes.ttgpuir = agt
+            C.passes = type("p", (), {})()
+            C.passes.ttgpuir = _Rec()
+            C.passes.common = _Rec()
+            return C, agt
+
+        C_f, agt_f = _fake()
+        got = _post_pipeline_tail(C_f, None, "none", 2, False, "gfx950", True)
+        ck("async_copy=True pairs add_coalesce_async_copy with the pipeliner",
+           "add_coalesce_async_copy" in got,
+           "plain runs `if use_async_copy: add_coalesce_async_copy`; omitting it leaves the "
+           "ttg.async_copy_global_to_local uncoalesced and illegal at LLVM lowering")
+        _coal = [a for n, a in agt_f.calls if n == "add_coalesce_async_copy"]
+        ck("...and it is passed (pm, arch), which the pass requires",
+           _coal == [(None, "gfx950")], str(agt_f.calls))
+        ck("...even under post='none', because it pairs with the pipeline not the tail",
+           got == ["add_coalesce_async_copy"], str(got))
+        got_off = _post_pipeline_tail(*_fake()[:1], None, "none", 2, False, "gfx950", False)
+        ck("async_copy=False does not run it", got_off == [], str(got_off))
+        got_abs = _post_pipeline_tail(*_fake(missing=["add_coalesce_async_copy"])[:1],
+                                      None, "none", 2, False, "gfx950", True)
+        ck("a build without the pass records '-add_coalesce_async_copy' rather than skipping",
+           got_abs == ["-add_coalesce_async_copy"], str(got_abs))
+
         try:
             caps = capabilities()
         except Exception as e:  # noqa: BLE001
             print(f"  skip: no AMD backend importable ({type(e).__name__})")
-            raise SystemExit(0)
+            print(f"SELFTEST {'PASS' if not fails else 'FAIL'}"
+                  + (f" ({len(fails)} failed: {', '.join(fails)})" if fails else ""))
+            raise SystemExit(1 if fails else 0)
         print("  caps:", json.dumps(caps))
         ck("the two passes are present in libtriton", caps["can_reinject"],
            json.dumps(caps["passes_in_libtriton"]))
@@ -388,13 +466,14 @@ if __name__ == "__main__":
             ck("enable(1) is refused rather than silently doing nothing", True)
         finally:
             disable()
-        # the fork-only env knobs the pack used to name are inert here, and saying so is
-        # the point of this check existing
+        # the env-var names that circulate for this have no referent in any tree, and saying
+        # so is the point of this check existing
         inert = [v for v in ("TRITON_GLUON_SWP_PIPELINE", "TRITON_GLUON_COOP_LDS",
                              "TRITON_GLUON_PINGPONG")
                  if v not in os.environ]
-        ck("fork-only knobs are not required by this module", len(inert) == 3,
-           "they are read by a vendor fork only; this module does not consult them")
+        ck("no unattributable env knob is required by this module", len(inert) == 3,
+           "these names resolve to nothing in upstream or any fork tag; this module "
+           "does not consult them")
 
         # --- post-pipeline tail ---
         refused = False

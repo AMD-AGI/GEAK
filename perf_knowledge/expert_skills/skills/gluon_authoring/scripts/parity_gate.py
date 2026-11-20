@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """parity_gate.py - the anchor's transcription debt: is it paid, and if not, who owes it?
 
-A faithful Gluon anchor is a REGRESSION you knowingly created, not a baseline to quietly climb
+A faithful anchor -- transcribed into Gluon, or hand-ported into FlyDSL -- is a REGRESSION you
+knowingly created, not a baseline to quietly climb
 from. Climbing before the debt is paid caps the whole port: every later lever is measured against
 a broken starting point, and the run closes below the champion while reporting a healthy-looking
 gain "vs the anchor". That is the single most expensive procedural mistake available in a port,
@@ -15,8 +16,13 @@ compiled artifacts rather than from a story:
 
   lost_pipeline  the champion's loop was software-pipelined and the anchor's is not.
                  Evidence: the champion's TTGIR carries `ttg.memdesc_index` / `ttg.local_store` /
-                 `num_stages > 1` and the anchor's does not. Owned by the pipeline layer
-                 (re-inject plain's pipeliner -- Route 1 -- before authoring anything).
+                 `num_stages > 1` and the anchor's does not. Owned by the pipeline layer,
+                 hand-written FIRST: register-level prefetch, then an authored LDS ring, then
+                 warp_pipeline_stage + a scheduling-model choice (tile-programming/pipeline.md).
+                 Re-injecting plain's pipeliner (gluon_swp / patch_reinject) is the LAST resort:
+                 a diagnostic that measures this debt, or a fallback when the hand-written form
+                 cannot reach parity -- its numbers are labelled `injected`, never a win, and it
+                 never runs on an already-Gluon incumbent.
                  NOTE the inverse trap: `max iter_args >= 2` is NOT evidence of pipelining, any
                  accumulator loop satisfies it. Only memdesc_index / local_store / a peeled
                  prologue are.
@@ -24,20 +30,46 @@ compiled artifacts rather than from a story:
   lost_layout    a conversion was folded backwards into a load, or a staging buffer was
                  materialized that the champion left to the compiler. Evidence: the load-width
                  or LDS-op histogram shifted toward NARROWER operations (dwordx4 -> ushort,
-                 ds_read_b128 -> ds_read_u16), or `shared` bytes/WG crossed an LDS/CU divisor.
+                 ds_read_b128 -> ds_read_u16), or `shared` bytes/WG crossed an LDS/CU divisor,
+                 or occupancy fell AND the anchor's binding term is the LDS one.
                  Owned by the memory-path / shared-layout layers.
 
   lost_RA        the instruction multiset is essentially unchanged and the register allocator
                  serialized it anyway. Evidence: VGPR rose (especially across a wave
-                 threshold), spill appeared, or the number of DISTINCT address registers
-                 feeding the LDS read burst collapsed. This is the one a layout-equivalence
-                 checker structurally cannot see: equivalent layouts, equal counters, unequal
-                 address-register pressure. Read the `ds_read` OPERANDS, not just the count.
+                 threshold), spill appeared, occupancy fell with the anchor REGISTER-bound, or
+                 the number of DISTINCT address registers feeding the LDS read burst
+                 collapsed. This is the one a layout-equivalence checker structurally cannot
+                 see: equivalent layouts, equal counters, unequal address-register pressure.
+                 Read the `ds_read` OPERANDS, not just the count.
+
+Occupancy is compared as min(register term, LDS term) per arm, and the gate NAMES the term
+that bound each arm -- because that name is what routes the owner. `; Occupancy: N` alone is
+the register term, and an anchor that lost a wave to a materialized staging buffer moves no
+register count, so a register-only comparison is silent on the most common lost_layout
+mechanism there is. Every input the LDS term needs (arch, group-segment bytes, workgroup size)
+is refused rather than defaulted when the artifacts do not state it: see `occupancy_terms`.
+
+  residual_outside_kernel
+                 A FOURTH disposition, and the only one that is asserted rather than detected:
+                 the gap is not in the kernel this gate is about. The kernel boundary and the
+                 measured boundary are not the same boundary -- per-node dispatch, a wrapper
+                 or host-side step, an extra launch inside the timed region, or an allocator
+                 /placement difference all land OUTSIDE the .amdgcn the three suspects above
+                 read, so all three can be CLEARED while the ratio stays under threshold.
+                 Assert it with --residual-outside-kernel "<evidence>", and the evidence is
+                 NOT a story: a wall-time decomposition into wrapper / host / kernel, plus an
+                 empty-kernel control at the same grid (and at grid (1,1,1) for the per-node
+                 floor) when the claim is dispatch. Asserting it does NOT clear the gate --
+                 it records WHERE the residual lives so the run stops closing it with an
+                 in-kernel layer, and it travels into the close as the disposition.
 
 Usage:
   parity_gate.py --champion-ms 2.8966 --anchor-ms 4.0754 \
                  --champion-asm ir/champion/k.amdgcn --anchor-asm ir/anchor/k.amdgcn \
                  [--champion-ttgir ir/champion/k.ttgir] [--anchor-ttgir ir/anchor/k.ttgir] \
+                 [--champion-lds 32768] [--anchor-lds 65536] \
+                 [--champion-workgroup-size 256] [--anchor-workgroup-size 256] \
+                 [--champion-arch gfx950] [--anchor-arch gfx950] \
                  [--threshold 0.95] [--json parity.json]
   parity_gate.py --selftest
 
@@ -47,6 +79,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -55,23 +88,43 @@ from pathlib import Path
 GLOBAL_WIDTHS = ["dwordx4", "dwordx3", "dwordx2", "dword", "ushort", "ubyte"]
 LDS_WIDTHS = ["b128", "b96", "b64", "b32", "u16", "u8"]
 
-# next_free_vgpr is the ONLY number the 256 cliff is measured against: ArchVGPR and AGPR share
-# ONE 512-register file per SIMD, so `num_vgpr` / `.vgpr_count` (arch only) reads comfortably
-# under 256 on a kernel that is actually past it. Keep both, decide on next_free.
-_NEXTFREE_RE = re.compile(r"\.amdhsa_next_free_vgpr\s+(\d+)")
-_ARCHVGPR_RE = re.compile(r"(?:\.set\s+\S*num_vgpr,\s*|\.vgpr_count:\s*)(\d+)")
-_ACCUM_RE = re.compile(r"(?:\.amdhsa_accum_offset\s+|;\s*AccumOffset\s*:\s*)(\d+)")
-_OCC_RE = re.compile(r"^\s*;\s*Occupancy\s*:\s*(\d+)", re.M)
-_SPILL_RE = re.compile(r"(?:\.vgpr_spill_count:\s*|;\s*ScratchSize\s*:\s*)(\d+)")
-# `LDSByteSize` in the .amdgcn is a structural 0 on Triton kernels -- shared memory is sized
-# dynamically at launch, so the compile-time field says "0 bytes/workgroup (compile time only)".
-# The real figure is the `shared` field of the Triton cache metadata; pass it in with --*-lds.
-_LDS_RE = re.compile(r"^\s*;\s*LDSByteSize:\s*(\d+)", re.M)
+# Resource facts and bounds are shared with GEAK's probe/ISA tools. The
+# transcription decisions below remain specific to the authoring workflow.
+from amd_resources import analyze as resource_facts
 
 
-def _first_int(rx, text, default=None):
-    m = rx.search(text)
-    return int(m.group(1)) if m else default
+def lds_facts(text: str, lds_bytes: int | None = None) -> tuple[int | None, str]:
+    record = resource_facts(text, lds_bytes=lds_bytes)
+    value = record["lds_bytes_per_wg"]
+    source = record["sources"]["lds_bytes"]
+    if value is None:
+        source = "UNAVAILABLE -- " + source + "; pass launch LDS from matched metadata"
+    return value, source
+
+
+def occupancy_terms(text: str, lds_bytes: int | None = None,
+                    workgroup_size: int | None = None, arch: str | None = None) -> dict:
+    """Render shared static bounds for the Gluon parity decision.
+
+    Actual geometry must be supplied by the launch record. Compiler max-flat is
+    only a bound; unknowns and numeric zero retain the shared parser's meaning.
+    """
+    record = resource_facts(text, arch=arch, lds_bytes=lds_bytes,
+                            workgroup_size=workgroup_size)
+    r, l = record["waves_by_vgpr_term"], record["waves_by_lds_term"]
+    if r is not None and l is not None:
+        bound = "LDS" if l < r else "register" if r < l else "register and LDS (tie)"
+    elif r is not None:
+        bound = "register (LDS term NOT computed)"
+    else:
+        bound = None
+    return {"arch": record["arch"], "arch_source": record["sources"]["arch"],
+            "register_term": r, "register_source": record["waves_source"].split("+")[0],
+            "lds_term": l, "lds_detail": record["lds_detail"],
+            "lds_bytes": record["lds_bytes_per_wg"], "lds_source": (record["sources"]["lds_bytes"] if record["lds_bytes_per_wg"] is not None
+                           else "UNAVAILABLE -- " + record["sources"]["lds_bytes"]),
+            "waves_per_simd": record["waves_per_simd"], "bound_by": bound,
+            "why": record["waves_warning"]}
 
 
 def _hist(text: str, mnemonic_rx: str, widths: list[str]) -> dict[str, int]:
@@ -140,21 +193,29 @@ def _count(text: str, pat: str) -> int:
     return len(re.findall(pat, text))
 
 
-def asm_facts(text: str, lds_bytes: int | None = None) -> dict:
-    lds_asm = _first_int(_LDS_RE, text)
+def asm_facts(text: str, lds_bytes: int | None = None,
+              workgroup_size: int | None = None, arch: str | None = None) -> dict:
+    occ = occupancy_terms(text, lds_bytes, workgroup_size, arch)
+    resources = resource_facts(text, arch=arch, lds_bytes=lds_bytes, workgroup_size=workgroup_size)
     return {
         # the occupancy-relevant register count, and the arch-only one it is often confused with
-        "next_free_vgpr": _first_int(_NEXTFREE_RE, text),
-        "arch_vgpr": _first_int(_ARCHVGPR_RE, text),
-        "accum_offset": _first_int(_ACCUM_RE, text),
-        "occupancy_waves_per_simd": _first_int(_OCC_RE, text),
-        "spill_bytes": _first_int(_SPILL_RE, text, 0),
-        # None, not 0, when the asm's compile-time field is the structural zero
-        "lds_bytes": lds_bytes if lds_bytes is not None else (lds_asm or None),
-        "lds_source": ("caller (--*-lds, from Triton cache `shared`)" if lds_bytes is not None
-                       else "asm LDSByteSize" if lds_asm else
-                       "UNAVAILABLE -- the asm field is a structural 0 on Triton kernels; pass "
-                       "--champion-lds/--anchor-lds from the cache metadata's `shared`"),
+        "next_free_vgpr": resources["vgpr_combined"],
+        "arch_vgpr": resources["vgpr_arch"],
+        "accum_offset": resources["accum_offset"],
+        "agpr": resources["agpr"],
+        "arch": occ["arch"],
+        # THE BINDING occupancy: min(register term, LDS term), plus the terms it was taken over
+        # and the name of the one that bound. Never a bare `; Occupancy:` -- see occupancy_terms.
+        "occupancy_waves_per_simd": occ["waves_per_simd"],
+        "occupancy_register_term": occ["register_term"],
+        "occupancy_lds_term": occ["lds_term"],
+        "occupancy_bound_by": occ["bound_by"],
+        "occupancy_terms_detail": {k: occ[k] for k in
+                                   ("arch_source", "register_source", "lds_detail", "why")},
+        "spill_bytes": resources["spill_bytes"],
+        # None, not 0: "does not say" and "says zero" are both refusals, never a divisor
+        "lds_bytes": occ["lds_bytes"],
+        "lds_source": occ["lds_source"],
         "global_load_hist": _hist(text, r"(?:buffer|global|flat)_load_", GLOBAL_WIDTHS),
         "ds_read_hist": _hist(text, r"ds_read", LDS_WIDTHS),
         "ds_write_hist": _hist(text, r"ds_write", LDS_WIDTHS),
@@ -193,9 +254,78 @@ def _is_pipelined(f: dict) -> bool:
                 or (f["num_stages"] or 1) > 1)
 
 
+#: suspects the compiled artifacts can speak to. `residual_outside_kernel` is deliberately NOT
+#: here: nothing in an .amdgcn or a .ttgir can see a cost that lives outside the kernel, so it is
+#: asserted by the caller with evidence rather than detected, and it is excluded from the
+#: provenance denominator for the same reason.
+IN_KERNEL_SUSPECTS = ("lost_pipeline", "lost_layout", "lost_RA")
+
+
+def outside_kernel_suspect(evidence: str) -> dict:
+    """The asserted fourth disposition: the residual is not inside the gated kernel."""
+    return {
+        "suspect": "residual_outside_kernel",
+        "verdict": "SUSPECTED",
+        "owned_by": "the measurement boundary, not a layer -- per-node dispatch, a wrapper or "
+                    "host step, an extra launch inside the timed region, or allocator placement. "
+                    "No in-kernel layer closes this, and spending rounds on one is the failure "
+                    "this disposition exists to stop",
+        "evidence": {"reason": evidence,
+                     "required": "a wall-time decomposition into wrapper / host / kernel, and "
+                                 "for a dispatch claim an empty-kernel control at the same grid "
+                                 "plus one at grid (1,1,1) for the per-node floor"},
+    }
+
+def _occupancy_evidence(champ: dict, anch: dict) -> dict:
+    """Per-arm occupancy terms: what bound each arm, and what the min was taken over.
+
+    Recorded on BOTH suspects, because the term that binds is what routes the owner. An
+    LDS-bound drop is a layout debt and a register-bound drop is an allocation debt; two
+    `; Occupancy:` values cannot tell them apart, so handing the author "occupancy dropped"
+    without the term sends them to the register layer for a shared-memory problem half the time.
+    """
+    oc, oa = champ["occupancy_waves_per_simd"], anch["occupancy_waves_per_simd"]
+    ev = {
+        "waves_per_simd": {"champion": oc, "anchor": oa},
+        "bound_by": {"champion": champ["occupancy_bound_by"],
+                     "anchor": anch["occupancy_bound_by"]},
+        "register_term": {"champion": champ["occupancy_register_term"],
+                          "anchor": anch["occupancy_register_term"]},
+        "lds_term": {"champion": champ["occupancy_lds_term"],
+                     "anchor": anch["occupancy_lds_term"]},
+        "detail": {"champion": champ["occupancy_terms_detail"],
+                   "anchor": anch["occupancy_terms_detail"]},
+        "dropped": bool(oc and oa and oa < oc),
+        "anchor_bound_by": anch["occupancy_bound_by"] or "",
+    }
+    if champ["occupancy_lds_term"] is None and anch["occupancy_lds_term"] is None:
+        ev["warning"] = (
+            "NEITHER arm has an LDS term, so `occupancy` is the REGISTER term on both sides and "
+            "this comparison is register-vs-register. An anchor that lost a wave to a "
+            "materialized staging buffer -- the most common lost_layout mechanism in a port -- "
+            "moves no register count and is INVISIBLE in this state. Supply --champion-lds/"
+            "--anchor-lds, and a dump that names its target, before reading an unchanged "
+            "occupancy as evidence of anything.")
+    return ev
+
+
 def attribute(champ_asm: dict | None, anch_asm: dict | None,
-              champ_ttgir: dict | None, anch_ttgir: dict | None) -> list[dict]:
-    """One verdict per suspect: suspected / cleared / unknown, each with its numbers."""
+              champ_ttgir: dict | None, anch_ttgir: dict | None,
+              outside_kernel: str | None = None) -> list[dict]:
+    """One verdict per suspect: suspected / cleared / unknown, each with its numbers.
+
+    `outside_kernel`, when given, appends the asserted fourth disposition (see the module
+    docstring). It is never inferred -- an unasserted residual is unattributed, not outside.
+    """
+    out = attribute_in_kernel(champ_asm, anch_asm, champ_ttgir, anch_ttgir)
+    if outside_kernel:
+        out.append(outside_kernel_suspect(outside_kernel))
+    return out
+
+
+def attribute_in_kernel(champ_asm: dict | None, anch_asm: dict | None,
+                        champ_ttgir: dict | None, anch_ttgir: dict | None) -> list[dict]:
+    """The three suspects the compiled artifacts can decide."""
     out = []
 
     # --- lost_pipeline ---
@@ -203,8 +333,10 @@ def attribute(champ_asm: dict | None, anch_asm: dict | None,
         cp, ap = _is_pipelined(champ_ttgir), _is_pipelined(anch_ttgir)
         if cp and not ap:
             out.append({"suspect": "lost_pipeline", "verdict": "SUSPECTED",
-                        "owned_by": "pipeline layer -- re-inject plain's pipeliner (Route 1) "
-                                    "BEFORE authoring overlap by hand",
+                        "owned_by": "pipeline layer -- author the overlap by hand first "
+                                    "(register prefetch -> LDS ring -> warp_pipeline_stage); "
+                                    "re-injecting plain's pipeliner is the last resort "
+                                    "(diagnostic / parity fallback, numbers labelled injected)",
                         "evidence": {"champion": champ_ttgir, "anchor": anch_ttgir}})
         else:
             why = ("the champion's own loop is not pipelined either (memdesc_index=%d, "
@@ -246,6 +378,17 @@ def attribute(champ_asm: dict | None, anch_asm: dict | None,
             "LDS/WG unavailable, so the 'a materialized staging buffer cost an occupancy step' "
             "half of this suspect was NOT tested. That is the single most common lost_layout "
             "mechanism in a port -- pass --champion-lds/--anchor-lds before trusting a CLEARED.")
+    # The occupancy terms belong to this suspect too: when the anchor's BINDING term is the LDS
+    # one, the wave was lost to shared memory and the debt is owned here, not by the allocator.
+    occ_ev = _occupancy_evidence(champ_asm, anch_asm)
+    ev["occupancy"] = occ_ev
+    if occ_ev["dropped"] and occ_ev["anchor_bound_by"].startswith("LDS"):
+        shifts.append(
+            f"occupancy fell {occ_ev['waves_per_simd']['champion']} -> "
+            f"{occ_ev['waves_per_simd']['anchor']} waves/SIMD and the ANCHOR is LDS-BOUND "
+            f"(LDS term {occ_ev['lds_term']['anchor']} vs register term "
+            f"{occ_ev['register_term']['anchor']}): the wave went to shared memory, not to the "
+            f"register allocator")
     out.append({"suspect": "lost_layout",
                 "verdict": "SUSPECTED" if shifts else "CLEARED",
                 "owned_by": "memory path / shared layout -- classify each ttg.local_alloc "
@@ -258,7 +401,7 @@ def attribute(champ_asm: dict | None, anch_asm: dict | None,
     inst_c = champ_asm["n_valu"] + champ_asm["n_mfma"] + champ_asm["n_ds_read"] + champ_asm["n_ds_write"]
     inst_a = anch_asm["n_valu"] + anch_asm["n_mfma"] + anch_asm["n_ds_read"] + anch_asm["n_ds_write"]
     multiset_same = inst_c and abs(inst_a - inst_c) / inst_c <= 0.05
-    if anch_asm["spill_bytes"] and not champ_asm["spill_bytes"]:
+    if anch_asm["spill_bytes"] and champ_asm["spill_bytes"] == 0:
         reasons["spill_appeared"] = anch_asm["spill_bytes"]
     vc, va = champ_asm["next_free_vgpr"], anch_asm["next_free_vgpr"]
     if vc and va and va > vc:
@@ -266,9 +409,19 @@ def attribute(champ_asm: dict | None, anch_asm: dict | None,
         # the 256 cliff: ArchVGPR+AGPR share ONE 512/SIMD file, so crossing it costs a wave
         if vc <= 256 < va:
             reasons["crossed_256_wave_threshold"] = True
-    oc, oa = champ_asm["occupancy_waves_per_simd"], anch_asm["occupancy_waves_per_simd"]
-    if oc and oa and oa < oc:
-        reasons["occupancy_dropped"] = {"champion": oc, "anchor": oa}
+    # Occupancy here is min(register term, LDS term) on each arm -- see occupancy_terms. The
+    # drop is only THIS suspect's when the anchor's binding term is the register one; an
+    # LDS-bound drop was raised on lost_layout above, and firing it here as well would hand the
+    # author a register-allocator story about a shared-memory regression.
+    oc, oa = occ_ev["waves_per_simd"]["champion"], occ_ev["waves_per_simd"]["anchor"]
+    if occ_ev["dropped"] and not occ_ev["anchor_bound_by"].startswith("LDS"):
+        reasons["occupancy_dropped"] = {
+            "champion": oc, "anchor": oa,
+            "mechanism": (f"binding occupancy {oc} -> {oa} waves/SIMD, anchor bound by its "
+                          f"{occ_ev['anchor_bound_by']} term (register "
+                          f"{occ_ev['register_term']['anchor']}, LDS "
+                          f"{occ_ev['lds_term']['anchor']}) -- an allocation debt, not a "
+                          f"layout one")}
     ac, aa = champ_asm["ds_addr"], anch_asm["ds_addr"]
     # remat is the mechanism itself: an address recomputed into a register immediately before
     # the read that consumes it. A rise here IS the serial chain, whatever the counts say.
@@ -295,20 +448,53 @@ def attribute(champ_asm: dict | None, anch_asm: dict | None,
                 "evidence": {"instruction_multiset_unchanged": bool(multiset_same),
                              "instructions": {"champion": inst_c, "anchor": inst_a},
                              "ds_addr": ev_addr,
+                             "occupancy": occ_ev,
                              **reasons}})
     return out
 
 
 def evaluate(champion_ms: float, anchor_ms: float, threshold: float, suspects: list[dict]) -> dict:
-    ratio = champion_ms / anchor_ms if anchor_ms else None
-    cleared = ratio is not None and ratio >= threshold
+    # A non-finite input is a broken measurement, not a fast one. `inf / 1.0` is `inf`, which
+    # is `>= threshold`, so an unpopulated field or a divide-by-zero upstream used to CLEAR the
+    # gate outright -- the one direction a gate must never fail in. NaN happens to fall the
+    # safe way (`nan >= x` is False) but is refused here too, so neither depends on luck.
+    bad = {k: v for k, v in (("champion_ms", champion_ms), ("anchor_ms", anchor_ms))
+           if not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0}
+    if bad:
+        return {
+            "champion_ms": champion_ms, "anchor_ms": anchor_ms,
+            "ratio_champion_over_anchor": None, "threshold": threshold,
+            "gate": "INVALID INPUT", "suspects": suspects, "suspected": [], "unattributed": [],
+            "invalid": bad, "round_outcome_allowed": "none",
+            "note": ("A timing that is not a finite positive number is a broken measurement, "
+                     f"not a result: {bad}. This gate refuses rather than ranking it -- an "
+                     "infinity clears any threshold, and a zero or a negative makes the ratio "
+                     "meaningless. Re-measure before re-running."),
+        }
+    ratio = champion_ms / anchor_ms
+    cleared = ratio >= threshold
     named = [s["suspect"] for s in suspects if s["verdict"] == "SUSPECTED"]
     unknown = [s["suspect"] for s in suspects if s["verdict"] == "UNKNOWN"]
+    outside = any(s["suspect"] == "residual_outside_kernel" for s in suspects)
+    # provenance is a statement about the COMPILED artifacts, so the asserted outside-kernel
+    # disposition is not part of its denominator -- otherwise asserting it would upgrade a
+    # timings-only call to "artifact-backed", which is exactly backwards.
+    suspects = [s for s in suspects if s["suspect"] != "residual_outside_kernel"] + \
+               [s for s in suspects if s["suspect"] == "residual_outside_kernel"]
+    in_kernel = [s for s in suspects if s["suspect"] in IN_KERNEL_SUSPECTS]
+    unknown_in_kernel = [s["suspect"] for s in in_kernel if s["verdict"] == "UNKNOWN"]
+    # Whether ANY compiled artifact backed this call. With none, the verdict rests on two
+    # free-floating floats that nothing ties to a champion, a build or a box -- true as
+    # arithmetic, unfalsifiable as evidence. It is reported rather than silently folded into
+    # a PASS, because a CLEARED with no provenance is the shape a fabricated parity claim has.
+    provenance = ("artifact-backed" if in_kernel and len(unknown_in_kernel) < len(in_kernel)
+                  else "TIMINGS ONLY")
     res = {
         "champion_ms": champion_ms, "anchor_ms": anchor_ms,
-        "ratio_champion_over_anchor": round(ratio, 4) if ratio else None,
+        "ratio_champion_over_anchor": round(ratio, 4),
         "threshold": threshold,
         "gate": "CLEARED" if cleared else "NOT CLEARED",
+        "provenance": provenance,
         "suspects": suspects,
         "suspected": named,
         "unattributed": unknown,
@@ -318,6 +504,14 @@ def evaluate(champion_ms: float, anchor_ms: float, threshold: float, suspects: l
         res["note"] = ("The debt is paid (or was never taken). Climbing is allowed, and a round "
                        "may be scored as a win. Reaching parity is NOT itself a win: it is "
                        "getting back to a number the front end already measured.")
+        if provenance != "artifact-backed":
+            res["round_outcome_allowed"] = "win (UNVERIFIED PROVENANCE)"
+            res["note"] += (
+                " PROVENANCE: this call passed no .amdgcn and no .ttgir, so the verdict is two "
+                "numbers you typed. Nothing here checked that they came from the asserted "
+                "champion, from this box, or from a build that still exists. Quote it with that "
+                "caveat, or re-run with --champion-asm/--anchor-asm (and --*-ttgir) so the "
+                "CLEARED is backed by the artifacts it claims to be about.")
         if ratio > 1.0:
             res["note"] += (" The anchor is FASTER than the champion -- attribute that too "
                             "rather than pocketing it; it is usually compiler-owned staging "
@@ -336,14 +530,38 @@ def evaluate(champion_ms: float, anchor_ms: float, threshold: float, suspects: l
             res["note"] += (" No suspect fired, which is itself a finding: pass the artifacts "
                             "(--champion-asm/--anchor-asm/--*-ttgir) if you have not, and if "
                             "they are all CLEARED then the gap is not in this taxonomy -- "
-                            "profile it before authoring anything.")
+                            "profile it before authoring anything. One common reason all three "
+                            "clear is that the residual is NOT IN THIS KERNEL: decompose the "
+                            "wall time into wrapper / host / kernel and control for per-node "
+                            "dispatch with an empty kernel at the same grid. If that is what "
+                            "you find, record it with --residual-outside-kernel rather than "
+                            "leaving it unattributed.")
+    if outside:
+        res["disposition"] = "residual_outside_kernel"
+        res["round_outcome_allowed"] += " (residual attributed OUTSIDE the kernel boundary)"
+        res["note"] += (
+            " DISPOSITION residual_outside_kernel: you have asserted that the remaining gap "
+            "lives outside the kernel this gate reads -- dispatch, wrapper/host work, an extra "
+            "launch inside the timed region, or placement. This does NOT clear the gate and is "
+            "not a pass; it records WHERE the residual is so the run stops trying to close it "
+            "with an in-kernel layer, which is the expensive failure here. Carry it into the "
+            "close as the disposition (with `parity_unreached` in caveats[] if the ratio is "
+            "still under threshold), and carry the evidence with it: the wrapper/host/kernel "
+            "decomposition, and for a dispatch claim the empty-kernel controls at the same grid "
+            "and at grid (1,1,1). An assertion with no control behind it is a story, and this "
+            "gate cannot tell the difference -- your reader can.")
     return res
 
 
 def _fmt(res: dict) -> str:
-    L = [f"=== parity gate: champion {res['champion_ms']:.4f} ms / anchor {res['anchor_ms']:.4f} ms"
-         f" = {res['ratio_champion_over_anchor']}  (threshold {res['threshold']}) ===",
-         f"  {res['gate']}   round outcome allowed: {res['round_outcome_allowed']}"]
+    if res["gate"] == "INVALID INPUT":
+        return (f"=== parity gate: INVALID INPUT {res['invalid']} ===\n"
+                f"  round outcome allowed: {res['round_outcome_allowed']}\n\n  {res['note']}")
+    L = [(f"=== parity gate: champion {res['champion_ms']:.4f} ms"
+          f" / anchor {res['anchor_ms']:.4f} ms = {res['ratio_champion_over_anchor']}"
+          f"  (threshold {res['threshold']}) ==="),
+         (f"  {res['gate']}   round outcome allowed: {res['round_outcome_allowed']}"
+          f"   provenance: {res['provenance']}")]
     for s in res["suspects"]:
         L.append(f"  [{s['verdict']:9s}] {s['suspect']}")
         ev = s.get("evidence", {})
@@ -459,7 +677,102 @@ def _selftest() -> int:
     assert res["unattributed"] == ["lost_pipeline", "lost_layout", "lost_RA"], res
     assert "No suspect fired" in res["note"], res["note"]
 
-    print("parity_gate selftest OK")
+    # 7. A NON-FINITE timing must not clear the gate. `inf / 1.0 >= 0.95` is True, so an
+    #    unpopulated field used to CLEAR outright -- the one direction a gate cannot fail in.
+    for bad_c, bad_a, why in ((float("inf"), 1.0, "inf champion"),
+                              (float("nan"), 1.0, "nan champion"),
+                              (1.0, 0.0, "zero anchor"),
+                              (-1.0, 1.0, "negative champion")):
+        r = evaluate(bad_c, bad_a, 0.95, attribute(None, None, None, None))
+        assert r["gate"] == "INVALID INPUT", (why, r["gate"])
+        assert r["round_outcome_allowed"] == "none", (why, r)
+    assert _fmt(evaluate(float("inf"), 1.0, 0.95, [])).startswith("=== parity gate: INVALID")
+
+    # 8. a CLEARED reached with no artifact at all says so. It stays exit-0 (the ratio really
+    #    does meet the threshold) but must never read as an artifact-backed verdict.
+    r = evaluate(2.0, 1.0, 0.95, attribute(None, None, None, None))
+    assert r["gate"] == "CLEARED" and r["provenance"] == "TIMINGS ONLY", r
+    assert "UNVERIFIED PROVENANCE" in r["round_outcome_allowed"], r
+    assert "two numbers you typed" in r["note"], r["note"]
+    r = evaluate(2.0, 1.0, 0.95, attribute(cf, af, None, None))
+    assert r["provenance"] == "artifact-backed", r
+    assert "UNVERIFIED" not in r["round_outcome_allowed"], r
+
+    # 9. the fourth disposition: asserted, never inferred. It records WHERE the residual is
+    #    without clearing anything, and it must not upgrade provenance.
+    r = evaluate(2.0, 4.0, 0.95, attribute(None, None, None, None))
+    assert "disposition" not in r, r          # never inferred
+    assert "--residual-outside-kernel" in r["note"], r["note"]   # but it IS discoverable
+    r = evaluate(2.0, 4.0, 0.95,
+                 attribute(None, None, None, None,
+                           outside_kernel="wrapper/host/kernel split + empty-kernel control"))
+    assert r["gate"] == "NOT CLEARED", r      # asserting it does not clear the gate
+    assert r["disposition"] == "residual_outside_kernel", r
+    assert r["round_outcome_allowed"].startswith("recovery"), r
+    assert "OUTSIDE the kernel boundary" in r["round_outcome_allowed"], r
+    assert r["provenance"] == "TIMINGS ONLY", r   # an assertion is not an artifact
+    assert r["unattributed"] == ["lost_pipeline", "lost_layout", "lost_RA"], r
+    assert "residual_outside_kernel" in r["suspected"], r
+    r = evaluate(2.0, 1.0, 0.95, attribute(cf, af, None, None, outside_kernel="dispatch floor"))
+    assert r["gate"] == "CLEARED" and r["disposition"] == "residual_outside_kernel", r
+    assert r["provenance"] == "artifact-backed", r
+    assert "OUTSIDE the kernel boundary" in _fmt(r), _fmt(r)
+
+    # --- 9-13: occupancy is min(register, LDS), and every missing input is REFUSED ---------
+    #
+    # 9. The fixtures above name no target, so there is NO LDS term and the gate says so. The
+    #    occupancy it reports is the register term, explicitly labelled -- not silently passed
+    #    off as the kernel's occupancy, and not computed against a guessed LDS/CU.
+    assert cf["arch"] is None and cf["occupancy_lds_term"] is None, cf
+    assert cf["occupancy_waves_per_simd"] == 1 and cf["occupancy_register_term"] == 1, cf
+    assert cf["occupancy_bound_by"] == "register (LDS term NOT computed)", cf
+    assert cf["occupancy_terms_detail"]["why"], cf
+    ra9 = next(s for s in attribute(cf, af, None, None) if s["suspect"] == "lost_RA")
+    assert "NEITHER arm has an LDS term" in ra9["evidence"]["occupancy"]["warning"], ra9
+
+    # 10. THE 2.5x HAZARD: an untargeted dump must not borrow gfx942's 64 KiB/CU. Adding LDS
+    #     bytes alone changes nothing, because the divisor is still unknown -- refusal here is
+    #     the whole point. A default would not read as an error, it would read as a verdict.
+    t10 = occupancy_terms(champ, lds_bytes=32768, workgroup_size=256)
+    assert t10["lds_term"] is None and t10["arch"] is None, t10
+    assert "unknown" in t10["lds_detail"], t10
+
+    # 11. Name the arch and the LDS term appears -- and when it BINDS, the min takes it. 160
+    #     KiB/CU on gfx950 // 65536 B/wg = 2 wg/CU, x 4 waves/wg / 4 SIMD = 2 waves/SIMD, under
+    #     a `; Occupancy: 8`. The register-only reading would have reported 8.
+    g950 = '\t.amdgcn_target "amdgcn-amd-amdhsa--gfx950"\n; Occupancy: 8\n'
+    t11 = occupancy_terms(g950, lds_bytes=65536, workgroup_size=256)
+    if t11["lds_term"] is not None:          # needs perf_knowledge/hardware/data/hw_constants.json
+        assert t11["register_term"] == 8, t11
+        assert t11["waves_per_simd"] == t11["lds_term"] < 8, t11
+        assert t11["bound_by"] == "LDS", t11
+
+        # 12. An LDS-bound drop is routed to lost_layout, NOT to the register allocator. Same
+        #     `; Occupancy: 8` on both arms: register-vs-register sees nothing at all here.
+        c12 = asm_facts(g950 + champ, 16384, 256)
+        a12 = asm_facts(g950 + anch, 65536, 256)
+        assert c12["occupancy_register_term"] == a12["occupancy_register_term"] == 8, (c12, a12)
+        assert a12["occupancy_waves_per_simd"] < c12["occupancy_waves_per_simd"], (c12, a12)
+        sus12 = attribute(c12, a12, None, None)
+        lay12 = next(s for s in sus12 if s["suspect"] == "lost_layout")
+        assert lay12["verdict"] == "SUSPECTED", lay12
+        assert any("LDS-BOUND" in s for s in lay12["evidence"]["shifts"]), lay12["evidence"]
+        ra12 = next(s for s in sus12 if s["suspect"] == "lost_RA")
+        assert "occupancy_dropped" not in ra12["evidence"], ra12["evidence"]
+        assert _fmt(evaluate(2.0, 4.0, 0.95, sus12))            # renders without raising
+
+    # 13. A group-segment field that STATES 0 is a refusal, not a zero. Both spellings of
+    #     "this dump does not give me the number" must land on None, or the 0 becomes a
+    #     divisor and `waves_by_lds` is asked to divide an LDS budget by nothing.
+    kd0 = '\t.amdgcn_target "amdgcn-amd-amdhsa--gfx950"\n\t.amdhsa_group_segment_fixed_size 0\n'
+    b13, s13 = lds_facts(kd0)
+    assert b13 is None and s13.startswith("UNAVAILABLE"), (b13, s13)
+    assert "launch LDS" in s13, s13
+    assert occupancy_terms(kd0)["lds_term"] is None, occupancy_terms(kd0)
+    b13b, s13b = lds_facts('\t.amdhsa_group_segment_fixed_size 38144\n')
+    assert b13b == 38144 and "group_segment_fixed_size" in s13b, (b13b, s13b)
+
+    print("[parity_gate] SELFTEST PASS")
     return 0
 
 
@@ -477,6 +790,31 @@ def main() -> int:
                          "asm's LDSByteSize is a structural 0 on Triton kernels, so without this "
                          "the LDS half of lost_layout is untested.")
     ap.add_argument("--anchor-lds", type=int)
+    ap.add_argument("--residual-outside-kernel", metavar="EVIDENCE",
+                    help="assert the FOURTH disposition: the remaining gap is not inside the "
+                         "kernel this gate reads (per-node dispatch, wrapper/host work, an extra "
+                         "launch inside the timed region, allocator placement). Pass the "
+                         "evidence as the value -- a wall-time decomposition into "
+                         "wrapper/host/kernel, plus empty-kernel controls at the same grid and "
+                         "at grid (1,1,1) when the claim is dispatch. It does NOT clear the "
+                         "gate; it records where the residual lives so no in-kernel layer is "
+                         "spent chasing it.")
+
+    # The LDS term needs an arch (for LDS/CU and SIMDs/CU) and a workgroup size on top of the
+    # bytes. Each is read from the dump when the dump states it, and REFUSED -- not guessed --
+    # when it does not. These two flags exist so a refusal has a remedy: state the fact, or go
+    # without the LDS term. Neither has a default, because a wrong LDS/CU divisor inside a
+    # min() does not look wrong, it looks like a verdict.
+    ap.add_argument("--champion-arch",
+                    help="gfx target, when the dump names none (a stripped .hsaco objdump). "
+                         "Without it there is no LDS term -- it is never guessed, because "
+                         "gfx942 is 64 KiB LDS/CU and gfx950 is 160 KiB: a 2.5x wrong divisor.")
+    ap.add_argument("--anchor-arch")
+    ap.add_argument("--champion-workgroup-size", type=int,
+                    help="threads/workgroup AS LAUNCHED. Falls back to the asm's "
+                         ".max_flat_workgroup_size, which is the compile-time BOUND: a kernel "
+                         "launched below it has more workgroups per CU than that implies.")
+    ap.add_argument("--anchor-workgroup-size", type=int)
     ap.add_argument("--threshold", type=float, default=0.95)
     ap.add_argument("--json")
     ap.add_argument("--selftest", action="store_true")
@@ -491,10 +829,13 @@ def main() -> int:
 
     ca, aa = _read(a.champion_asm), _read(a.anchor_asm)
     ct, at = _read(a.champion_ttgir), _read(a.anchor_ttgir)
-    suspects = attribute(asm_facts(ca, a.champion_lds) if ca else None,
-                         asm_facts(aa, a.anchor_lds) if aa else None,
+    suspects = attribute(asm_facts(ca, a.champion_lds, a.champion_workgroup_size,
+                                   a.champion_arch) if ca else None,
+                         asm_facts(aa, a.anchor_lds, a.anchor_workgroup_size,
+                                   a.anchor_arch) if aa else None,
                          ttgir_pipeline_facts(ct) if ct else None,
-                         ttgir_pipeline_facts(at) if at else None)
+                         ttgir_pipeline_facts(at) if at else None,
+                         outside_kernel=a.residual_outside_kernel)
     res = evaluate(a.champion_ms, a.anchor_ms, a.threshold, suspects)
     print(_fmt(res))
     if a.json:

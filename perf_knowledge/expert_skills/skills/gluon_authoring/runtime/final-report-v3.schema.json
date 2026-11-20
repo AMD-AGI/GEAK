@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tritongluonagentskills.local/schemas/final-report-v3.json",
+  "title": "Portable canonical optimization final report",
+  "description": "Cross-pack projection consumed by lint, audit, fleet acceptance, and dashboards. Lifecycle-specific validation is performed by canonical_record.py.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema",
+    "run_id",
+    "generation",
+    "lifecycle_profile",
+    "stage",
+    "outcome",
+    "arbitration",
+    "status",
+    "refs",
+    "audit",
+    "provenance",
+    "integrity",
+    "caveats",
+    "deferred",
+    "known_wrong"
+  ],
+  "properties": {
+    "schema": {
+      "const": "kernel_opt.final_report/3"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "lifecycle_profile": {
+      "enum": [
+        "front-end",
+        "deep-consumer",
+        "direct-owner",
+        "blocked"
+      ]
+    },
+    "stage": {
+      "type": "string",
+      "minLength": 1
+    },
+    "outcome": {
+      "type": "string",
+      "minLength": 1
+    },
+    "arbitration": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "minLength": 1
+    },
+    "refs": {
+      "type": "object"
+    },
+    "measurement": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "headline": {
+      "type": "object"
+    },
+    "served_range": {
+      "type": "array"
+    },
+    "audit": {
+      "type": "object"
+    },
+    "provenance": {
+      "type": "object",
+      "required": [
+        "receipts"
+      ],
+      "properties": {
+        "receipts": {
+          "type": "array"
+        }
+      }
+    },
+    "integrity": {
+      "type": "object",
+      "required": [
+        "source_schema",
+        "normalization_status",
+        "legacy_unverified",
+        "eligible_clean"
+      ]
+    },
+    "caveats": {
+      "type": "array"
+    },
+    "deferred": {
+      "type": "array"
+    },
+    "known_wrong": {
+      "type": "array"
+    }
+  }
+}

@@ -1,0 +1,30 @@
+schema: tile.amd-runtime-contract/1
+host_path_policy:
+  source: fleet launch arguments or TILE_HOST_ALLOWED_ROOTS
+  required: true
+  semantics: every host write path must be beneath one declared root
+
+container:
+  shared_across_kernels: true
+  captain_may_mutate: false
+  required_runtime_env_schema: tile.runtime-env/1
+  required_readiness_schema: tile.image-health/1
+
+profiles:
+  amd-triton-gluon:
+    required_capabilities:
+      - runtime_env
+      - triton_import
+      - kernel_trace
+      - profile
+      - analyze
+      - att
+      - static_isa
+      - hardware_assets
+      - parse
+  amd-tilelang:
+    required_capabilities: [runtime_env, kernel_trace, att, static_isa, hardware_assets, parse]
+  amd-flydsl:
+    required_capabilities: [runtime_env, kernel_trace, att, static_isa, hardware_assets, parse]
+  amd-hip:
+    required_capabilities: [runtime_env, kernel_trace, att, static_isa, hardware_assets, parse]

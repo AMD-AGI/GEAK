@@ -78,7 +78,9 @@ _check_sources_on_exit() {
 }
 trap _check_sources_on_exit EXIT
 
-LOCK_DIR="${KERNEL_EXTRACT_LOCK_DIR:-/tmp/team_gpu_locks}"
+# ONE team-wide namespace: two runs serialize only if they flock the SAME file. GEAK_GPU_LOCK_DIR
+# (also read by gpu_lease.py) exists for hermetic tests and must stay unset in real runs.
+LOCK_DIR="${GEAK_GPU_LOCK_DIR:-${KERNEL_EXTRACT_LOCK_DIR:-/tmp/team_gpu_locks}}"
 # Correlation ids for the use-log, set by an OUTER inv_record.py (Eikos phase 2a). They are passed in,
 # never derived from time or PID, and only well-formed values are written. Unset -> the log line is
 # byte-identical to before.
@@ -321,6 +323,7 @@ elif [ -n "${POOL_FD:-}" ]; then
     # Pool mode: (1) this process ALREADY holds the lane exclusively (and verified it idle).
     # Re-locking the same file from the same process would be a no-op at best, so just run --
     # the lane stays held until we exit, which is what guarantees no two evaluations share a GPU.
+    export GEAK_GPU_LOCK_HELD="$GPU_ID"   # nested kernel_tools reuse this lock
     export HIP_VISIBLE_DEVICES="$GPU_ID"
     _pin_compile_arch || exit 1   # (3) after the selected GPU is visible
     "$@" {POOL_FD}>&-   # this shell's copy holds the lane; see `200>&-` below
@@ -357,6 +360,7 @@ else
         [ -n "${GEAK_GPU_USE_LOG:-}" ] && \
             echo "{\"t\":$(date +%s),\"gpu\":$GPU_ID,\"pool\":\"$GPU_SPEC\",\"pid\":$$,\"mode\":\"pin\",\"wait_s\":$(( SECONDS - _wait_t0 ))${_ID_FIELDS}}" \
                 >> "$GEAK_GPU_USE_LOG" 2>/dev/null
+        export GEAK_GPU_LOCK_HELD="$GPU_ID"   # nested kernel_tools reuse this lock
         export HIP_VISIBLE_DEVICES="$GPU_ID"
         _pin_compile_arch || exit 1   # (3) after the selected GPU is visible
         # Not inherited by the command: bash sets no close-on-exec here, so any descendant that

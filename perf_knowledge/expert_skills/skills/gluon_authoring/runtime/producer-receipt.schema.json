@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tritongluonagentskills.local/schemas/producer-receipt-v1.json",
+  "title": "Optimization artifact producer receipt",
+  "description": "Process-time provenance for a core optimization artifact. Fallback producers must declare their reason and contracts and use the same invariant validator.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "receipt_id",
+    "artifact_role",
+    "produced_at",
+    "timing",
+    "producer",
+    "artifact",
+    "invariant_validator"
+  ],
+  "properties": {
+    "schema": {
+      "const": "kernel_opt.producer_receipt/1"
+    },
+    "receipt_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "artifact_role": {
+      "enum": [
+        "sweep",
+        "branch",
+        "arm",
+        "champion",
+        "audit",
+        "final_report"
+      ]
+    },
+    "produced_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "timing": {
+      "enum": [
+        "process_time",
+        "late_reconstruction"
+      ]
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tool",
+        "executable_sha256",
+        "mode"
+      ],
+      "properties": {
+        "tool": {
+          "type": "string",
+          "minLength": 1
+        },
+        "executable_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "mode": {
+          "enum": [
+            "primary",
+            "fallback"
+          ]
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ref",
+        "schema",
+        "sha256"
+      ],
+      "properties": {
+        "ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "invariant_validator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tool",
+        "executable_sha256",
+        "schema",
+        "passed"
+      ],
+      "properties": {
+        "tool": {
+          "type": "string",
+          "minLength": 1
+        },
+        "executable_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "passed": {
+          "const": true
+        }
+      }
+    },
+    "fallback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reason",
+        "input_schema",
+        "output_schema"
+      ],
+      "properties": {
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "input_schema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "output_schema": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "producer": {
+            "properties": {
+              "mode": {
+                "const": "fallback"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "fallback"
+        ]
+      }
+    }
+  ]
+}

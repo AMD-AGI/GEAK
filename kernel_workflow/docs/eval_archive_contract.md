@@ -8,6 +8,7 @@ Outer harnesses (AgentKernelArena / Hyperloom goal loops) MUST NOT full-tree
 - `**/*.so`, `**/*.o`
 - `**/aiter/jit/**`, `**/aiter/aiter/jit/**`
 - `**/.torch_ext/**`, `**/build/**`, `**/__pycache__/**`
+- `**/.rocprofv3/**`, `**/.tile-runtime/**` (profiler output; the gluon expert skill's tool/IR cache)
 - Prefer archiving only: `final_patch.diff`, metrics JSON, `STATE/`,
   `best_patch.diff` per direction, and `storage_telemetry.jsonl`.
 

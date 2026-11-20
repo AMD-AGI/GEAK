@@ -1,0 +1,5 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "Compatibility reference. The profiling payload contract is owned by GEAK shared kernel tools.",
+  "$ref": "../../../../../kernel_workflow/scripts/kernel_tools/profile_payload.schema.json"
+}

@@ -262,6 +262,23 @@ const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
   (KERNEL_KNOWLEDGE_DIR ? KERNEL_KNOWLEDGE_DIR + '/expert_skills' : '')).replace(/\/+$/, '');
 // Only planning + authoring roles consult skills; every other role gets no injection.
 const EXPERT_SKILL_ROLES = new Set(['tech_lead', 'author_engineer', 'engineer', 'deep_engineer']);
+// Hard gates an expert skill's caller may declare (OPT-IN; none by default, so a run without
+// `skill_gates` is byte-identical). Each gate is {id, run, pass?, setup?}: `run` is a bash command
+// executed on a fresh copy of CANONICAL with the verified candidate's patch applied; it passes when it
+// exits with one of `pass` (default [0]); `setup` is a one-time instruction (e.g. write a checker the
+// command needs) carried out by the gate agent. Placeholders: {CANDIDATE} {BASELINE} {EVAL_DIR}
+// {GPU_ID}. A candidate failing any gate is dropped before it can be ranked, integrated or committed;
+// a gate agent that returns nothing fails closed.
+const SKILL_GATES = (() => {
+  let g = A.skill_gates;
+  if (g == null || g === '') return [];
+  if (typeof g === 'string') g = JSON.parse(g);
+  if (!Array.isArray(g) || g.some(x => !x || typeof x.id !== 'string' || typeof x.run !== 'string')) {
+    throw new Error('args.skill_gates must be a list of {id, run, pass?, setup?}');
+  }
+  return g.map(x => ({ id: x.id, run: x.run, pass: Array.isArray(x.pass) && x.pass.length ? x.pass : [0],
+    setup: typeof x.setup === 'string' ? x.setup : '' }));
+})();
 // Expected-identity isolation must apply before Setup (no CDNA skills/KB on a declared isolated run).
 // Detected identity is OR'd in after director setup — do not read GFX here (TDZ).
 let SKILLS_ISOLATE = gpuFamily(EXPECTED_GFX).isolate;
@@ -2311,6 +2328,39 @@ function expertSkillsBlock(role) {
     `A/B vs the oracle, never reducing a result below the measured baseline.`;
 }
 
+// Run the declared skill gates on one verified candidate (see SKILL_GATES). Fails closed.
+const SKILL_GATE_SCHEMA = obj({
+  results: { type: 'array', items: obj({ id: { type: 'string' }, exit_code: { type: ['number', 'null'] },
+    note: { type: 'string' } }, ['id', 'exit_code']) },
+}, ['results']);
+async function skillGateCheck(id, patch, dir) {
+  const fill = (t) => String(t).split('{CANDIDATE}').join(`${dir}/ws`).split('{BASELINE}').join(CANONICAL)
+    .split('{EVAL_DIR}').join(EVAL_DIR).split('{GPU_ID}').join(GPU_POOL);
+  const r = await agentT(
+    `You are the skill-gate runner for candidate ${id}. Build the candidate, then run each gate EXACTLY as ` +
+    `written and report its exit code. Do not edit the candidate, the gate commands or their thresholds.
+\`\`\`bash
+mkdir -p ${dir}
+bash ${WORKFLOW_DIR}/scripts/materialize_workspace.sh --src ${CANONICAL} --dst ${dir}/ws --shared-root ${EVAL_DIR}/_shared --link-aiter
+cd ${dir}/ws && (git apply ${patch} || git apply --3way ${patch})
+\`\`\`
+` + SKILL_GATES.map((g, i) => `Gate ${i + 1} \`${g.id}\`` +
+      (g.setup ? ` (one-time setup, skip if already done: ${fill(g.setup)})` : '') +
+      `:\n\`\`\`bash\n${fill(g.run)}\n\`\`\``).join('\n') +
+    `\nEvery GPU command runs under \`bash ${WORKFLOW_DIR}/scripts/gpu_lock.sh ${GPU_POOL} <cmd>\`. ` +
+    'Return {"results": [{"id", "exit_code", "note"}]} with one row per gate.',
+    { phase: 'Verify', label: `skill_gates ${id}`, schema: SKILL_GATE_SCHEMA });
+  const rows = (r && Array.isArray(r.results)) ? r.results : [];
+  const failed = SKILL_GATES.filter(g => {
+    const row = rows.find(x => x.id === g.id);
+    return !row || !g.pass.includes(row.exit_code);
+  });
+  const note = !r ? 'gate runner returned nothing (fail closed)'
+    : failed.length ? `failed ${failed.map(g => g.id).join(', ')}` : 'all passed';
+  log(`  [skill gates] ${id}: ${note}`);
+  return { pass: !failed.length && !!r, note };
+}
+
 // Appended to every role prompt only for multi-GPU jobs, so single-GPU prompts are unchanged.
 function multiGpuBlock(role) {
   if (!GPU_JOB) return '';
@@ -3225,6 +3275,13 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
   );
 
   const clean = results.filter(Boolean);
+  if (SKILL_GATES.length) {
+    await parallel(clean.filter(r => r.ver && says(r.ver.status, 'verified') && says(r.ver.correctness, 'pass'))
+      .map(r => async () => {
+        const g = await skillGateCheck(`${r.d.id}`, r.patch, `${r.d.out_dir}/skill_gates`);
+        if (!g.pass) r.ver = { ...r.ver, status: 'skill_gate_failed', notes: `skill gates: ${g.note}` };
+      }));
+  }
   if (EVO) await EVO.recordBatch(clean);
   const verified = clean.filter(r => r.ver && says(r.ver.status, 'verified') &&
     says(r.ver.correctness, 'pass') && primSpeedup(r.ver) > CANDIDATE_FLOOR);
@@ -3290,8 +3347,13 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
     const integPrim = integrate && integrate.best ? primSpeedup({
       verified_weighted: integrate.best.weighted, verified_geomean: integrate.best.geomean,
     }) : 0;
+    const integGate = SKILL_GATES.length && integrate && integrate.conclusion === 'improved' && integrate.best &&
+      integrate.best.patch_file && integPrim > Math.max(...candidates.map(c => c.geomean))
+      ? await skillGateCheck(`r${round}_integrated`, integrate.best.patch_file, `${EVAL_DIR}/round_${round}/integrate/skill_gates`)
+      : { pass: true };
+    if (!integGate.pass) log(`Round ${round}: integrated candidate dropped by skill gates (${integGate.note}).`);
     if (integrate && (!EVO || integrateCustody) && integrate.conclusion === 'improved' && integrate.best &&
-      integPrim > Math.max(...candidates.map(c => c.geomean))) {
+      integGate.pass && integPrim > Math.max(...candidates.map(c => c.geomean))) {
       candidates.push({
         source: 'integrated', id: `r${round}_integrated`, title: 'integrated', specialty: 'integrate',
         geomean: integPrim, geomean_unweighted: integrate.best.geomean,

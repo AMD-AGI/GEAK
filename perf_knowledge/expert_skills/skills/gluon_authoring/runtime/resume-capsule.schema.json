@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tritongluonagentskills.local/schemas/resume-capsule-v1.json",
+  "title": "Resume capsule",
+  "description": "A disposable, bounded rehydration index. It contains typed references and current identity only; the journal and run-state remain the facts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "run_id",
+    "generation",
+    "role",
+    "stage",
+    "policy_ref",
+    "context_ref",
+    "context_sha256",
+    "checkpoint_ref",
+    "checkpoint_refs",
+    "journal_head_ref",
+    "journal_head_sha256",
+    "recall_ref",
+    "open_obligation_refs",
+    "next_refs",
+    "capsule_sha256"
+  ],
+  "properties": {
+    "schema": {
+      "const": "kernel_opt.resume_capsule/1"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "role": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "stage": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "policy_ref": {
+      "$ref": "https://tritongluonagentskills.local/schemas/artifact-ref-v1.json"
+    },
+    "context_ref": {
+      "$ref": "https://tritongluonagentskills.local/schemas/artifact-ref-v1.json"
+    },
+    "context_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "checkpoint_ref": {
+      "$ref": "https://tritongluonagentskills.local/schemas/artifact-ref-v1.json"
+    },
+    "checkpoint_refs": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "$ref": "https://tritongluonagentskills.local/schemas/artifact-ref-v1.json"
+      }
+    },
+    "journal_head_ref": {
+      "$ref": "https://tritongluonagentskills.local/schemas/artifact-ref-v1.json"
+    },
+    "journal_head_sha256": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "recall_ref": {
+      "$ref": "https://tritongluonagentskills.local/schemas/artifact-ref-v1.json"
+    },
+    "open_obligation_refs": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "$ref": "https://tritongluonagentskills.local/schemas/artifact-ref-v1.json"
+      }
+    },
+    "next_refs": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "$ref": "https://tritongluonagentskills.local/schemas/artifact-ref-v1.json"
+      }
+    },
+    "capsule_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "x-max-canonical-json-bytes": 8192
+}
