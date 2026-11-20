@@ -21,19 +21,6 @@ Everything else — building the overlay, proving it loaded, the arms, the verdi
 identical, and the field names of any particular harness are scenario config, not
 knowledge that belongs in this directory.
 
-## Why this stage cannot be skipped
-
-The real failure mode here is not "no speedup was found". It is **an operator win with no
-system movement**, from this machine's own history:
-
-| Change | Operator / microbenchmark | Whole-machine e2e |
-| --- | --- | --- |
-| FlyDSL MoE sorting | 1.80× | **+0.2356%** |
-| MoE split4 | 1.342× (local replay) | **−0.0872%** |
-
-Both were genuine, both were correct, neither moved the machine. Optimize produces
-**candidates**; only this stage produces results.
-
 ## 1. Build one overlay
 
 `site-packages` is never modified. GEAK's `e2e_workflow/scripts/overlay_setup.py` builds a
