@@ -6,7 +6,7 @@
 //
 //   1. The AgentX extractor's prompt and inputs are main's (A23): the arguments e2e reads, the
 //      kernel_extractor:prepare inputs and every rendered role prompt equal those of main's
-//      e2e_workflow.js (a86bbc90) under the same arguments. A multi-rank UT leases SERVING_GPU, which
+//      e2e_workflow.js (d8bb12c8) under the same arguments. A multi-rank UT leases SERVING_GPU, which
 //      the UT module's own documents say; the workflow adds nothing for it.
 //   2. makeSem refuses a request its pool can never hold instead of waiting forever.
 //   3. After the envelope / carried state is read, a multi-GPU candidate whose path in this run cannot
@@ -17,7 +17,7 @@
 //      lane reads the UT's time limit from the task. Single-GPU candidates keep byte-identical call objects.
 //
 // The code under test is EXTRACTED from the real source and run against stubs. main's e2e_workflow.js
-// is read from $GEAK_MAIN_TREE, else `git show a86bbc90:`, else /src/commits/a86bbc90; without any of
+// is read from $GEAK_MAIN_TREE, else `git show d8bb12c8:`, else /src/commits/d8bb12c8; without any of
 // them section 1 compares with pinned digests of main's renderings.
 //
 // Run:  node e2e_workflow/scripts/test_multi_gpu_dispatch.js
@@ -30,7 +30,7 @@ const { execFileSync } = require('child_process');
 const ROOT = path.resolve(__dirname, '..');
 const src = fs.readFileSync(path.join(ROOT, 'e2e_workflow.js'), 'utf8');
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-const MAIN_COMMIT = 'a86bbc90';
+const MAIN_COMMIT = 'd8bb12c8';
 const E2E_REL = 'e2e_workflow/e2e_workflow.js';
 function readMain() {
   const sources = [];
@@ -94,7 +94,7 @@ function singleGpu(name, phase = 'extract') {
   const argsRead = (text) => [...new Set([...text.matchAll(/(?<![\w$.])A\s*(?:\?\.|\.)\s*([A-Za-z_$][\w$]*)/g)].map((m) => m[1])
     .concat([...text.matchAll(/(?<![\w$.])A\s*(?:\?\.)?\[\s*(['"])([^'"]+)\1\s*\]/g)].map((m) => m[2])))].sort();
   // sha256 of the sorted args.* names main's e2e_workflow.js reads.
-  const MAIN_ARGS_SHA256 = '28e61a511d4d652e48acd5ad98ccbfd702b99757a8a51d6598f01a5f24d25d28';
+  const MAIN_ARGS_SHA256 = '91e047926e26dcddb9a24a41ee4844271c64070d6fabd76e12a79234f7a2e5b3';
   if (process.env.PRINT_DIGESTS && MAIN) console.log(`    main args: ${sha(argsRead(MAIN.src))}`);
   ok(sha(argsRead(src)) === MAIN_ARGS_SHA256 && (!MAIN || sha(argsRead(MAIN.src)) === MAIN_ARGS_SHA256),
      'e2e reads exactly main\'s args.* set', MAIN && [argsRead(src).filter((k) => !argsRead(MAIN.src).includes(k)),

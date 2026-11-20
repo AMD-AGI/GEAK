@@ -19,8 +19,8 @@
 //   E. a produced candidate needs per-rank candidate times too.
 //   F. a GPU count Setup finds switches to UT_MR only with the task's declaration.
 //   G. the multi-GPU schemas and the receipt checks on their own.
-// main's lane is read from $GEAK_MAIN_TREE/kernel_workflow/kernel_lane.js, else `git show a86bbc90:`,
-// else /src/commits/a86bbc90. Without any of them A-C compare with pinned digests of main's runs
+// main's lane is read from $GEAK_MAIN_TREE/kernel_workflow/kernel_lane.js, else `git show d8bb12c8:`,
+// else /src/commits/d8bb12c8. Without any of them A-C compare with pinned digests of main's runs
 // (recompute them with main available and PRINT_DIGESTS=1 when a stub here changes).
 // The workflow runtime globals are stubbed as in test_rdna4_policy.js; setTimeout only records the
 // agent wait limit of each call. One `__expose(...)` call is injected after the schema block so the
@@ -35,7 +35,7 @@ const { execFileSync } = require('child_process');
 
 const WF_DIR = path.resolve(__dirname, '..');
 const GEAK_ROOT = path.resolve(WF_DIR, '..');
-const MAIN_COMMIT = 'a86bbc90';
+const MAIN_COMMIT = 'd8bb12c8';
 const LANE_REL = 'kernel_workflow/kernel_lane.js';
 const asBody = (src) => src.replace(/^export const meta/m, 'const meta');
 const SRC = fs.readFileSync(path.join(WF_DIR, 'kernel_lane.js'), 'utf8');
@@ -215,14 +215,15 @@ const view = (run) => ({
 const digest = (v) => crypto.createHash('sha256').update(JSON.stringify(v).split(GEAK_ROOT).join('<GEAK>')).digest('hex');
 // sha256 of view(main's run) per case; checked against main whenever main's lane is readable.
 const PINNED = {
-  single: '2acf57dfae76d38a821d1f201d5899752d65c9c1203454a7d48b95b0798ab5f4',
-  single_declared4: '2acf57dfae76d38a821d1f201d5899752d65c9c1203454a7d48b95b0798ab5f4',
-  torchrun: '2d16647117ebe66bee03b1285973970cb563c52a9a8c4b4ed86920406af58965',
-  torchrun_found: 'e048cd44f122bfcb16445ffcfd3f45ff4470750489216528e6db75a679f9b9b8',
-  torchrun_declared1: '2d16647117ebe66bee03b1285973970cb563c52a9a8c4b4ed86920406af58965',
-  wf_neg: '517c361109652ba61db5b6fba92c25f3b16d94b80ba5b2eb6d6c8682723a7106',
-  wf_neg_rounds: '23b95959e473cfa5d02094e42f8cf0b7fe717542892295893c0ff921a3ab7d26',
-  gen: 'dbb7df647cfac020e11431735c6ad942ab76b01c13f4062c94c8be4710dd2fe2',
+  single: 'baffae59bf67544b1aaf10de348e2c7ba6e51e5ae3e229776b838fede1415949',
+  single_declared4: 'baffae59bf67544b1aaf10de348e2c7ba6e51e5ae3e229776b838fede1415949',
+  torchrun: 'e032039f97320d245addd5c98e3f2f9cde289dca2f5576bab183c1aba82cbbc4',
+  torchrun_found: '36a839b3c2bae51d55e1df2643ff2b6151b68e42702e2b24cdd57c55f672f6f4',
+  torchrun_declared1: 'e032039f97320d245addd5c98e3f2f9cde289dca2f5576bab183c1aba82cbbc4',
+  wf_neg: 'a30ec7e55a26c1c78a4f7a779b25bb33476f2eaf13ad5588d713c54a62ff3e81',
+  wf_neg_rounds: '3b1be9e98c286f455512406a42ddbbb48c37888bc768a568d3904d6c84e9a430',
+  wf_neg_profile_on: '8e2ab446fa482e18b6836fd71be125d4cc44dfb2faf69b13594769210a426b37',
+  gen: '70d27a758583f821639d40a53943f4a4e3635acd3fabffe5ec0748a20924bba0',
 };
 const TASK_DECLARATION_SCHEMA = {
   type: 'object',
@@ -250,8 +251,8 @@ const REPORT_SENTENCE = ' Multi-GPU job: copy each case\'s per-rank baseline tim
 const MR_RETURN_KEYS = ['gpus_per_job', 'timing_receipt', 'timing_receipt_gap'];
 const blockAt = (p) => p.indexOf('\n\n## Multi-GPU job (');
 // The role prompts of a run; on a multi-GPU job each ends with a multi-GPU block (main's too).
-const ROLE_CALLS = ['tech_lead:analyze', 'benchmark_engineer', 'profile_engineer:baseline', 'tech_lead:report',
-  'director:validate'];
+// (profile_engineer:baseline is one more, but only with args.profile=on: section C runs it once.)
+const ROLE_CALLS = ['tech_lead:analyze', 'benchmark_engineer', 'tech_lead:report', 'director:validate'];
 // The view main's lane would give for a UT_MR run of this lane: main's multi-GPU block in place of the
 // UT block (none on the Optimize engineers, which main never gave one), no GPUS_PER_JOB input, no
 // Report sentence, the base schemas, main's Setup schema, no UT_MR log line, none of the 3 keys, and
@@ -322,7 +323,7 @@ const itemsOf = (schema, key) => schema.properties[key].items;
   }
   ok(single.call('director:setup').schema === X.SETUP_SCHEMA, 'director:setup gets SETUP_SCHEMA');
   ok(MR_RETURN_KEYS.every((k) => !(k in single.result)), 'the single-GPU return has no multi-rank key');
-  ok(single.calls.every((c) => c.wait === 3600000), 'every agent waits the default 60 min');
+  ok(single.calls.every((c) => c.wait === 10800000), 'every agent waits the default 3 h');
   {
     // A task that declares 4 GPUs but runs on one is not UT_MR either.
     const answers = { ...SINGLE_DEFAULTS, ...setupWith({ task_declaration: DECL_WF_NEG }) };
@@ -425,12 +426,12 @@ const itemsOf = (schema, key) => schema.properties[key].items;
        neg.call('director:validate').schema === neg.exposed.VALIDATE_SCHEMA_MR,
        'Benchmark / Report / Validate get the multi-rank schemas');
     ok(MR_RETURN_KEYS.every((k) => k in neg.result), 'the return has gpus_per_job, timing_receipt, timing_receipt_gap');
-    ok(neg.calls[0].wait === 3600000 && later.every((c) => c.wait === 5 * 3600 * 1000),
-       'agent wait limit: Setup 60 min, then max(60 min, (3 + 2) x 3600 s) = 300 min',
+    ok(neg.calls[0].wait === 10800000 && later.every((c) => c.wait === 5 * 3600 * 1000),
+       'agent wait limit: Setup 3 h, then max(3 h, (3 + 2) x 3600 s) = 300 min',
        neg.calls.map((c) => c.wait).join(','));
     ok(neg.logs.some((l) => l.startsWith('UT-module multi-GPU task: 4 GPUs per job; the task declares 4 (') &&
        l.includes('Whole-UT limit 3600 s -> GEAK_GPU_RUN_TIMEOUT=3600 on every GPU command; agent wait limit ' +
-       '18000000 ms = max(agent_timeout_ms 3600000, (3 + 2) x 3600 s).')), 'the lane logs the values it chose');
+       '18000000 ms = max(agent_timeout_ms 10800000, (3 + 2) x 3600 s).')), 'the lane logs the values it chose');
     await sameAsMain('wf_neg', WF_NEG, {}, asMain(neg, mainBlock),
       'wf_neg: Setup\'s prompt is main\'s, and later calls differ from main\'s only by the UT block, ' +
       'GPUS_PER_JOB, the *_MR schemas, the Report sentence and the 3 return keys');
@@ -442,6 +443,16 @@ const itemsOf = (schema, key) => schema.properties[key].items;
     await sameAsMain('wf_neg_rounds', rounds, { 'director:validate': { ...DEFAULTS['director:validate'], timing_receipt: receipt(true) } },
       asMain(r, mainBlock), 'with an optimization round: the same differences only (the engineer prompt gains the block)');
 
+    const prof = await runLane(BODY, { ...WF_NEG, profile: 'on' });
+    ok(!neg.call('profile_engineer:baseline') && prof.call('profile_engineer:baseline') &&
+       prof.call('profile_engineer:baseline').prompt.endsWith(UT_BLOCK),
+       'profiling is off by default (no profile call); with profile=on the profile engineer\'s prompt ends with the UT block too');
+    await sameAsMain('wf_neg_profile_on', { ...WF_NEG, profile: 'on' }, {}, asMain(prof, mainBlock),
+      'wf_neg with profile=on: the same differences from main only');
+    const short = await runLane(BODY, WF_NEG, setupWith({ task_declaration: { ...DECL_WF_NEG, ut_total_s: 1200 } }));
+    ok(short.calls.every((c) => c.wait === 10800000) && short.logs.some((l) => l.endsWith(
+       'agent wait limit 10800000 ms = max(agent_timeout_ms 10800000, (3 + 2) x 1200 s).')),
+       'a UT limit of 1200 s keeps the default 3 h: the wait limit is never below agent_timeout_ms');
     const off = await runLane(BODY, { ...WF_NEG, agent_timeout_ms: 0 });
     ok(off.calls.every((c) => c.wait === null) && off.logs.some((l) => l.endsWith('agent wait limit off (agent_timeout_ms 0).')),
        'agent_timeout_ms=0 keeps the wait limit off');
@@ -463,7 +474,8 @@ const itemsOf = (schema, key) => schema.properties[key].items;
     ok(ROLE_CALLS.every((l) => blockAt(gen.call(l).prompt) > 0) && later.some((c) => /^eng /.test(c.label) && blockAt(c.prompt) > 0) &&
        blocked.every((c) => c.prompt.includes(SENTENCE) && c.prompt.includes('`GEAK_GPU_RUN_TIMEOUT=2400`') &&
        !c.prompt.includes('GEAK_GPU_RUN_TIMEOUT=3600')), 'its meta.timeouts.total_s=2400 is the lease limit of every later block');
-    ok(gen.calls[0].wait === 3600000 && later.every((c) => c.wait === 12000000), 'agent wait limit (3 + 2) x 2400 s = 200 min');
+    ok(gen.calls[0].wait === 10800000 && later.every((c) => c.wait === 12000000),
+       'agent wait limit: Setup 3 h, then max(3 h, (3 + 2) x 2400 s) = 200 min');
     ok(MR_RETURN_KEYS.every((k) => k in gen.result) && gen.result.gpus_per_job === 4 && gen.result.timing_receipt_gap === '',
        'the return has the 3 keys');
     const genBlock = gen.calls[0].prompt.slice(blockAt(gen.calls[0].prompt));

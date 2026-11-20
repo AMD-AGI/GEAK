@@ -21,9 +21,9 @@ const profileSchema = new Function(`${schemas}\nreturn PROFILE_SCHEMA;`)();
 const helper = between('async function prepareAgentXKernels(', "\nif (want('setup'))");
 const initial = between("  if (searchClosed('Profile and Strategize')",
   '} else {\n  // Load carried state');
-// main's e2e_workflow.js (a86bbc90), whose extractor call this one must equal (A23): from
-// $GEAK_MAIN_TREE, else `git show a86bbc90:`, else /src/commits/a86bbc90; else a pinned digest.
-const MAIN_COMMIT = 'a86bbc90';
+// main's e2e_workflow.js (d8bb12c8), whose extractor call this one must equal (A23): from
+// $GEAK_MAIN_TREE, else `git show d8bb12c8:`, else /src/commits/d8bb12c8; else a pinned digest.
+const MAIN_COMMIT = 'd8bb12c8';
 const mainSrc = (() => {
   const rel = 'e2e_workflow/e2e_workflow.js';
   const sources = [
