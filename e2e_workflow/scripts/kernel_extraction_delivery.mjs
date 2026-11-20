@@ -23,7 +23,8 @@ export async function loadContract(filename = workflowPath) {
     block('const CALLABLE_SPEC_RX =', 'const PRE_FLAGGED_HEADS ='),
     block('const hasFrozenBaseline =', '// Why an extraction failed'),
   ].join('\n');
-  return new Function(`${code}\nreturn {
+  // The schema block gates the PD fields on the run's IS_PD; the extractor schemas carry none.
+  return new Function(`const IS_PD = false;\n${code}\nreturn {
     EXTRACT_SCHEMA, EXTRACT_OP_SCHEMA, kernelSelectionVerified, hasFrozenBaseline,
     guardUnhydratedVerdicts
   };`)();

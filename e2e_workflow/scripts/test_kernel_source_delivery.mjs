@@ -163,6 +163,18 @@ test('duplicate UT ownership does not schedule the same selected implementation 
   assert.match(ready.failed_tasks[1].reason, /already owned/);
 });
 
+test('under PD the same kernel traced on both engines is still one task', async t => {
+  const f = await preparationFixture(t);
+  await f.write('run/ranking.json', { denominators: { rule: 'gpu_time_mass', weights: { prefill: 0.6, decode: 0.4 } },
+    ranking: [{ device_kernel: 'score', selection_pct_gpu_time: 7.2 }] });
+  f.delivery.tasks = [{ ...f.delivery.tasks[0], kernel: { ...f.kernel, engine: 'prefill' } },
+    { ...f.delivery.tasks[0], kernel: { ...f.kernel, short_name: 'score_on_decode', engine: 'decode' } }];
+  await f.write('run/delivery.json', f.delivery);
+  const ready = await readPreparedKernels(f.root, 'task/run/delivery.json', { engines: ['prefill', 'decode'] });
+  assert.equal(ready.kernel_candidates.length, 1);
+  assert.match(ready.failed_tasks.at(-1).reason, /already owned/);
+});
+
 test('delivery requires UT files within eval and complete declared selected boundaries', async t => {
   const f = await preparationFixture(t);
   assert.equal((await checkPreparedUT({ ...f.kernel, selected_device_kernels: ['score', 'topk'] }, f.result, 'extract')).ok, false);
