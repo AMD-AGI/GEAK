@@ -59,8 +59,10 @@ no GPU; run GPU gates only on the allocated devices, with no probe server holdin
 hand them to the UT wave; do not author them yourself in this session:
 
 ```bash
-python3 "$SKILL_ROOT/scripts/ut_wave.py" plan  --eval-dir "$EVAL_DIR"        # lanes and GPUs
+python3 "$SKILL_ROOT/scripts/ut_wave.py" plan  --eval-dir "$EVAL_DIR" \
+    --serving <deployment serving.json> --gpus <this call's GPUs>      # lanes and GPUs
 python3 "$SKILL_ROOT/scripts/ut_wave.py" start --eval-dir "$EVAL_DIR" --runner "$RUNNER" \
+    --serving <deployment serving.json> --gpus <this call's GPUs> \
     --backend docker --image <the serving image>
 python3 "$SKILL_ROOT/scripts/ut_wave.py" wait  --eval-dir "$EVAL_DIR" --timeout 540   # repeat
 ```
@@ -68,7 +70,13 @@ python3 "$SKILL_ROOT/scripts/ut_wave.py" wait  --eval-dir "$EVAL_DIR" --timeout 
 One CPU agent lane per task writes and fixes its own task directory
 ([UT lane](references/ut-lane.md)); `--author-workers` controls author concurrency.
 The wave leases GPUs only for each `ut_wave.py gpu -- <command>`.
-The pool is the deployment's physical GPUs (`serving.json` `gpus`); release the probe
+The call passes its resources and environment explicitly: `--gpus` is this call's
+allocation and `--serving` the deployment's `serving.json`, whose `env` and
+`pythonpath_prepend` every lane inherits (kernel dispatch reads them) and whose `gpus` the
+pool may only narrow. Nothing is looked up beside the output directory. Omitting
+`--serving` is refused; `--no-serving-env` runs the lanes without the deployment
+environment and is recorded in `wave.json`, only for tasks that do not depend on it.
+Release the probe
 server and any outer campaign GPU lock first. Each command leases `required_gpu_count`
 cards together (normally 1), drains its workers, then returns them to the pool. CPU
 writing/lint holds no GPU. The wave qualifies all non-timing

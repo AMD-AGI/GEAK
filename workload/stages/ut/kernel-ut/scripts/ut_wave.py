@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Parallel UT authors with command-scoped GPU leases (Linux/ROCm, stdlib only).
 
-    ut_wave.py plan/start --eval-dir DIR --gpus <physical-ids>
-    ut_wave.py start --eval-dir DIR --runner RUNNER --backend docker --image IMAGE
+    ut_wave.py plan/start --eval-dir DIR --serving SERVING_JSON --gpus <physical-ids>
+    ut_wave.py start ... --runner RUNNER --backend docker --image IMAGE
     ut_wave.py status/wait/stop --eval-dir DIR
     ut_wave.py gpu [--count N] [--timeout SEC] [--env K=V] -- <foreground-command>
 
@@ -199,17 +199,24 @@ def parse_gpu_ids(value, source):
     return ids
 
 
-def deployment_gpus(eval_dir):
-    for path in (os.path.join(eval_dir, "serving.json"),
-                 os.path.join(os.path.dirname(eval_dir.rstrip("/")), "serving.json")):
-        if not os.path.exists(path):
-            continue
+def serving_input(a):
+    """(path, config) of the deployment the lanes reproduce, from an explicit --serving.
+
+    Its env selects kernel dispatch (SGLANG_USE_AITER, VLLM_ROCM_USE_AITER_MOE, ...) and its
+    pythonpath_prepend the source the server imported; its gpus bound the pool. Without it
+    a lane silently writes and qualifies the UT under another environment, so it is required
+    unless --no-serving-env states the UT does not depend on serving settings."""
+    if getattr(a, 'serving', None):
+        path = os.path.abspath(a.serving)
         cfg = load(path)
         if not isinstance(cfg, dict):
-            raise SystemExit('ut_wave: cannot read workload GPU allocation from %s' % path)
-        if 'gpus' in cfg:
-            return parse_gpu_ids(cfg['gpus'], path + ':gpus')
-    return None
+            raise SystemExit('ut_wave: cannot read the serving configuration %s' % path)
+        return path, cfg
+    if not getattr(a, 'no_serving_env', False):
+        raise SystemExit('ut_wave: pass --serving <serving.json> (the deployment environment '
+                         'and GPU allocation the UTs must reproduce), or --no-serving-env for '
+                         'tasks that do not depend on serving settings')
+    return None, None
 
 
 # ----------------------------------------------------------------------------- backends
@@ -415,19 +422,15 @@ PASS_ENV = ("WORKLOAD_AGENT_ENV_FILE", "WORKLOAD_AGENT_STATE_BASE", "WORKLOAD_AG
             "CLAUDE_BIN", "KERNEL_EXTRACT_NODE", "GEAK_ROOT", "WORKLOAD_ROOT", "SHARED_TOOLS", "HF_HOME")
 
 
-def lane_env(eval_dir, extra):
-    """What a lane runs under: the deployment's environment from serving.json (kernel
+def lane_env(serving, extra):
+    """What a lane runs under: the deployment's environment from --serving (kernel
     dispatch reads it -- SGLANG_USE_AITER selects whole code paths), its PYTHONPATH prefix,
     the runner's credentials pointers, then --env overrides."""
     env = {}
-    for path in (os.path.join(eval_dir, "serving.json"),
-                 os.path.join(os.path.dirname(eval_dir.rstrip("/")), "serving.json")):
-        cfg = load(path)
-        if cfg:
-            env.update({k: str(v) for k, v in (cfg.get("env") or {}).items()})
-            if cfg.get("pythonpath_prepend"):
-                env["PYTHONPATH"] = cfg["pythonpath_prepend"]
-            break
+    if serving:
+        env.update({k: str(v) for k, v in (serving.get("env") or {}).items()})
+        if serving.get("pythonpath_prepend"):
+            env["PYTHONPATH"] = serving["pythonpath_prepend"]
     env.update({k: os.environ[k] for k in PASS_ENV if os.environ.get(k)})
     for item in extra or []:
         k, _, v = item.partition("=")
@@ -699,12 +702,15 @@ def resume_rows(wave, rows, attempts):
 
 def cmd_plan(a, quiet=False):
     eval_dir = os.path.abspath(a.eval_dir)
-    workload_gpus = deployment_gpus(eval_dir)
+    path, serving = serving_input(a)
+    workload_gpus = (parse_gpu_ids(serving['gpus'], path + ':gpus')
+                     if serving and serving.get('gpus') is not None else None)
     gpus = parse_gpu_ids(a.gpus, '--gpus') if a.gpus is not None else workload_gpus
     if not gpus:
-        raise SystemExit("ut_wave: no --gpus and no `gpus` in serving.json")
+        raise SystemExit("ut_wave: no GPU pool: pass --gpus (this call's allocation) or a "
+                         "--serving file that states `gpus`")
     if workload_gpus is not None and not set(gpus).issubset(workload_gpus):
-        raise SystemExit('ut_wave: requested GPUs %s exceed workload serving.json allocation %s; '
+        raise SystemExit('ut_wave: requested GPUs %s exceed the serving allocation %s; '
                          '--gpus may only select a subset' % (gpus, workload_gpus))
     allowed = os.environ.get('GEAK_GPU_ALLOWED')
     if allowed and not set(gpus).issubset(parse_gpu_ids(allowed, 'GEAK_GPU_ALLOWED')):
@@ -733,6 +739,17 @@ def cmd_plan(a, quiet=False):
             print("  %-48s %-22s cost %8.1f  GPUs per command %d" %
                   (row["label"], row["family"], row["cost"], row["need"]))
     return eval_dir, gpus, rows
+
+
+def serving_record(a):
+    path, cfg = serving_input(a)
+    if path is None:
+        return {"path": None, "why": "--no-serving-env: lanes run without the deployment "
+                                     "environment"}
+    with open(path, "rb") as f:
+        return {"path": path, "sha256": hashlib.sha256(f.read()).hexdigest(),
+                "env_keys": sorted((cfg.get("env") or {})),
+                "pythonpath_prepend": cfg.get("pythonpath_prepend") or None}
 
 
 def cmd_start(a):
@@ -793,7 +810,8 @@ def cmd_start(a):
         "lock_dir": os.path.abspath(os.environ.get('KERNEL_EXTRACT_LOCK_DIR', '/tmp/team_gpu_locks')),
         "lane_sec": a.lane_sec, "attempts": a.attempts, "relaunch": a.relaunch,
         "stale_sec": a.stale_sec, "tick_sec": a.tick_sec, "max_wall_sec": a.max_wall_sec,
-        "env": lane_env(eval_dir, a.env),
+        "serving": serving_record(a),
+        "env": lane_env(serving_input(a)[1], a.env),
         "created": now()})
     if a.foreground:
         return controller(argparse.Namespace(eval_dir=eval_dir))
@@ -880,7 +898,13 @@ def main(argv=None):
     for name in ("plan", "start"):
         p = sub.add_parser(name)
         p.add_argument("--eval-dir", required=True)
-        p.add_argument("--gpus", default=None, help="physical GPU IDs; default workload serving.json `gpus`; may only narrow that set")
+        p.add_argument("--gpus", default=None, help="physical GPU IDs of this call's allocation; "
+                       "default the --serving file's `gpus`, which it may only narrow")
+        p.add_argument("--serving", default=None,
+                       help="the deployment's serving.json: env, pythonpath_prepend and gpus "
+                            "the lanes reproduce (required unless --no-serving-env)")
+        p.add_argument("--no-serving-env", action="store_true",
+                       help="the tasks do not depend on serving settings; recorded in wave.json")
         p.add_argument("--tasks", default=None, help="comma list of task labels (default all)")
         p.add_argument("--force", action="store_true", help="include tasks that already pass")
         if name == "start":
@@ -898,7 +922,7 @@ def main(argv=None):
             p.add_argument("--tick-sec", type=int, default=15)
             p.add_argument("--max-wall-sec", type=int, default=0)
             p.add_argument("--env", action="append", default=[],
-                           help="K=V added to every lane (after serving.json env)")
+                           help="K=V added to every lane (after the --serving env)")
             p.add_argument("--foreground", action="store_true")
     p = sub.add_parser("_controller")
     p.add_argument("--eval-dir", required=True)

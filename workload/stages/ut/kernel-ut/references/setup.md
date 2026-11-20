@@ -42,9 +42,9 @@ restores the requested `HIP_VISIBLE_DEVICES` only after acquiring all locks.
 Do not copy the variable values from a previous run.
 
 The UT wave uses command-scoped leases. Start `ut_wave.py start` on the host whose
-physical GPUs were allocated. The pool defaults to the
-workload's `serving.json:gpus`; explicit `--gpus` may only choose a subset, never
-expand it, even if more devices are idle or the host allocation is larger. This
+physical GPUs were allocated. Pass the allocation as `--gpus` and the deployment's
+`serving.json` as `--serving`; the pool defaults to its `gpus`, and `--gpus` may only
+choose a subset, never expand it, even if more devices are idle or the host allocation is larger. This
 pool is also fenced by `GEAK_GPU_ALLOWED` and inherited numeric `ROCR_VISIBLE_DEVICES`.
 Resolve UUID/container-local mappings on the host first. Release any outer campaign
 pool lock before starting this mode; its broker must acquire the same global locks.

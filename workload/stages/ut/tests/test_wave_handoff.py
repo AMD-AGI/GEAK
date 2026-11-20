@@ -74,7 +74,32 @@ class WaveHandoffTest(unittest.TestCase):
                {'entity_kind': 'gpu_kernel', 'device_kernel': 'leaf', 'source_delivery_required': True})
 
     def args(self):
-        return SimpleNamespace(eval_dir=str(self.root), gpus='0', tasks=None, force=False)
+        return SimpleNamespace(eval_dir=str(self.root), gpus='0', tasks=None, force=False,
+                               serving=None, no_serving_env=True)
+
+    def test_serving_environment_and_pool_are_explicit_inputs(self):
+        # An installed UT directory has no serving.json beside it: the env that selects
+        # kernel dispatch and the GPU allocation must be passed, not found by adjacency.
+        args = self.args()
+        args.no_serving_env, args.gpus = False, None
+        with self.assertRaises(SystemExit) as e:
+            W.cmd_plan(args, quiet=True)
+        self.assertIn('--serving', str(e.exception))
+        serving = self.root.parent / 'deployment_serving.json'
+        W.save(str(serving), {'gpus': '4,5', 'env': {'VLLM_ROCM_USE_AITER': 1},
+                              'pythonpath_prepend': '/src'})
+        args.serving = str(serving)
+        self.assertEqual(W.cmd_plan(args, quiet=True)[1], [4, 5])
+        args.gpus = '5'
+        self.assertEqual(W.cmd_plan(args, quiet=True)[1], [5])
+        args.gpus = '6'
+        with self.assertRaises(SystemExit):
+            W.cmd_plan(args, quiet=True)
+        env = W.lane_env(W.serving_input(args)[1], ['X=1'])
+        self.assertEqual((env['VLLM_ROCM_USE_AITER'], env['PYTHONPATH'], env['X']), ('1', '/src', '1'))
+        rec = W.serving_record(args)
+        self.assertEqual((rec['path'], rec['env_keys']), (str(serving), ['VLLM_ROCM_USE_AITER']))
+        self.assertIsNone(W.serving_record(self.args())['path'])
 
     def test_passing_correctness_without_return_is_planned_for_resume(self):
         self.assertTrue(W.passed(str(self.task)))

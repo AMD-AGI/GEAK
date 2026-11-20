@@ -8,7 +8,9 @@ scaffold arguments and concrete cases with their weights, plus any blocked ident
 Its caller writes it from a profile's `kernels.json` under the
 [request contract](kernel-ut/references/request-authoring.md);
 this module reads nothing else upstream
-and does not know how many configs a case's weight pools.
+and does not know how many configs a case's weight pools. The call also passes its GPU
+allocation and the deployment's `serving.json` (environment and source path the UT must
+reproduce) explicitly; see [kernel-ut](kernel-ut/SKILL.md).
 **Output:** independently runnable frozen tasks, editable-source declarations, native
 qualification/delivery receipts and the covered or deferred identities. Report separately
 the computation edited, computation timed, served regimes covered, and differences from
