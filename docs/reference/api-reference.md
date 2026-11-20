@@ -145,7 +145,7 @@ supply `expected_gfx` and `expected_target` themselves.
 `meta.name = "kernel-workflow"`. Phases:
 `Setup → Author → Analyze → Benchmark → Profile → Optimize → Verify → Merge → Report → Validate`.
 
-Director → TechLead → specialist engineers (algorithm, memory, compute, and host_runtime), multi-round,
+Director → TechLead → specialist engineers (algorithm, memory, compute, host_runtime, and tune), multi-round,
 budget-controlled, each patch independently verified.
 
 | Arg | Default | Description |

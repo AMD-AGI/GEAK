@@ -164,7 +164,7 @@ for the full arg spelling, what the declaration changes, and the two things that
 ## kernel_workflow — single kernel
 
 `kernel_workflow/` optimizes a single AMD GPU kernel — Triton, HIP, CK, FlyDSL, or any AMD GPU source:
-Director → TechLead → specialist engineers (algorithm / memory / compute / host_runtime), multi-round and
+Director → TechLead → specialist engineers (algorithm / memory / compute / host_runtime / tune), multi-round and
 budget-controlled, with each patch independently verified before it's accepted.
 
 ### Example
@@ -278,7 +278,7 @@ How the workflows in this repo relate to the GEAK_v3 baseline:
 | **Iteration**          | Multi-round                               | Multi-round, budget-controlled                                  | Multi-round, Amdahl-triaged, budget-controlled                    |
 | **Orchestration**      | Python                                    | **Deterministic JS** — loop/parallelism/verification in code   | **Deterministic JS**                                              |
 | **Verification**       | Orchestrator verifies                     | **Pipelined** — each patch verified by a separate agent        | **Warm-server interleaved A/B** — throughput delta + engagement proof + output parity |
-| **Engineer types**     | Generic                                   | **Specialist**: algorithm, memory, compute, host_runtime       | System roles + the specialist kernel squad via the recursive layer |
+| **Engineer types**     | Generic                                   | **Specialist**: algorithm, memory, compute, host_runtime, tune | System roles + the specialist kernel squad via the recursive layer |
 | **Cross-round memory** | miniswe-memory control                    | **Explicit**: insight blackboard + hypothesis ledger           | **Explicit**: insight blackboard + per-backend knowledge          |
 | **Best for**           | Programmatic kernel optimization          | Single-kernel gains with high reliability/reproducibility      | **Raising end-to-end serving throughput of a full model**         |
 

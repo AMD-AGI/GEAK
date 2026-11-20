@@ -223,7 +223,7 @@ def _nonfinite(v) -> bool:
     return True
 
 
-SPECIALTIES = {"algorithm", "memory", "compute", "host_runtime", "deep_explore"}
+SPECIALTIES = {"algorithm", "memory", "compute", "host_runtime", "tune", "deep_explore"}
 CLOCK_SOURCES = {"pre_plan_clock", "pre_replan_clock", "no_deadline"}
 # The object kernel_lane.js writes after a measured round (see its EIKOS_SHADOW outcome block).
 OUTCOME_CHECKS = {

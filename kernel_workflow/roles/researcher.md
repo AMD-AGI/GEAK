@@ -263,7 +263,8 @@ than lost. Do not propose keeping an op standalone *against* an upstream fusion 
    exact `target` files or an `edit_kind`/patch — the engineers explore the repo and decide "how".
    (Keep `bottleneck`/`mechanism`/`upside`/`confidence`; omit prescriptive targets from the brief.)
 4. **Map each direction to an engineer `specialty`** so the planner can slot it directly:
-   `algorithm | memory | compute | host_runtime | deep_explore`. Use `deep_explore` for the
+   `algorithm | memory | compute | host_runtime | tune | deep_explore`. Use `tune` for a measured
+   configuration search (tiles, waves, MFMA shape, per-shape dispatch). Use `deep_explore` for the
    ground-up / multi-lever rewrites (raw-HIP, graph capture stacks, algorithmic rewrites).
 
 Then write THREE artifacts:
@@ -291,7 +292,7 @@ Return JSON (the StructuredOutput — keep `directions` here COMPACT, mirroring 
   "full_path": "<EVAL_DIR>/deep_search.md",
   "json_path": "<EVAL_DIR>/deep_search.json",
   "directions": [
-    {"id": "D1", "title": "...", "specialty": "algorithm|memory|compute|host_runtime|deep_explore",
+    {"id": "D1", "title": "...", "specialty": "algorithm|memory|compute|host_runtime|tune|deep_explore",
      "mechanism": "<= 40 words", "expected_upside": "...", "confidence": "high|medium|low",
      "rank_score": 0.0}
   ],

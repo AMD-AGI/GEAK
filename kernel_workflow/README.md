@@ -16,9 +16,11 @@ by an agent returning **structured JSON**.
 2. **Independent verification of every claimed speedup** — each engineer's patch is re-benchmarked
    by a separate `verify_engineer` in a clean workspace *as soon as it finishes* (pipelined). The
    script trusts only verified, absolute-latency numbers → the winner is genuinely the fastest.
-3. **Specialist engineers (A)** — `algorithm | memory | compute | host_runtime`; each loads only its
-   relevant knowledge → focused context, sharper results, naturally orthogonal & mergeable. Plus a
-   fifth **`deep_explore`** track: an open-ended deep optimizer the TechLead hands a high target (Nx
+3. **Specialist engineers (A)** — `algorithm | memory | compute | host_runtime | tune`; each loads only its
+   relevant knowledge → focused context, sharper results, naturally orthogonal & mergeable. `tune` is a
+   measured configuration search (tiles, waves, MFMA shape, per-shape dispatch; `knowledge/tuning_playbook.md`),
+   planned when the config is likely stale — typically right after a structural commit. Plus a
+   sixth **`deep_explore`** track: an open-ended deep optimizer the TechLead hands a high target (Nx
    and/or ~90% roofline) with minimal steering — broad authority (kernel + wrapper + binding), its own
    long measure→self-profile→rewrite loop. It costs `deep_cost` budget (default 2) and always runs in a
    dedicated round on its own (its ground-up rewrite isn't expected to merge with specialist patches).

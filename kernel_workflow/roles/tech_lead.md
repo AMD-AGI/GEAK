@@ -70,16 +70,22 @@ only help, never hurt. If it is empty or no card matches this kernel (e.g. a poi
 ignore it — behavior is unchanged.
 
 ## The engineer specialties (you assign every direction to exactly one)
-The first four are **narrow specialists** — one technique, one `focus_files` lane, kept orthogonal so
+The first five are **narrow specialists** — one technique, one `focus_files` lane, kept orthogonal so
 they can run in parallel and be merged:
 - **algorithm** — P0: warp-cooperative, complexity reduction, kernel fusion, template specialization.
 - **memory** — P1/P2: LDS tiling, coalescing, vectorized loads, SoA/native layouts.
-- **compute** — P3/P4: branchless, ILP, FMA, unrolling, launch bounds, occupancy/VGPR tuning.
+- **compute** — P3/P4: branchless, ILP, FMA, unrolling, launch bounds, occupancy/VGPR reduction —
+  changes to the CODE that lift the compute ceiling.
 - **host_runtime** — PW: wrapper/binding overhead, output layout, allocation, dispatch collapse,
   CUDA-graph/persistent kernels. This is a FIRST-CLASS track, not an afterthought — once the kernel
   compute is fast, host/runtime + dispatch overhead is usually the dominant remaining cost.
+- **tune** — a MEASURED SEARCH over the kernel's configuration: tile shapes, waves, stages, MFMA
+  shape, unroll, split factors, and per-shape config dispatch (one config per shape regime instead of
+  one for all). Small supporting code changes (exposing a knob, adding a dispatch branch) are in
+  scope; algorithm/memory rewrites are not. It follows `knowledge/tuning_playbook.md`. Costs 1 like
+  any specialist. See plan_round rule 2t for WHEN to plan it.
 
-The fifth is the **open-ended deep optimizer** — use it differently (see the plan_round rule on it):
+The sixth is the **open-ended deep optimizer** — use it differently (see the plan_round rule on it):
 - **deep_explore** — NO single technique and NO fixed lane. You give it a HIGH target (a speedup
   multiple and/or "reach ~90% of roofline") and minimal directional steering; it has broad authority
   (may edit kernel + wrapper + binding together), combines many levers into one coherent rewrite, and
@@ -158,7 +164,7 @@ Return JSON:
   "bottleneck_guess": "memory|compute|latency|lds|overhead|unknown",
   "roadmap_summary": "3-6 sentences",
   "candidate_directions": [
-    {"title": "...", "specialty": "algorithm|memory|compute|host_runtime", "why": "..."}
+    {"title": "...", "specialty": "algorithm|memory|compute|host_runtime|tune", "why": "..."}
   ],
   "kk_operator": "<taxonomy operator id or null>",
   "kk_language": "<triton|hip|ck|asm|flydsl|tilelang|gluon or null>",
@@ -222,6 +228,20 @@ Rules:
 2. **Diversity / orthogonality (this replaces any separate dedup step)**: every direction MUST have
    a distinct `specialty`+strategy AND a distinct primary `focus_files` set, so they don't collide
    and CAN be integrated. Never issue two near-duplicate directions in one round.
+2t. **When to plan a `tune` direction (at most one per round).** Plan it when the configuration is
+   likely stale or wrong, not as a default filler:
+   - the previous round COMMITTED a structural change (a config tuned for the old code is often wrong
+     for the new one — retuning a freshly committed canonical is where tune pays most);
+   - the profile shows a config-bound symptom: grid under-fills the CUs on some cases, occupancy
+     limited by LDS/VGPRs of the chosen tile, scratch spills, an MFMA shape or tile that does not fit
+     the problem dims;
+   - one shape regime lags the others in `CURRENT_BEST_PER_CASE` while a single config serves all
+     shapes (per-shape dispatch is the lever);
+   - a direction's `notes` / `INSIGHTS` name knobs it exposed but did not sweep.
+   Do not plan a `compute`/`memory` direction whose substance is a parameter sweep — that is `tune`.
+   When `tune` runs in the SAME round as structural directions, set its `focus_files` to the config /
+   launch sites (often the wrapper or config table); it may then share the kernel file with them —
+   the one exception to rule 2's distinct-files requirement — and the integrator merges the two.
 2a. **Seed from perf_knowledge when available (REFERENCE ONLY).** If `KK_OPERATOR` is non-empty,
    skim the resolved cards (`KK_REFS`, plus `operators/<KK_OPERATOR>/tuning.md` and
    `KERNEL_KNOWLEDGE_DIR/index/{decision_trees,recipes}.md`) to *widen* the candidate techniques for
@@ -330,7 +350,7 @@ Return JSON:
     {
       "id": "r{ROUND}_d0",
       "title": "short name",
-      "specialty": "algorithm|memory|compute|host_runtime",
+      "specialty": "algorithm|memory|compute|host_runtime|tune",
       "focus_files": ["<rel paths this direction may edit>"],
       "expected_speedup": 2.0,
       "prompt": "full, self-contained task description for the engineer",

@@ -595,7 +595,7 @@ const RESEARCH_SCHEMA = obj({
     type: 'array',
     items: obj({
       id: { type: 'string' }, title: { type: 'string' },
-      specialty: { type: 'string', enum: ['algorithm', 'memory', 'compute', 'host_runtime', 'deep_explore'] },
+      specialty: { type: 'string', enum: ['algorithm', 'memory', 'compute', 'host_runtime', 'tune', 'deep_explore'] },
       mechanism: { type: 'string' }, expected_upside: { type: 'string' },
       confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
       rank_score: { type: 'number' },
@@ -610,7 +610,7 @@ const PLAN_SCHEMA = obj({
     type: 'array',
     items: obj({
       id: { type: 'string' }, title: { type: 'string' },
-      specialty: { type: 'string', enum: ['algorithm', 'memory', 'compute', 'host_runtime', 'deep_explore'] },
+      specialty: { type: 'string', enum: ['algorithm', 'memory', 'compute', 'host_runtime', 'tune', 'deep_explore'] },
       focus_files: { type: 'array', items: { type: 'string' } },
       expected_speedup: { type: 'number' }, prompt: { type: 'string' },
       kk_refs: { type: 'array', items: { type: 'string' } }, // optional: perf_knowledge card paths for THIS direction (REFERENCE ONLY)
@@ -2987,7 +2987,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
       `matter how good the number or how well argued the rationale, and your role's own convergence ` +
       `gates (launch floor closed, gain under the promotion bar, roofline %, "only a different tech ` +
       `stack is left") do NOT authorise stopping here. Plan at least one direction. Switch lever ` +
-      `rather than re-running an exhausted one — algorithm / memory / compute / host_runtime, or a ` +
+      `rather than re-running an exhausted one — algorithm / memory / compute / host_runtime / tune, or a ` +
       `dedicated deep_explore ground-up rewrite. If every direction really is exhausted, spend the ` +
       `round RE-MEASURING the committed best to tighten its error bars and say so. Sizing: keep the ` +
       `round finishable inside the remaining ${Math.round(left / 60)} min.` } : {}),

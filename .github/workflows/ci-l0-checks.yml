@@ -362,6 +362,10 @@ jobs:
           node --test e2e_workflow/scripts/test_agentx_standalone_handoff.mjs
       - name: candidate floor and invalid measurement recovery
         run: node kernel_workflow/scripts/test_candidate_floor.js
+      # `tune` specialty: every specialty list agrees (schemas, Eikos validator/registry, roles), its
+      # knowledge exists, and a planned tune direction runs through the real lane (vm) like any other.
+      - name: tune specialty (mock lane)
+        run: node kernel_workflow/scripts/test_tune_engineer.js
       - name: gfx1151 knowledge doc contract
         run: node kernel_workflow/scripts/test_gfx1151_knowledge_docs.js
       # The JS gate and the Python selection verdict canonicalize the same kernel symbols. Only this
