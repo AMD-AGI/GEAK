@@ -31,6 +31,7 @@ max relative error) instead of shape-only smoke checks. CUDA-event times and per
 lists, so `time_op` returns a median we chose. `time.perf_counter` is replaced on the module, so nothing
 ever sleeps or polls.
 """
+import collections
 import contextlib
 import importlib.util
 import io
@@ -986,6 +987,19 @@ class TestTimeOpWall(_HarnessTestCase):
         self.assertIsNone(hl.time_op(boom, warmup=1, repeats=1))
         self.assertIsNone(hl.time_op(boom, warmup=1, repeats=1, detail=True))
 
+    def test_with_raise_errors_the_exception_of_a_call_or_a_sample_hook_propagates(self):
+        def boom():
+            raise RuntimeError("kernel launch failed")
+        with self.assertRaisesRegex(RuntimeError, "kernel launch failed"):
+            hl.time_op(boom, warmup=1, repeats=1, detail=True, raise_errors=True)
+
+        def peer_gone():
+            raise RuntimeError("Connection closed by peer")
+        _, call = self._counting_call()
+        with self.assertRaisesRegex(RuntimeError, "Connection closed by peer"):
+            hl.time_op(call, warmup=1, repeats=2, detail=True, pre_sample=peer_gone, raise_errors=True)
+        self.assertIsNone(hl.time_op(call, warmup=1, repeats=2, detail=True, pre_sample=peer_gone))
+
     def test_an_unqueryable_device_makes_the_op_untimeable(self):
         # SOURCE GAP, pinned as-is: time_op guards its is_available() probe so a broken runtime
         # still gets WALL timing, but the wall path immediately calls sync(), whose own
@@ -1097,6 +1111,229 @@ class TestTimeOpEventsHostBound(_CudaTestCase):
         self.assertAlmostEqual(got["host_ms"], 5.0)
         self.assertEqual(got["ms"], 2.0)
         self.assertIs(got["primed"], False)                 # NOT absent -- the timer answered, negatively
+
+
+class _SpinTorch:
+    """Minimal torch for the queued-spin path (A16): records every host/device op in order, scripts the
+    event readings and answers `query()` on the spun event from a script (True = the spin had already
+    ended). An elapsed_time after a `_sleep(1_000_000)` is a calibration read, after any other sleep a
+    spun sample, with no sleep since the previous read an un-spun (reference) sample."""
+
+    def __init__(self, dev_ms=(0.5,), late=(False,), lat_ms=(3.0,), cal_ms=1.0):
+        self.ops, self.dev_ms, self.late, self.lat_ms, self.cal_ms = [], list(dev_ms), list(late), list(lat_ms), cal_ms
+        self.i = {"dev": 0, "late": 0, "lat": 0}
+        self.slept = None                      # cycles of the last _sleep since the previous read
+        self.n_timing = 0
+        st = self
+        mod = types.ModuleType("torch")
+        mod.float32 = "float32"
+
+        class _Buf:
+            def __init__(self, n):
+                self.n = n
+
+            def numel(self):
+                return self.n
+
+            def sum(self):
+                st.ops.append("flush")
+                return 0.0
+
+        class _Event:
+            def __init__(self, enable_timing=False):
+                if enable_timing:
+                    self.role = "start" if st.n_timing % 2 == 0 else "end"
+                    st.n_timing += 1
+                else:
+                    self.role = "spun"
+
+            def record(self):
+                st.ops.append(("record", self.role))
+
+            def synchronize(self):
+                st.ops.append(("synchronize", self.role))
+
+            def query(self):
+                st.ops.append(("query", self.role))
+                return st._next("late")
+
+            def elapsed_time(self, other):
+                slept, st.slept = st.slept, None
+                if slept == 1_000_000:
+                    return st.cal_ms
+                return st._next("dev") if slept is not None else st._next("lat")
+
+        def _sleep(cycles):
+            st.ops.append(("sleep", int(cycles)))
+            st.slept = int(cycles)
+
+        mod.cuda = types.SimpleNamespace(is_available=lambda: True, synchronize=lambda: st.ops.append("sync"),
+                                         Event=_Event, _sleep=_sleep, current_device=lambda: 0)
+        mod.ones = lambda n, dtype=None, device=None: _Buf(n)
+        self.mod = mod
+
+    def _next(self, key):
+        seq = {"dev": self.dev_ms, "late": self.late, "lat": self.lat_ms}[key]
+        v = seq[self.i[key] % len(seq)]
+        self.i[key] += 1
+        return v
+
+    def call(self):
+        self.ops.append("call")
+
+    def samples(self):
+        """The ops of each spun sample: from a flush to the end event's synchronize, when a sleep is in it."""
+        out, cur = [], None
+        for op in self.ops:
+            if op == "flush":
+                cur = [op]
+            elif cur is not None:
+                cur.append(op)
+                if op == ("synchronize", "end"):
+                    if any(isinstance(x, tuple) and x[0] == "sleep" for x in cur):
+                        out.append(cur)
+                    cur = None
+        return out
+
+
+class _FlatClock:
+    """perf_counter advancing by a fixed step per read: one host-probe span reads step*1e3/30 ms per call."""
+
+    def __init__(self, step):
+        self.t, self.step = 0.0, step
+
+    def perf_counter(self):
+        self.t += self.step
+        return self.t
+
+
+class TestTimeOpSpin(unittest.TestCase):
+    """A16: generated tasks time an eager-deployed phase on a GPU spin queued between the sync and the
+    start event; the default path (spin=None) is unchanged."""
+
+    def setUp(self):
+        self._prev_torch = sys.modules.get("torch", _MISSING)
+        self.addCleanup(self._restore_torch)
+        self.addCleanup(setattr, hl, "time", hl.time)
+        hl.time = _FlatClock(0.003)            # host probe: 3 ms over 30 launches = 0.1 ms per call
+        for g in ("_CACHE_FLUSH_BUF", "_CACHE_FLUSH_SINK", "_CACHE_FLUSH_DEV"):
+            setattr(hl, g, None)
+            self.addCleanup(setattr, hl, g, None)
+        self.addCleanup(setattr, hl, "_SPIN_RATE", hl._SPIN_RATE)
+        hl._SPIN_RATE = {0: 1000.0}            # 1000 cycles per microsecond (calibration tested apart)
+
+    def _restore_torch(self):
+        if self._prev_torch is _MISSING:
+            sys.modules.pop("torch", None)
+        else:
+            sys.modules["torch"] = self._prev_torch
+
+    def _torch(self, **kw):
+        ft = _SpinTorch(**kw)
+        sys.modules["torch"] = ft.mod
+        hl._CACHE_FLUSH_BUF = None             # the eviction buffer belongs to the fake that made it
+        return ft
+
+    def test_each_sample_queues_the_spin_after_the_sync_and_before_the_start_event(self):
+        ft = self._torch()
+        hl.time_op(ft.call, warmup=1, repeats=2, inner=2, detail=True, spin={})
+        self.assertEqual(ft.samples()[0], ["flush", "sync", ("sleep", 400000), ("record", "spun"),
+                                           ("record", "start"), "call", "call", ("record", "end"),
+                                           ("query", "spun"), ("synchronize", "end")])
+        self.assertEqual(len(ft.samples()), 2)
+
+    def test_the_spin_outlasts_issuing_the_window_and_has_a_floor(self):
+        for inner, us in ((1, 200.0), (3, 600.0)):     # max(200, 2 x inner x 0.1 ms)
+            with self.subTest(inner=inner):
+                ft = self._torch()
+                got = hl.time_op(ft.call, warmup=1, repeats=2, inner=inner, detail=True, spin={})
+                self.assertEqual(got["spin"]["us"], us)
+                self.assertEqual(ft.samples()[0][2], ("sleep", int(us * 1000)))
+        self.assertEqual(hl.spin_us({"us": 50}, 8, 1.0), 50.0)          # a fixed spin is taken as is
+        self.assertEqual(hl.spin_us({"min_us": 1000}, 1, 0.1), 1000.0)
+        self.assertEqual(hl.spin_us(True, 2, 0.4), 1600.0)
+
+    def test_ms_is_the_spun_reading_while_wall_ms_and_latency_come_from_unspun_samples(self):
+        ft = self._torch(dev_ms=(0.5, 0.7, 0.6), lat_ms=(3.0,))
+        got = hl.time_op(ft.call, warmup=1, repeats=3, detail=True, spin={})
+        self.assertEqual((got["timer"], got["ms"], got["latency_ms"]), ("cuda_event", 0.6, 3.0))
+        self.assertAlmostEqual(got["wall_ms"], 3.0)          # host + device of an un-spun sample
+        self.assertAlmostEqual(got["host_ms"], 0.1)
+        self.assertIs(got["primed"], True)                   # dispatch 0.1 ms < GPU time 0.6 ms
+        unspun = [op for op in ft.ops if op == ("record", "start")]
+        self.assertEqual(len(unspun), 3 + hl.SPIN_REF_SAMPLES)
+        self.assertEqual(sum(1 for op in ft.ops if isinstance(op, tuple) and op[0] == "sleep"), 3)
+
+    def test_an_op_that_dispatches_slower_than_it_computes_reads_its_gpu_time_and_primed_false(self):
+        ft = self._torch(dev_ms=(0.05,), lat_ms=(0.11,))
+        got = hl.time_op(ft.call, warmup=1, repeats=3, detail=True, spin={})
+        self.assertEqual((got["ms"], got["latency_ms"]), (0.05, 0.11))
+        self.assertIs(got["primed"], False)
+
+    def test_late_samples_are_counted_and_a_few_are_tolerated(self):
+        ft = self._torch(late=[True] + [False] * 19)
+        got = hl.time_op(ft.call, warmup=1, repeats=20, detail=True, spin={})
+        self.assertEqual({k: got["spin"][k] for k in ("late", "samples", "retried", "includes_dispatch")},
+                         {"late": 1, "samples": 20, "retried": False, "includes_dispatch": False})
+        self.assertEqual(got["spin"]["queued"], "gpu_spin_before_start")
+
+    def test_too_many_late_samples_double_the_spin_and_measure_the_case_once_more(self):
+        ft = self._torch(late=[True, True] + [False] * 18, dev_ms=(9.0,) * 10 + (0.5,) * 10)
+        got = hl.time_op(ft.call, warmup=1, repeats=10, detail=True, samples=True, spin={})
+        sleeps = [op[1] for op in ft.ops if isinstance(op, tuple) and op[0] == "sleep"]
+        self.assertEqual(sleeps, [200000] * 10 + [400000] * 10)
+        self.assertEqual((got["spin"]["us"], got["spin"]["late"], got["spin"]["retried"]), (400.0, 0, True))
+        self.assertEqual(got["spin"]["first"], {"us": 200.0, "late": 2})
+        self.assertEqual((got["ms"], got["samples"]), (0.5, [0.5] * 10))   # only the second measurement
+
+    def test_still_late_after_doubling_reports_the_reading_as_including_dispatch(self):
+        ft = self._torch(late=[True])
+        got = hl.time_op(ft.call, warmup=1, repeats=4, detail=True, spin={"late_limit": 0.5})
+        self.assertEqual((got["spin"]["retried"], got["spin"]["includes_dispatch"], got["spin"]["late"]),
+                         (True, True, 4))
+
+    def test_the_spin_rate_is_calibrated_once_per_device(self):
+        hl._SPIN_RATE = {}
+        ft = self._torch(cal_ms=2.0)                         # 1e6 cycles in 2 ms -> 500 cycles/us
+        got = hl.time_op(ft.call, warmup=1, repeats=2, detail=True, spin={})
+        self.assertEqual(hl._SPIN_RATE, {0: 500.0})
+        self.assertEqual(ft.samples()[0][2], ("sleep", 100000))
+        self.assertEqual(got["spin"]["us"], 200.0)
+        cal = [op for op in ft.ops if op == ("sleep", 1000000)]
+        self.assertEqual(len(cal), 3)
+        hl.time_op(ft.call, warmup=1, repeats=2, detail=True, spin={})
+        self.assertEqual(len([op for op in ft.ops if op == ("sleep", 1000000)]), 3)    # not again
+
+    def test_without_spin_the_eager_path_queues_nothing(self):
+        ft = self._torch()
+        got = hl.time_op(ft.call, warmup=1, repeats=2, detail=True)
+        self.assertFalse(any(isinstance(op, tuple) and op[0] in ("sleep", "query") for op in ft.ops))
+        self.assertNotIn("spin", got)
+        self.assertNotIn("latency_ms", got)
+
+    def test_a_graph_replay_ignores_the_spin(self):
+        ft = self._torch()
+
+        class _G:
+            def replay(self):
+                ft.ops.append("replay")
+        got = hl.time_op(ft.call, warmup=1, repeats=2, graph=True, detail=True, spin={},
+                         capture=lambda torch, call, inner: (_G(), 1))
+        self.assertEqual(got["timer"], "cuda_event_graph")
+        self.assertFalse(any(isinstance(op, tuple) and op[0] == "sleep" for op in ft.ops))
+        self.assertNotIn("spin", got)
+
+    def test_the_leg_summary_carries_the_spin_of_every_rep(self):
+        sp = {"queued": "gpu_spin_before_start", "us": 200.0, "samples": 50, "late": 1, "retried": False,
+              "includes_dispatch": False}
+        rows = [{"timer": "cuda_event", "ms": 1.0, "primed": True, "host_ms": 0.1, "spin": sp, "latency_ms": 2.0},
+                {"timer": "cuda_event", "ms": 1.1, "primed": True, "host_ms": 0.1,
+                 "spin": dict(sp, us=400.0, late=3, retried=True), "latency_ms": 4.0}]
+        got = hl._leg_summary(rows)
+        self.assertEqual(got["spin"], {"queued": "gpu_spin_before_start", "reps": 2, "us": 400.0, "samples": 100,
+                                       "late": 4, "retried": True, "includes_dispatch": False})
+        self.assertEqual(got["latency_ms"], 3.0)
+        self.assertNotIn("spin", hl._leg_summary([{"timer": "cuda_event", "ms": 1.0}]))
 
 
 class TestTimeOpGraph(_CudaTestCase):
@@ -1471,6 +1708,44 @@ class TestCorrectOnMultiTensorReturns(_HarnessTestCase):
         self.assertEqual(len(hl.flatten_outputs([{"a": _T((1,), [1.0])}, (_T((1,), [2.0]),)])), 2)
 
 
+class TestNoiseRel(_HarnessTestCase):
+    """A37: noise_rel is correct()'s own pass/fail scale, max |out - ref| / (|ref| + RMS(ref)): correct() passes at
+    t exactly when noise_rel <= t, and it does not depend on the tolerance."""
+
+    def test_an_identical_output_has_zero_noise(self):
+        ref = _T((3,), [float("-inf"), 2.0, 0.0])
+        self.assertEqual(hl.noise_rel(ref.clone(), ref), 0.0)
+
+    def test_the_exact_ratio_and_the_tolerance_it_needs(self):
+        # ref RMS = 2.0; diff = [0, 3]: noise_rel = 3 / (2 + 2) = 0.75 (correct()'s err at 0.5 is 1.0)
+        out, ref = _T((2,), [2.0, 5.0]), _T((2,), [2.0, 2.0])
+        self.assertEqual(hl.noise_rel(out, ref), 0.75)
+        self.assertTrue(hl.correct(out, ref, 0.75)[0])
+        self.assertFalse(hl.correct(out, ref, 0.7)[0])
+
+    def test_a_zero_reference_element_is_measured_against_the_rms(self):
+        # ref = [4, 0, 0, 0]: RMS 2.0, a 1.5 error at a zero reference -> 1.5 / 2 = 0.75
+        out, ref = _T((4,), [4.0, 1.5, 0.0, 0.0]), _T((4,), [4.0, 0.0, 0.0, 0.0])
+        self.assertEqual(hl.noise_rel(out, ref), 0.75)
+        self.assertEqual((hl.correct(out, ref, 0.75)[0], hl.correct(out, ref, 0.5)[0]), (True, False))
+
+    def test_identical_non_finite_positions_are_left_out_and_differing_ones_are_infinite(self):
+        # the finite bulk [2, 2]: RMS 2.0; diff 1 at |ref| 2 -> 1 / 4 = 0.25
+        ref = _T((3,), [float("-inf"), 2.0, 2.0])
+        self.assertEqual(hl.noise_rel(_T((3,), [float("-inf"), 2.0, 3.0]), ref), 0.25)
+        self.assertTrue(hl.correct(_T((3,), [float("-inf"), 2.0, 3.0]), ref, 0.25)[0])
+        self.assertFalse(hl.correct(_T((3,), [float("-inf"), 2.0, 3.0]), ref, 0.2)[0])
+        self.assertEqual(hl.noise_rel(_T((3,), [0.0, 2.0, 2.0]), ref), float("inf"))
+        self.assertEqual(hl.noise_rel(_T((2,), [float("nan"), 1.0]), _T((2,), [float("nan"), 1.0])), float("inf"))
+
+    def test_a_multi_tensor_return_takes_its_worst_component_and_a_mismatch_is_infinite(self):
+        ref = (_T((2,), [2.0, 2.0]), _T((2,), [2.0, 2.0]))
+        self.assertEqual(hl.noise_rel((_T((2,), [2.0, 3.0]), _T((2,), [2.0, 5.0])), ref), 0.75)
+        self.assertEqual(hl.noise_rel((_T((1,), [1.0]),), (_T((1,), [1.0]), _T((1,), [1.0]))), float("inf"))
+        self.assertEqual(hl.noise_rel(_T((3,), [1.0, 1.0, 1.0]), _T((2,), [1.0, 1.0])), float("inf"))
+        self.assertEqual(hl.noise_rel((), ()), float("inf"))
+
+
 # --------------------------------------------------------------------------- #
 # assert_independent_outputs -- catching the shared/persistent `static_out`
 # --------------------------------------------------------------------------- #
@@ -1562,6 +1837,45 @@ class TestCheckCorrectMulti(_HarnessTestCase):
         _, per = hl.check_correct_multi(_echo_call,
                                         [{"args": (1.0,), "ref": _T((1,), [1.0])}], 0.01)
         self.assertEqual(per[0]["case"], "")
+
+
+class _OutputErr(float):
+    """An err that names its output, as leg_runner's per-output comparison returns it (A42)."""
+
+    def __new__(cls, err, output, tol):
+        self = super().__new__(cls, err)
+        self.row_fields = {"output": output, "tol": tol}
+        return self
+
+
+class TestRowExtra(_HarnessTestCase):
+    """A42: a comparison whose err carries row_fields (leg_runner's per-output comparison) has them copied into its
+    row by every check; correct()'s plain err adds nothing, so a hand-written task's rows are unchanged."""
+
+    def test_only_an_err_with_row_fields_adds_fields(self):
+        self.assertEqual(hl._row_extra(0.5), {})
+        self.assertEqual(hl._row_extra(float("inf")), {})
+        e = _OutputErr(0.25, "1", 0.001)
+        self.assertEqual(hl._row_extra(e), {"output": "1", "tol": 0.001})
+        hl._row_extra(e)["output"] = "x"
+        self.assertEqual(e.row_fields["output"], "1")          # a copy
+
+    def test_every_check_copies_them_into_the_row(self):
+        def fake(out, ref, tol):
+            return True, _OutputErr(0.000123456, "1", 0.001)
+        with _patched(hl, correct=fake):
+            _, per = hl.check_correct_multi(_echo_call, [_case("m1", (1.0, 2.0)), _case("m8", (3.0, 4.0))], 0.02)
+            self.assertEqual(per[0], {"case": "m1", "correct": True, "max_rel_err": 0.00012, "output": "1",
+                                      "tol": 0.001})
+            self.assertNotIn("output", per[2])                   # the independence row compares nothing
+            _, per = hl.check_correct_sequence(_echo_call, [_case("m1", (1.0, 2.0))], 0.02)
+            self.assertEqual((per[0]["output"], per[0]["tol"]), ("1", 0.001))
+            _, per = hl.check_correct_multi_lazy(_echo_call, iter([_case("m1", (1.0, 2.0))]), 0.02)
+            self.assertEqual((per[0]["output"], per[0]["tol"]), ("1", 0.001))
+            shapes = [{"sig": "s", "make_inputs": lambda rng: (1.0, 2.0)}]
+            _, per = hl.check_random_vs_baseline(None, _echo_call, shapes, 0.02, draws=1,
+                                                 baseline_outputs={"s|0": _T((2,), [1.0, 2.0])})
+            self.assertEqual((per[0]["output"], per[0]["tol"]), ("1", 0.001))
 
 
 class TestCheckCorrectSequence(_HarnessTestCase):
@@ -3185,6 +3499,633 @@ class TestOracleSharedAndLazy(_HarnessTestCase):
             call, iter(cases), {"rtol": 1e-5, "atol": 1e-5}, max_keep_live=1)
         self.assertEqual(per[-1]["case"], "output_independence")
         self.assertIn("correct", per[-1])
+
+
+# --------------------------------------------------------------------------- #
+# Multi-rank UT support: raw samples, the per-sample hook, rank context, strict replay,
+# sequence in run_correctness and the measure_legs receipt (all OFF by default)
+# --------------------------------------------------------------------------- #
+class TestTimeOpSampleHooks(_CudaTestCase):
+    EVENT_MS = (9.0, 3.0, 6.0)
+    WALL_MS = (90.0, 30.0, 60.0, 3.0 * hl._HOST_PROBE_LAUNCHES)
+
+    def test_raw_samples_come_back_unsorted_in_taken_order(self):
+        got = hl.time_op(lambda: None, warmup=1, repeats=3, graph=True, detail=True, samples=True)
+        self.assertEqual(got["samples"], [9.0, 3.0, 6.0])
+        self.assertEqual(got["ms"], 6.0)                    # the median is unchanged
+
+    def test_without_samples_the_result_is_exactly_the_old_one(self):
+        got = hl.time_op(lambda: None, warmup=1, repeats=3, graph=True, detail=True)
+        self.assertNotIn("samples", got)
+
+    def test_pre_sample_runs_once_per_sample_after_the_flush_and_before_the_start_event(self):
+        order = []
+        real_flush = hl.flush_cache
+
+        def flush(torch=None, mb=None):
+            order.append("flush")
+            return real_flush(torch, mb=mb)
+        with patch.object(hl, "flush_cache", flush):
+            hl.time_op(lambda: None, warmup=1, repeats=3, graph=True,
+                       pre_sample=lambda: order.append(("hook", len(self.stack.events))))
+        # every sample: the module-global flush (a wrapper installed on the module sees it), then the hook
+        self.assertEqual([o if isinstance(o, str) else o[0] for o in order], ["flush", "hook"] * 3)
+        # the hook fires before that sample's start event is recorded
+        hooks = [o[1] for o in order if not isinstance(o, str)]
+        self.assertEqual(hooks, sorted(hooks))
+        self.assertEqual(len(hooks), 3)
+
+    def test_a_caller_capture_replaces_the_per_process_capture(self):
+        seen = []
+
+        def capture(torch, call, inner):
+            seen.append(inner)
+            return None                                     # every rank agreed: no graph
+        got = hl.time_op(lambda: None, warmup=1, repeats=3, graph=True, detail=True, capture=capture)
+        self.assertEqual(seen, [1])
+        self.assertEqual(got["timer"], "cuda_event")
+
+    def test_the_eager_path_also_returns_samples_and_runs_the_hook(self):
+        n = []
+        got = hl.time_op(lambda: None, warmup=1, repeats=3, graph=False, detail=True, samples=True,
+                         pre_sample=lambda: n.append(1))
+        self.assertEqual(got["samples"], [9.0, 3.0, 6.0])
+        self.assertEqual(len(n), 3)
+
+
+class TestRankContext(_HarnessTestCase):
+    def test_outside_a_pool_the_context_is_rank_zero_of_one(self):
+        ctx = hl.rank_context()
+        self.assertEqual((ctx.rank, ctx.world, ctx.data_rank), (0, 1, 0))
+
+    def test_the_per_rank_seed_depends_on_the_data_rank_not_the_process_rank(self):
+        a, b = hl.RankContext(1, 4), hl.RankContext(1, 4, data_rank=0)
+        self.assertNotEqual(a.seed_for(5), hl.RankContext(0, 4).seed_for(5))
+        self.assertEqual(b.seed_for(5), hl.RankContext(0, 4).seed_for(5))   # rank_skew: reads rank 0's data
+
+    def test_the_rank_generator_is_created_only_when_a_factory_uses_it(self):
+        ctx = hl.RankContext(2, 4).for_draw(7, "cpu")
+        self.assertEqual(self.stack.seeds, [])
+        self.assertIsNotNone(ctx.rank_rng)
+        self.assertEqual(self.stack.seeds, [("cpu", hl.RankContext(2, 4).seed_for(7))])
+
+    def test_factories_get_the_context_only_when_they_ask_for_it(self):
+        ctx = hl.RankContext(3, 4)
+        self.assertEqual(hl.call_make_inputs(lambda rng: ("one", rng), "R", ctx), ("one", "R"))
+        self.assertEqual(hl.call_make_inputs(lambda rng, s=3: ("closure", s), "R", ctx), ("closure", 3))
+        self.assertEqual(hl.call_make_inputs(lambda rng, c: c.rank, "R", ctx), 3)
+
+        def kw(rng, ctx=None):
+            return ctx.rank
+        self.assertEqual(hl.call_make_inputs(kw, "R", ctx), 3)
+
+    def test_check_random_vs_baseline_hands_the_draw_context_to_two_argument_factories(self):
+        seen = []
+
+        def make(rng, ctx):
+            seen.append((ctx.rank, ctx.seed))
+            return _T((2,), fill=1.0)
+        ok, _ = hl.check_random_vs_baseline(None, lambda a: a, [{"sig": "s", "make_inputs": make}], 0.01,
+                                            draws=2, baseline_outputs={"s|0": _T((2,), fill=1.0),
+                                                                       "s|1": _T((2,), fill=1.0)},
+                                            rank_ctx=hl.RankContext(2, 4))
+        self.assertTrue(ok)
+        self.assertEqual(seen, [(2, 0), (2, 1)])
+
+
+class TestStrictGraphReplay(_CudaTestCase):
+    def test_a_failed_capture_is_a_failure_when_strict(self):
+        self.stack.capture_raises = True
+        b = _ReplayBundle(self.stack)
+        ok, per = hl.check_graph_replay(b.fill, b.run, b.read_out, [_replay_case("a", [1.0])], 0.01,
+                                        strict=True)
+        self.assertFalse(ok)
+        self.assertIn("graph_capture_failed", per[0]["note"])
+
+    def test_a_failed_capture_is_still_a_skip_by_default(self):
+        self.stack.capture_raises = True
+        b = _ReplayBundle(self.stack)
+        ok, per = hl.check_graph_replay(b.fill, b.run, b.read_out, [_replay_case("a", [1.0])], 0.01)
+        self.assertTrue(ok)
+        self.assertIn("skipped", per[0]["note"])
+
+
+class TestRunCorrectnessSequence(_HarnessTestCase):
+    def test_sequence_cases_are_checked_and_reported(self):
+        cases = [_case("a", [1.0, 1.0]), _case("b", [2.0, 2.0])]
+        seq = [_case("s0", [1.0, 1.0]), _case("s1", [3.0, 3.0], ref_values=[4.0, 4.0])]
+        ok, rep = hl.run_correctness({"cuda_graph": False}, eager_cases=cases, current_call=_echo_call,
+                                     random_shapes=[], tol=0.01, baseline_outputs={}, sequence=seq)
+        self.assertFalse(ok)
+        self.assertEqual([c["correct"] for c in rep["sequence"]], [True, False])
+
+    def test_no_sequence_means_no_sequence_report(self):
+        cases = [_case("a", [1.0, 1.0]), _case("b", [2.0, 2.0])]
+        ok, rep = hl.run_correctness({"cuda_graph": False}, eager_cases=cases, current_call=_echo_call,
+                                     random_shapes=[], tol=0.01, baseline_outputs={})
+        self.assertTrue(ok)
+        self.assertNotIn("sequence", rep)
+
+
+class TestMeasureLegsReceipt(_LegTestCase):
+    def _receipt_legs(self, primed=True):
+        def handler(cmd, env):
+            if "overlay_setup.py" in " ".join(cmd):
+                return _Proc(0)
+            mode = cmd[cmd.index("--mode") + 1]
+            is_base = env.get("PYTHONPATH", "").split(os.pathsep)[0] == self.base
+            if mode == "resolve":
+                return _Proc(0, json.dumps(self.BASE_IDENT if is_base else self.CAND_IDENT))
+            if mode == "list":
+                return _Proc(0, json.dumps({"sigs": ["decode"]}))
+            row = {"sig": "decode", "ms": 2.0 if is_base else 2.0, "regime": "decode", "m": 4,
+                   "timer": "cuda_event_graph", "cache_condition": {"mode": "read-evict"}}
+            if primed is not None:
+                row.update(primed=primed, host_ms=0.5 if is_base else 0.25)
+            return _Proc(0, json.dumps({"cases": [row]}))
+        return self._script(handler)
+
+    def test_each_row_carries_both_legs_receipt(self):
+        self._receipt_legs()
+        per = hl.measure_legs(self.task, self.meta)
+        legs = per[0]["legs"]
+        self.assertEqual(per[0]["timer"], "cuda_event_graph")
+        self.assertEqual(legs["baseline"]["primed"], True)
+        self.assertEqual(legs["baseline"]["host_ms"], 0.5)
+        self.assertEqual(legs["current"]["host_ms"], 0.25)
+        self.assertEqual(legs["baseline"]["cache_condition"], {"mode": "read-evict"})
+        self.assertEqual(legs["baseline"]["ms_reps"], [2.0] * per[0]["reps"])
+
+    def test_a_leg_that_cannot_tell_has_no_primed(self):
+        self._receipt_legs(primed=None)
+        per = hl.measure_legs(self.task, self.meta)
+        self.assertNotIn("primed", per[0]["legs"]["baseline"])
+
+    def test_no_early_stop_always_runs_every_pair(self):
+        self._legs(timings={"decode": (4.0, 1.0)}, sigs=("decode",))
+        per = hl.measure_legs(self.task, self.meta, early_stop=False)
+        self.assertEqual(per[0]["reps"], 3)
+        self._legs(timings={"decode": (4.0, 1.0)}, sigs=("decode",))
+        per = hl.measure_legs(self.task, self.meta)
+        self.assertEqual(per[0]["reps"], 1)                 # decisive at once: the default still stops
+
+    def test_an_aa_run_times_the_baseline_against_itself_without_the_direction_assert(self):
+        sub = self._legs(timings={"decode": (2.0, 1.0)}, sigs=("decode",))
+        per = hl.measure_legs(self.task, self.meta, base=self.base, cand=self.base, check_differ=False)
+        self.assertNotIn("resolve", sub.modes())
+        self.assertEqual(per[0]["speedup"], 1.0)
+
+
+# --------------------------------------------------------------------------- #
+# Edge paths of the multi-rank / deployment-graph additions (and a few older ones), CPU only
+# --------------------------------------------------------------------------- #
+class TestRankContextEdges(_HarnessTestCase):
+    """The RankContext plumbing a rank pool relies on: its receipt form, the process-wide install, and how
+    a factory taking *args, or one whose signature cannot be read, is called."""
+
+    def test_as_dict_reports_the_process_rank_and_the_data_rank(self):
+        self.assertEqual(hl.RankContext(2, 4, data_rank=1, local_rank=0).as_dict(),
+                         {"rank": 2, "world": 4, "data_rank": 1, "local_rank": 0})
+        # strings are coerced and a non-positive world is one rank
+        self.assertEqual(hl.RankContext("3", 0).as_dict(),
+                         {"rank": 3, "world": 1, "data_rank": 3, "local_rank": 3})
+
+    def test_an_installed_context_is_what_factories_receive_by_default(self):
+        self.addCleanup(setattr, hl, "_RANK_CONTEXT", hl._RANK_CONTEXT)
+        ctx = hl.RankContext(1, 2, data_rank=0)
+        self.assertIs(hl.set_rank_context(ctx), ctx)
+        self.assertIs(hl.rank_context(), ctx)
+        self.assertEqual(hl.call_make_inputs(lambda rng, c: (rng, c.rank, c.data_rank), "R"), ("R", 1, 0))
+        hl.set_rank_context(None)                           # uninstalled: rank 0 of 1 again
+        self.assertEqual(hl.rank_context().as_dict(), {"rank": 0, "world": 1, "data_rank": 0, "local_rank": 0})
+
+    def test_a_star_args_factory_gets_rng_alone_unless_it_names_ctx(self):
+        ctx = hl.RankContext(3, 4)
+        self.assertIsNone(hl._positional_arity(lambda *a: a))
+        self.assertEqual(hl.call_make_inputs(lambda *a: a, "R", ctx), ("R",))
+        self.assertEqual(hl.call_make_inputs(lambda rng, *rest: (rng, rest), "R", ctx), ("R", ()))
+
+        def kw_only(*args, ctx=None):
+            return args, ctx.rank
+        self.assertEqual(hl.call_make_inputs(kw_only, "R", ctx), (("R",), 3))
+
+    def test_a_factory_whose_signature_cannot_be_read_is_called_with_rng_alone(self):
+        class _Opaque:
+            __signature__ = "not a Signature"               # inspect.signature raises TypeError on it
+
+            def __init__(self):
+                self.calls = []
+
+            def __call__(self, *args, **kw):
+                self.calls.append((args, kw))
+                return "inputs"
+        f = _Opaque()
+        self.assertIsNone(hl._positional_arity(f))
+        self.assertFalse(hl._takes_ctx_keyword(f))
+        self.assertEqual(hl.call_make_inputs(f, "R", hl.RankContext(1, 2)), "inputs")
+        self.assertEqual(f.calls, [(("R",), {})])
+
+
+class TestFlushBufferWithoutACurrentDevice(_CudaTestCase):
+    def test_an_unqueryable_current_device_still_allocates_once_and_reuses_the_buffer(self):
+        def no_device():
+            raise RuntimeError("no current device")
+        self.torch.cuda.current_device = no_device
+        n = (4 << 20) // 4
+        hl.flush_cache(self.torch, mb=4)
+        first = hl._CACHE_FLUSH_BUF
+        self.assertEqual(first.numel(), n)
+        self.assertIsNone(hl._CACHE_FLUSH_DEV)
+        hl.flush_cache(self.torch, mb=4)
+        self.assertIs(hl._CACHE_FLUSH_BUF, first)           # not reallocated on every sample
+        self.assertEqual(hl._CACHE_FLUSH_SINK.item(), float(n))
+
+
+class TestSpinEdges(unittest.TestCase):
+    """Edge paths of the queued GPU spin (A16), with TestTimeOpSpin's isolation (fake torch, flat clock,
+    pristine flush buffer and spin-rate cache)."""
+
+    def setUp(self):
+        self._prev_torch = sys.modules.get("torch", _MISSING)
+        self.addCleanup(self._restore_torch)
+        self.addCleanup(setattr, hl, "time", hl.time)
+        hl.time = _FlatClock(0.003)                         # host probe: 0.1 ms per call
+        for g in ("_CACHE_FLUSH_BUF", "_CACHE_FLUSH_SINK", "_CACHE_FLUSH_DEV"):
+            setattr(hl, g, None)
+            self.addCleanup(setattr, hl, g, None)
+        self.addCleanup(setattr, hl, "_SPIN_RATE", hl._SPIN_RATE)
+        hl._SPIN_RATE = {0: 1000.0}
+        env = patch.dict(os.environ, {"HARNESS_CACHE_FLUSH_MB": "1"})   # not the host's setting
+        env.start()
+        self.addCleanup(env.stop)
+
+    def _restore_torch(self):
+        if self._prev_torch is _MISSING:
+            sys.modules.pop("torch", None)
+        else:
+            sys.modules["torch"] = self._prev_torch
+
+    def _torch(self, **kw):
+        ft = _SpinTorch(**kw)
+        sys.modules["torch"] = ft.mod
+        return ft
+
+    @staticmethod
+    def _no_device():
+        raise RuntimeError("no current device")
+
+    def test_an_unqueryable_device_is_calibrated_once_under_no_device(self):
+        hl._SPIN_RATE = {}
+        ft = self._torch(cal_ms=4.0)                        # 1e6 cycles in 4 ms -> 250 cycles/us
+        ft.mod.cuda.current_device = self._no_device
+        self.assertEqual(hl._spin_cycles_per_us(ft.mod), 250.0)
+        self.assertEqual(hl._SPIN_RATE, {None: 250.0})
+        self.assertEqual(hl._spin_cycles_per_us(ft.mod), 250.0)
+        self.assertEqual(ft.ops.count(("sleep", 1_000_000)), 3)    # the second lookup did not recalibrate
+
+    def test_a_spin_that_measures_no_time_cannot_be_calibrated(self):
+        hl._SPIN_RATE = {}
+        ft = self._torch(cal_ms=0.0)
+        with self.assertRaisesRegex(RuntimeError, "cannot calibrate the GPU spin"):
+            hl._spin_cycles_per_us(ft.mod)
+        self.assertEqual(hl._SPIN_RATE, {})                 # a failed calibration is not cached
+        # time_op reports the case untimeable instead of inventing a spin length
+        self.assertIsNone(hl.time_op(ft.call, warmup=1, repeats=2, detail=True, spin={}))
+
+    def test_the_pre_sample_hook_runs_in_every_spun_sample_before_the_spin_is_queued(self):
+        ft = self._torch()
+        got = hl.time_op(ft.call, warmup=1, repeats=2, detail=True, spin={},
+                         pre_sample=lambda: ft.ops.append("hook"))
+        self.assertEqual(ft.samples(), [["flush", "sync", "hook", ("sleep", 200000), ("record", "spun"),
+                                         ("record", "start"), "call", ("record", "end"), ("query", "spun"),
+                                         ("synchronize", "end")]] * 2)
+        self.assertEqual(ft.ops.count("hook"), 2)           # the un-spun reference samples run no hook
+        self.assertEqual((got["spin"]["samples"], got["spin"]["late"]), (2, 0))
+
+
+class TestTimeOpWallSampleHooks(_HarnessTestCase):
+    WALL_MS = (5.0, 1.0, 3.0)
+
+    def test_the_wall_path_keeps_taken_order_samples_and_hooks_each_sample_outside_its_window(self):
+        order = []
+        real_flush = hl.flush_cache
+
+        def flush(torch=None, mb=None):
+            order.append("flush")
+            return real_flush(torch, mb=mb)
+        with patch.object(hl, "flush_cache", flush), _env(HARNESS_CACHE_FLUSH_MB="1"):
+            got = hl.time_op(lambda: None, warmup=1, repeats=3, detail=True, samples=True,
+                             pre_sample=lambda: order.append(("hook", self.clock.i)))
+        self.assertEqual(got["timer"], "wall")
+        self.assertEqual(len(got["samples"]), 3)
+        for ms, want in zip(got["samples"], (5.0, 1.0, 3.0)):
+            self.assertAlmostEqual(ms, want)
+        self.assertAlmostEqual(got["ms"], 3.0)              # the median is unchanged
+        self.assertEqual([o if isinstance(o, str) else o[0] for o in order], ["flush", "hook"] * 3)
+        # each hook runs before its sample's first clock read (two reads per earlier sample)
+        self.assertEqual([o[1] for o in order if not isinstance(o, str)], [0, 2, 4])
+
+
+class TestCaptureContextAndStrictGraph(_CudaTestCase):
+    """capture_context is entered around exactly the graph capture (time_op and run_correctness's replay
+    check); strict_graph turns a failed replay capture into a failure."""
+
+    def _ctx(self, fail=False):
+        stack = self.stack
+
+        @contextlib.contextmanager
+        def ctx():
+            if fail:
+                raise RuntimeError("graph_capture() needs the serving engine")
+            stack.stream_ops.append(("enter_ctx",))
+            try:
+                yield
+            finally:
+                stack.stream_ops.append(("exit_ctx",))
+        return ctx
+
+    def _scope_ops(self):
+        keep = ("enter_ctx", "enter_graph", "exit_graph", "exit_ctx")
+        return [op[0] for op in self.stack.stream_ops if op[0] in keep]
+
+    def _run(self, **kw):
+        b = _ReplayBundle(self.stack)
+        replay = {"fill": b.fill, "run": b.run, "read_out": b.read_out,
+                  "cases": [_replay_case("big", (1.0, 2.0, 3.0)), _replay_case("m1", (4.0,))]}
+        return hl.run_correctness({"cuda_graph": True}, eager_cases=[_case("m1", (1.0, 2.0))],
+                                  baseline_call=_echo_call, current_call=_echo_call, random_shapes=[],
+                                  tol=0.01, replay=replay, **kw)
+
+    def test_time_op_enters_the_capture_context_around_the_graph_capture(self):
+        with _env(HARNESS_CACHE_FLUSH_MB="1"):              # a small eviction buffer keeps the fake fast
+            got = hl.time_op(lambda: None, warmup=1, repeats=3, graph=True, detail=True,
+                             capture_context=self._ctx())
+        self.assertEqual(got["timer"], "cuda_event_graph")
+        self.assertEqual(self._scope_ops(), ["enter_ctx", "enter_graph", "exit_graph", "exit_ctx"])
+
+    def test_a_capture_context_that_fails_falls_back_to_eager_event_timing(self):
+        with _env(HARNESS_CACHE_FLUSH_MB="1"):
+            got = hl.time_op(lambda: None, warmup=1, repeats=3, graph=True, detail=True,
+                             capture_context=self._ctx(fail=True))
+        self.assertEqual(got["timer"], "cuda_event")
+        self.assertEqual(self._scope_ops(), [])
+        self.assertEqual(self.stack.replays, 0)
+
+    def test_run_correctness_enters_the_capture_context_around_the_replay_capture(self):
+        ok, report = self._run(capture_context=self._ctx())
+        self.assertTrue(ok)
+        self.assertEqual([e["case"] for e in report["graph_replay"]], ["big", "m1"])
+        self.assertEqual(self._scope_ops(), ["enter_ctx", "enter_graph", "exit_graph", "exit_ctx"])
+
+    def test_strict_graph_turns_a_failed_replay_capture_into_a_failure(self):
+        self.stack.capture_raises = True
+        ok, report = self._run(strict_graph=True)
+        self.assertFalse(ok)
+        self.assertEqual([e["correct"] for e in report["graph_replay"]], [False])
+        self.assertIn("graph_capture_failed (graph deployment, strict)", report["graph_replay"][0]["note"])
+        self.assertTrue(all(e["correct"] for e in report["eager"]))    # only the replay leg failed
+        ok, report = self._run()                            # default: the eager-only-box skip, unchanged
+        self.assertTrue(ok)
+        self.assertIn("skipped: capture unavailable", report["graph_replay"][0]["note"])
+
+
+class TestToDeviceLikeNamedTuple(unittest.TestCase):
+    def test_a_named_tuple_oracle_keeps_its_type_and_fields(self):
+        Pair = collections.namedtuple("Pair", "out lse")
+        ref = Pair(_T((2,), [1.0, 2.0]), _T((1,), [-3.0]))
+        got = hl.to_device_like({"attn": ref, "n": 3}, "cuda")
+        self.assertIs(type(got["attn"]), Pair)
+        self.assertEqual((got["attn"].out.device, got["attn"].lse.device), ("cuda", "cuda"))
+        self.assertEqual((got["attn"].out.tolist(), got["attn"].lse.tolist()), ([1.0, 2.0], [-3.0]))
+        self.assertEqual(got["n"], 3)                       # a non-tensor leaf passes through
+        self.assertEqual(ref.out.device, "cpu")             # the recorded oracle is not moved in place
+
+
+class TestNoiseRelUnmeasurable(_HarnessTestCase):
+    def test_an_output_noise_rel_cannot_measure_is_infinite_as_correct_rejects_it(self):
+        self.assertEqual(hl.noise_rel(_T((0,), []), _T((0,), [])), float("inf"))
+        self.assertEqual(hl.correct(_T((0,), []), _T((0,), []), 0.5), (False, float("inf")))
+
+
+def _observed_meta(cases, **kw):
+    meta = {"workload": {"kind": "agentx_trace_replay", "cases": cases,
+                         "serving_weight_model": {"source": "observed_workload", "evidence_path": "w.json"}}}
+    meta.update(kw)
+    return meta
+
+
+class TestObservedWorkloadCaseShape(unittest.TestCase):
+    def test_a_case_that_is_not_an_object_is_refused(self):
+        with self.assertRaisesRegex(hl.HarnessIncompleteError, "Observed workload case must be an object"):
+            hl.served_buckets(_observed_meta(["decode-p50"]))
+
+    def test_a_case_without_a_phase_is_refused(self):
+        for regime in (None, "", "   "):
+            case = {"sig": "d1", "regime": regime, "m": 4, "effective_calls": 3}
+            with self.subTest(regime=regime), self.assertRaisesRegex(
+                    hl.HarnessIncompleteError, "Observed case d1: regime must be a nonempty workload phase"):
+                hl.served_buckets(_observed_meta([case]))
+
+    def test_a_benched_case_needs_a_positive_m(self):
+        for m in (None, 0, -8, "x"):
+            case = {"sig": "d1", "regime": "decode", "m": m, "effective_calls": 3}
+            with self.subTest(m=m), self.assertRaisesRegex(
+                    hl.HarnessIncompleteError, "Observed case d1: missing positive m for op benchmark"):
+                hl.served_buckets(_observed_meta([case]))
+
+    def test_a_case_that_carries_no_weight_needs_no_m(self):
+        meta = _observed_meta([{"sig": "d1", "regime": "Decode", "m": "4", "effective_calls": 3},
+                               {"sig": "tail", "regime": "decode", "effective_calls": 0},
+                               {"sig": "p", "regime": "prefill", "effective_calls": 5}],
+                              served_regimes=["decode"])
+        self.assertEqual(hl.served_buckets(meta), [("decode", 4, 3.0)])
+
+
+class TestGraphCaptureDeclarations(unittest.TestCase):
+    def test_captured_sizes_must_be_distinct_positive_integers(self):
+        want = [("graph_capture of phase 'decode'.sizes must be a non-empty list of distinct positive integers "
+                 "(the captured sizes)")]
+        for sizes in ([], [0], [-2], [True, 2], [2.0], "8", None, [4, 4]):
+            with self.subTest(sizes=sizes):
+                self.assertEqual(hl.graph_capture_problems({"sizes": sizes}, "decode"), want)
+        self.assertEqual(hl.graph_capture_problems({"sizes": [1, 2, 8]}, "decode"), [])
+        self.assertTrue(hl.graph_capture_problems({"sizes": []}, "")[0].startswith("graph_capture.sizes "))
+
+    def test_declared_graphs_must_be_captured_sizes_with_exactly_the_graph_dims(self):
+        spec = {"sizes": [1, 4, 8], "pad": "up", "dims": ["kv"]}
+        self.assertEqual(hl.declared_graph_problems([{"m": 4, "kv": 128}, {"m": 8, "kv": 4096}], spec, "g0"), [])
+        for graphs in (None, [], (), {"m": 4, "kv": 128}):
+            with self.subTest(graphs=graphs):
+                probs = hl.declared_graph_problems(graphs, spec, "g0")
+                self.assertEqual(len(probs), 1)
+                self.assertTrue(probs[0].startswith("g0: `graphs` must list the deployment graph(s)"))
+        keys = "must have exactly the keys m + the case_manifest dims besides regime and m ['kv']"
+        self.assertEqual(hl.declared_graph_problems([{"m": 4}, "m4", {"m": 3, "kv": 128}], spec, "g1"),
+                         [f"g1: graph {{'m': 4}} {keys}", f"g1: graph 'm4' {keys}",
+                          "g1: graph {'m': 3, 'kv': 128} has m=3, not a captured size [1, 4, 8]"])
+        self.assertEqual(hl.declared_graph_problems([{"m": 4}], spec, "g2", dims=[]), [])   # explicit dims win
+        self.assertEqual(hl.declared_graph_problems([{"m": 1}], None, "g3"),
+                         ["g3: graph {'m': 1} has m=1, not a captured size []"])
+
+
+class TestDeploymentGraphEdges(unittest.TestCase):
+    @staticmethod
+    def _meta(cases, capture=None, dims=("regime", "m"), **kw):
+        meta = {"regime": {"cuda_graph": True, "graph_capture": capture or {"sizes": [1, 4, 8], "pad": "up"}},
+                "case_manifest": {"dims": list(dims), "cases": cases}}
+        meta.update(kw)
+        return meta
+
+    def test_an_incomplete_observed_workload_falls_back_to_every_manifest_timing_case(self):
+        cases = [{"sig": "d2", "regime": "decode", "m": 2, "roles": ["timing"]},
+                 {"sig": "d8", "regime": "decode", "m": 8, "roles": ["timing", "correctness"]},
+                 {"sig": "c3", "regime": "decode", "m": 3, "roles": ["correctness"]}]
+        workload = {"kind": "agentx_trace_replay", "serving_weight_model": {"source": "observed_workload"},
+                    "cases": [{"sig": "d2", "regime": "decode", "m": 2, "effective_calls": 0}]}
+        meta = self._meta(cases, workload=workload)
+        with self.assertRaisesRegex(hl.HarnessIncompleteError, "evidence_path"):
+            hl.served_buckets(meta)                         # the weighting refuses this workload ...
+        info = hl.deployment_graphs(meta)[""]               # ... the graph requirement does not trust its mass
+        self.assertEqual(info["problems"], [])
+        self.assertEqual(info["cases"], {"d2": {"m": 4}, "d8": {"m": 8}})
+        self.assertEqual(info["graphs"], [{"m": 4}, {"m": 8}])
+
+    def test_a_case_of_another_phase_is_not_held_to_this_phases_captured_sizes(self):
+        meta = {"phase_regimes": {"decode": {"cuda_graph": True,
+                                             "graph_capture": {"sizes": [1, 2, 4], "pad": "up"}},
+                                  "prefill": {"cuda_graph": False}},
+                "case_manifest": {"dims": ["regime", "m"], "cases": [
+                    {"sig": "d1", "regime": "decode", "m": 1, "roles": ["timing"]},
+                    {"sig": "d3", "regime": " Decode", "m": 3, "roles": ["timing"]},
+                    {"sig": "p512", "regime": "prefill", "m": 512, "roles": ["timing"]}]}}
+        out = hl.deployment_graphs(meta)
+        self.assertEqual(list(out), ["decode"])
+        self.assertEqual(out["decode"]["problems"], [])     # m=512 is above the sizes but not a decode case
+        self.assertEqual(out["decode"]["cases"], {"d1": {"m": 1}, "d3": {"m": 4}})
+        self.assertEqual(out["decode"]["graphs"], [{"m": 1}, {"m": 4}])
+
+    def test_a_timing_case_without_a_positive_integer_m_is_a_problem(self):
+        cases = [{"sig": "a", "regime": "decode", "roles": ["timing"]},
+                 {"sig": "b", "regime": "decode", "m": True, "roles": ["timing"]},
+                 {"sig": "c", "regime": "decode", "m": 0, "roles": ["timing"]},
+                 {"sig": "d", "regime": "decode", "m": "4", "roles": ["timing"]},
+                 {"sig": "e", "regime": "decode", "roles": ["timing"]}]
+        info = hl.deployment_graphs(self._meta(cases, workload={"cases": [{"sig": "e", "m": 3}]}))[""]
+        self.assertEqual(info["problems"], [
+            f"timing case {sig} (phase '') needs a positive integer m in its case_manifest entry (the rows of "
+            f"one deployment step), got {m!r}" for sig, m in (("a", None), ("b", True), ("c", 0), ("d", "4"))])
+        self.assertEqual(info["cases"], {"e": {"m": 4}})    # e's m comes from meta.workload.cases
+        self.assertEqual(info["graphs"], [{"m": 4}])
+
+    def test_a_timing_case_missing_a_graph_dimension_is_a_problem(self):
+        cases = [{"sig": "a", "regime": "decode", "m": 1, "kv": 128, "roles": ["timing"]},
+                 {"sig": "b", "regime": "decode", "m": 2, "roles": ["timing"]},
+                 {"sig": "c", "regime": "decode", "m": 3, "roles": ["timing"]}]
+        meta = self._meta(cases, capture={"sizes": [1, 4, 8], "pad": "up", "dims": ["kv"]},
+                          dims=("regime", "m", "kv"), workload={"cases": [{"sig": "c", "kv": 4096}]})
+        info = hl.deployment_graphs(meta)[""]
+        self.assertEqual(info["dims"], ["kv"])
+        self.assertEqual(info["problems"], ["timing case b (phase '') lacks the case_manifest dimension 'kv'"])
+        self.assertEqual(info["cases"], {"a": {"m": 1, "kv": 128}, "c": {"m": 4, "kv": 4096}})
+        self.assertEqual(info["graphs"], [{"m": 1, "kv": 128}, {"m": 4, "kv": 4096}])
+
+
+class TestStatefulTierHelpers(unittest.TestCase):
+    def test_stateful_tiers_lists_the_named_tiers_only(self):
+        self.assertEqual(hl.stateful_tiers(None), [])
+        self.assertEqual(hl.stateful_tiers({"capabilities": {"stateful_tiers": "wrap"}}), [])
+        tiers = [{"name": "fresh", "transition": "first step"}, "bare", {"name": 3}, {"name": "wrap"}]
+        self.assertEqual(hl.stateful_tiers({"capabilities": {"stateful_tiers": tiers}}), ["fresh", "wrap"])
+
+    def test_each_tier_needs_a_name_and_a_transition_and_names_are_unique(self):
+        good = [{"name": "prefill_tail", "transition": "prefill tail then decode"},
+                {"name": "wrap", "transition": "ring wraps"}]
+        self.assertEqual(hl.stateful_tier_problems({"capabilities": {"stateful_tiers": good}}), [])
+        bad = [*good, {"name": " ", "transition": "x"}, {"name": "tail"}, "bare",
+               {"name": "wrap", "transition": "wraps again"}]
+        self.assertEqual(hl.stateful_tier_problems({"capabilities": {"stateful_tiers": bad}}), [
+            "stateful tier {'name': ' ', 'transition': 'x'} needs a non-empty name and transition",
+            "stateful tier {'name': 'tail'} needs a non-empty name and transition",
+            "stateful tier 'bare' needs a non-empty name and transition",
+            "capabilities.stateful_tiers has duplicate names"])
+
+    def test_a_step_declares_its_tiers_by_tier_or_tiers(self):
+        self.assertEqual(hl.step_tiers({"tier": "wrap"}), ["wrap"])
+        self.assertEqual(hl.step_tiers({"tiers": ["wrap", 3, "tail"]}), ["wrap", "tail"])
+        self.assertEqual(hl.step_tiers({"tiers": ("fresh",), "tier": "wrap"}), ["fresh"])   # `tiers` wins
+        for step in (None, "wrap", {}, {"tier": 3}, {"tiers": "wrap"}):
+            with self.subTest(step=step):
+                self.assertEqual(hl.step_tiers(step), [])
+
+
+class TestRunLegOverrides(_LegTestCase):
+    def test_env_extra_reaches_the_leg_as_strings_and_cannot_displace_the_overlay(self):
+        with _env(PYTHONPATH=None, HARNESS_TEST_LEG_FLAG=None):
+            self._script(lambda cmd, env: _Proc(0, '{"ok": true}'))
+            got = hl._run_leg(self.task, self.base, "list",
+                              env_extra={"HARNESS_TEST_LEG_FLAG": 1, "PYTHONPATH": "/extra"})
+            self.assertNotIn("HARNESS_TEST_LEG_FLAG", os.environ)     # the parent's environment is untouched
+        env = self.sub.calls[0]["env"]
+        self.assertEqual(got, {"ok": True})
+        self.assertEqual(env["HARNESS_TEST_LEG_FLAG"], "1")
+        self.assertEqual(env["PYTHONPATH"], os.pathsep.join([self.base, "/extra"]))
+
+    def test_a_target_override_outside_identity_resolution_is_refused_before_launching(self):
+        self._script(lambda cmd, env: _Proc(0, '{"module": "m"}'))
+        for mode in ("time", "list", "oracle"):
+            with self.subTest(mode=mode), self.assertRaisesRegex(
+                    ValueError, "target_callable override is only valid for identity resolution"):
+                hl._run_leg(self.task, self.base, mode, target_callable="live_stack.moe:prefill")
+        self.assertEqual(self.sub.calls, [])                # no leg was started
+        self.assertEqual(hl._run_leg(self.task, self.base, "resolve", target_callable="live_stack.moe:prefill"),
+                         {"module": "m"})
+        self.assertEqual(self.sub.flag("--target-callable"), "live_stack.moe:prefill")
+
+    def test_malformed_phase_target_callables_are_refused_before_any_leg_runs(self):
+        self._legs()
+        for targets in (["live_stack.moe:prefill"], {"prefill": ""}, {"prefill": "   "}, {"prefill": None}):
+            with self.subTest(targets=targets), self.assertRaisesRegex(
+                    RuntimeError, "phase_target_callables must map phases to exact callable specs"):
+                hl.assert_legs_differ(self.task, self.base, self.cand,
+                                      {**self.meta, "phase_target_callables": targets})
+        self.assertEqual(self.sub.calls, [])
+
+
+class _ReapableProc:
+    """A leg handle for _kill_process_group that records what was attempted on it."""
+
+    pid = 4321
+
+    def __init__(self):
+        self.waits = []
+        self.killed = False
+
+    def wait(self, timeout=None):
+        self.waits.append(timeout)
+        return 0
+
+    def kill(self):
+        self.killed = True
+
+
+class TestKillProcessGroupEdges(unittest.TestCase):
+    def _kill_with_failing_killpg(self, err):
+        proc, sent = _ReapableProc(), []
+
+        def _killpg(pgid, sig):
+            sent.append((pgid, sig))
+            raise err(pgid)
+        with _patched(os, killpg=_killpg, getpgid=lambda pid: 999 if pid else 1):
+            self.assertIsNone(hl._kill_process_group(proc, grace=0.01))
+        return proc, sent
+
+    def test_a_group_that_cannot_be_signalled_ends_the_escalation(self):
+        for err in (ProcessLookupError, PermissionError):
+            with self.subTest(err=err.__name__):
+                proc, sent = self._kill_with_failing_killpg(err)
+                self.assertEqual(sent, [(999, signal.SIGTERM)])    # no SIGKILL after it
+                self.assertEqual(proc.waits, [])                   # nothing to reap
+                self.assertFalse(proc.killed)                      # and our own process is never killed
 
 
 if __name__ == "__main__":

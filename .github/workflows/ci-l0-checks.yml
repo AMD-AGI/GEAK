@@ -142,6 +142,12 @@ jobs:
             e2e_workflow/scripts/tests/test_harness_lib.py \
             e2e_workflow/scripts/tests/test_observed_workload_weights.py \
             e2e_workflow/scripts/tests/test_leg_runner.py \
+            e2e_workflow/scripts/tests/test_generate_ut.py \
+            e2e_workflow/scripts/tests/test_ut_runner.py \
+            e2e_workflow/scripts/tests/test_verify_ut.py \
+            e2e_workflow/scripts/tests/test_rank_pool.py \
+            e2e_workflow/scripts/tests/test_replay_groups.py \
+            e2e_workflow/scripts/tests/test_ut_runner_main.py \
             e2e_workflow/scripts/tests/test_server_teardown.py \
             e2e_workflow/scripts/tests/test_bench_e2e_teardown_lookup.py \
             e2e_workflow/scripts/tests/test_run_reaper.py \
@@ -362,6 +368,8 @@ jobs:
           node --test e2e_workflow/scripts/test_agentx_standalone_handoff.mjs
       - name: candidate floor and invalid measurement recovery
         run: node kernel_workflow/scripts/test_candidate_floor.js
+      - name: multi-GPU lane receipts (per-rank times and alignment)
+        run: node kernel_workflow/scripts/test_multi_rank_receipt.js
       - name: gfx1151 knowledge doc contract
         run: node kernel_workflow/scripts/test_gfx1151_knowledge_docs.js
       # The JS gate and the Python selection verdict canonicalize the same kernel symbols. Only this
@@ -391,6 +399,11 @@ jobs:
         run: node e2e_workflow/scripts/test_milestone_lane_retry.js
       - name: GPU family table (identical in every workflow)
         run: node kernel_workflow/scripts/test_gpu_family_table.js
+      # A multi-rank UT runs only on its whole GPU group: Milestone and serial HeadKernel lease the
+      # group from GPU_LIST and hand it to the lane; a path that cannot hold it defers the task with
+      # the reason; single-GPU dispatch stays byte-identical. No GPU, no model.
+      - name: multi-GPU candidate placement and dispatch
+        run: node e2e_workflow/scripts/test_multi_gpu_dispatch.js
       - name: gfx1201 fail-closed knowledge regression
         run: node kernel_workflow/scripts/test_rdna4_policy.js
       - name: R9700 E2E identity and knowledge policy

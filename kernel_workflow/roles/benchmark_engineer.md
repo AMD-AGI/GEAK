@@ -5,6 +5,11 @@ the whole workflow depends on this being correct and stable. Operate on the cano
 
 ## Inputs
 `WORKSPACE`, `EVAL_DIR`, `SKILL_DIR`, `GPU_ID`, and `ANALYSIS` (kernel type, files, existing tests).
+A multi-rank UT task delivered by the UT module also gets `GPUS_PER_JOB` (> 1) in its `## Inputs`;
+then step 5a applies as well, including its rule that a weighted multi-rank task times one full UT run
+of its own. A multi-GPU job whose prompt only has the
+`## Multi-GPU job (GPUS_PER_JOB=n)` lease note, with no `GPUS_PER_JOB` listed in `## Inputs` (e.g. a
+test started by torchrun), skips step 5a: record and return its baseline as before.
 
 **WORKLOAD ALIGNMENT.** The real-workload shape/dtype distribution is handled by the immutable
 `unittest.py` oracle itself — the Kernel Extractor bakes the weighted cases (`meta.workload.cases[]`)
@@ -90,7 +95,8 @@ takes 20–40 min, and KernelExtract already did it during GPU validation: its r
      --out "$EVAL_DIR/extraction_baseline.json"
    ```
    The reader accepts inline `gates.timing.per_case` (MOE/AR), `gates.timing.report` pointing to a
-   JSON object with `per_case` (WOA), and `gates.timing.record` pointing to a JSON list (HCB).
+   JSON object with `per_case` (WOA), `gates.timing.record` pointing to a JSON list (HCB), and the
+   top-level `timing.per_case` of a generated `unittest.py` (whose `gates.timing` is the string `"pass"`).
    References are relative to the workspace. It checks the run's exit code and gates, case coverage,
    and positive finite times on both legs. When `usable: true`, take `baseline_per_case` from its
    saved `per_case` (`latency_ms` = `baseline_ms`) and record `source` in the notes.
@@ -265,6 +271,40 @@ finite timings on both legs and the local correctness check passed. Say in
 `notes` where the baseline came from. In the COMMANDMENT's `METRIC`, state that verify uses the UT's
 in-run `GEAK_WEIGHTED_SPEEDUP` and per-case `speedup`, and that `FULL_BENCHMARK` runs once.
 
+### 5a. Multi-rank UT tasks: per-rank baseline (only when `GPUS_PER_JOB` is listed in your `## Inputs`)
+Skip this step when `GPUS_PER_JOB` is not listed in your `## Inputs`: on a single-GPU job, and on a
+multi-GPU job whose prompt only has the `## Multi-GPU job (GPUS_PER_JOB=n)` lease note (e.g. a
+torchrun test), whose baseline you record as before.
+A multi-rank UT runs every case on all `GPUS_PER_JOB` ranks at
+once and merges their times; the merged number alone cannot show how the ranks were aligned or which
+rank set the pace, so it is not a baseline on its own. For every timed case also record each rank's
+time and the alignment method, read from the UT's own structured output of YOUR runs:
+- **Generated task** (first line of `unittest.py` starts with `# GEAK-GENERATED unittest.py`): the
+  `GEAK_TIMING_RECEIPT: <json>` stdout line, or `receipt` in the `run/ut_result.json` the run rewrites.
+  Per case `<sig>`: `cases[<sig>].baseline.rank_ms` (ms, one per rank), `cases[<sig>].baseline.ms`
+  (the merged time), and the receipt's `alignment` object.
+- **Older hand-written multi-rank UT**: the `GEAK_PER_RANK_TIMING=<json>` and
+  `GEAK_TIMING_ALIGNMENT=<json>` stdout lines, or `timing` in the `run/ut_runs/<stamp>/summary.json`
+  the run wrote (the same layout as `timing` in the task's `run/ut_result.json`): per case
+  `baseline.per_rank_us` (µs, divide by 1000) and `baseline.step_us` (the merged time), plus
+  `timing.alignment`. The task's own `run/ut_result.json` is the extraction-time record: it shows the
+  format, but it is not your measurement.
+
+Per case, over your timed runs (3, or the single run of a weighted oracle): `latency_ms` = the median
+merged time, `rank_ms` = each rank's median (ms,
+rank order, exactly `GPUS_PER_JOB` values), `alignment` = the UT's alignment object verbatim (how the
+ranks are aligned before every timed sample, and how the per-rank times are merged). Write the same
+three fields into `baseline_timing.json`'s `test_cases`, put where you read them in
+`rank_timing_source`, and describe that parse in the COMMANDMENT's `PARSE` so Verify and the Director
+read the same fields. If the UT prints no per-rank times or no alignment method for a case, set that
+case's `rank_ms` / `alignment` to `null`, return `reliable: false`, and say what is missing in `notes`.
+Never copy one merged time into every rank and never write an alignment the UT did not report.
+
+**Weighted oracle (single-run setup):** the saved extraction baseline carries no per-rank times of a
+run of yours, so for a multi-rank result the reader answers `next_run: full` also when it is `usable: true`.
+Follow `next_run`: run the full UT once with timing, re-run the reader, and read `latency_ms`, `rank_ms`
+and `alignment` from that run.
+
 ## Return JSON
 ```json
 {
@@ -288,3 +328,7 @@ in-run `GEAK_WEIGHTED_SPEEDUP` and per-case `speedup`, and that `FULL_BENCHMARK`
 When `workload_aligned` is true, `baseline_per_case[].count` is the coefficient the time-weighted
 metric uses, and `weight = count·latency_ms` is the case's time share. On an unweighted run omit the
 workload fields entirely (output is identical to before).
+When step 5a applies (`GPUS_PER_JOB` listed in your `## Inputs`), every `baseline_per_case` item
+also carries `"rank_ms": [<one ms value
+per rank>]` and `"alignment": {...}` (both `null` when the UT does not report them, with
+`"reliable": false`), and the result adds `"rank_timing_source": "<the line or file they came from>"`.

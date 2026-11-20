@@ -64,7 +64,8 @@ use /absolute/path/to/GEAK/kernel_workflow to optimize /path/to/allreduce_task, 
 
 A task whose test runs on several GPUs (torchrun, `mp.spawn`, collectives) is detected at Setup and
 every command then leases that many GPUs together; give it enough `gpu_ids` (with too few it runs
-single-GPU and logs a warning).
+single-GPU and logs a warning). A multi-rank UT task from the e2e UT module declares its count and
+cannot run on fewer GPUs.
 
 Director → TechLead → specialist engineers, multi-round and budget-controlled, each patch independently
 verified. Output: `kernel_workflow/exp/team_<kernel>_<timestamp>/`.

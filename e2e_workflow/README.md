@@ -150,6 +150,13 @@ Workflow({
                           //   set "true" to enable. When OFF (default) nothing is injected -> behavior is
                           //   byte-identical to a run without the feature. Threaded down to the kernel layer too.
     gpu_ids: "0",         // comma-separated
+    tp: 1,                // serving tensor-parallel size; serving uses the first tp ids of gpu_ids
+                          //   (or serving_gpu). gpu_ids is also the pool of the kernel lanes: a
+                          //   multi-rank kernel (see "AgentX kernel extraction") needs its N cards there.
+    initial_extra_server_args: "", // serving flags the baseline launches with, e.g. "--monokernel"
+    initial_extra_env: "",         // environment of the baseline launch, e.g. "VLLM_ROCM_USE_AITER=1"
+    ep: 1,                // expert-parallel degree of the baseline launch. REQUIRED when either of the
+                          //   two initial_* args is passed: the run stops at start without it.
     isl: 1024, osl: 1024, conc: 64,  // workload (profile + bench use the SAME)
     task: "focus on ...", // optional steer
     apply_to_original: "false"       // if "true", emit an apply bundle (overlay + launch), never edits site-packages
@@ -422,8 +429,14 @@ cost. All three head modes and the milestone loop reuse the prepared task direct
 and immutable UT, running it against optimization candidates instead of authoring
 another test. Workspace setup retains phase-local oracles, helpers and baseline
 resources; head and milestone use the workload-weighted result. Missing or changed
-preparation evidence fails the task locally. Current optimization lanes are single-GPU:
-completed multi-rank UTs retain their artifacts and are deferred for separate scheduling.
+preparation evidence fails the task locally. A completed multi-rank UT (a kernel that only
+runs as N ranks on N GPUs, for example a TP4 mono kernel) enters the optimization queues with
+its `required_gpu_count` when the request or the result declares that count and the UT result
+gives each rank's time and the alignment method for every timed case. Milestone and serial
+HeadKernel then lease N cards of `gpu_ids` as one group for its lane, so `gpu_ids` must hold at
+least N. Fast-mode and deep-mode head lanes and the corrective re-author lease one card: a task
+they cannot hold, or one without the declaration or the per-rank timing, keeps its artifacts
+and is listed in `deferred_tasks` with the reason.
 
 The default selection remains per-phase Top 5 intersected with whole-workload
 GPU-time share strictly greater than 3%, without backfilling. Explicit user scope
