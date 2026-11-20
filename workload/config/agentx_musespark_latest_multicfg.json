@@ -59,7 +59,9 @@
         "agent_budget_sec": 28800,
         "_note_agent_budget_sec": "Default 14400 (4 h) is the budget for the WHOLE stage -- agent_attempts share it, they do not each get it. This EP4 group needs 6 separate server starts (every config has a distinct launch), measured at ~30-45 min each, so 4 h cannot cover the captures plus merge/select/UT wave.",
         "agent_attempts": 12,
-        "_note_agent_attempts": "Follow the other musespark/dsv4 scenarios: make the BUDGET the binding constraint, not the session counter. Attempts are consumed by ordinary interruptions (a session that outlives its window, or dies and is graded by finalize), and the loop returns fail once local_attempt == attempts even with budget left. 6 server starts of 30-45 min each give many interruption points, so 3 sessions over 8 h is too few. agent_repair_attempts stays at the default 1: a second reported `blocked` should remain the stage's answer."
+        "_note_agent_attempts": "Follow the other musespark/dsv4 scenarios: make the BUDGET the binding constraint, not the session counter. Attempts are consumed by ordinary interruptions (a session that outlives its window, or dies and is graded by finalize), and the loop returns fail once local_attempt == attempts even with budget left. 6 server starts of 30-45 min each give many interruption points, so 3 sessions over 8 h is too few. agent_repair_attempts stays at the default 1: a second reported `blocked` should remain the stage's answer.",
+        "on_budget_exhausted": "deliver_qualified",
+        "_note_on_budget_exhausted": "If the 8 h budget above runs out before the delivery finishes, run the bounded salvage (stages/profile/README.md, 'When the budget runs out'): deliver only the tasks whose GPU UT and delivery gate already passed, record every other selected identity blocked, and continue to optimize on those. The result is labelled partial through to applyback and the run report. salvage_budget_sec / salvage_attempts keep their defaults (7200 s, 3)."
       }
     },
     "applyback": {
