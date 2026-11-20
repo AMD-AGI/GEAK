@@ -111,8 +111,13 @@ def naming_problems(cfg, run_root, config_paths=()):
     names = [("run_root", run_name)]
     names += [("config", os.path.basename(p)) for p in config_paths
               if os.path.basename(p) != "default.json"]
+    parent = os.path.basename(os.path.dirname(os.path.normpath(run_root)))
     for what, name in names:
         hits, toks = check_name(name, model, t.get("name_tokens"))
+        if not hits and what == "run_root" and parent:
+            # `<model>/<run>` layouts name the stack one level up; the leaf alone is
+            # enough but not required.
+            hits, _ = check_name(parent, model, t.get("name_tokens"))
         if not hits:
             problems.append(
                 "%s is named %r but target.model is %r, and the name carries none of %s. "
