@@ -578,13 +578,52 @@ def _targeting_shape(h: dict) -> tuple[int, int, str]:
     return obs_isl, obs_osl, "agentx_observed"
 
 
+# Same map as scripts/gpu_identity.py TARGET_GFX (test_run_e2e_dispatch checks it).
+_TARGET_GFX = {"r9700": "gfx1201", "r9600d": "gfx1201", "w7900": "gfx1100"}
+# ISAs that enable nothing without their product: unknown boards are refused.
+_PRODUCT_REQUIRED_GFX = {"gfx1100": "w7900"}
+
+
+def _rocminfo_available() -> bool:
+    return bool(shutil.which("rocminfo")) or Path("/opt/rocm/bin/rocminfo").is_file()
+
+
+def _probe_gpu_identity() -> dict[str, Any]:
+    """Read GEAK_GPU_IDENTITY_JSON, else run the structured rocminfo probe."""
+    env_identity = os.environ.get("GEAK_GPU_IDENTITY_JSON", "").strip()
+    if env_identity:
+        try:
+            return json.loads(env_identity)
+        except json.JSONDecodeError as error:
+            raise ValueError("GEAK_GPU_IDENTITY_JSON is not valid JSON") from error
+    proc = subprocess.run(
+        [sys.executable, str(GPU_IDENTITY_SCRIPT)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "identity probe failed").strip()
+        raise RuntimeError(
+            "GPU identity must be established before E2E policy selection: "
+            f"{detail}. Pass expected_gfx and expected_target explicitly if "
+            "this host cannot run rocminfo."
+        )
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("GPU identity probe returned invalid JSON") from error
+
+
 def _expected_gpu_identity(h: dict) -> dict[str, Any]:
     """Resolve policy identity before the workflow chooses backend or knowledge.
 
     A caller may explicitly pin the expected ISA/product. Otherwise the shared
     structured rocminfo parser establishes both. A bare gfx1201 remains product
     `unknown`; exact R9700 and R9600D detection produces the corresponding
-    product target without establishing serving-policy qualification.
+    product target without establishing serving-policy qualification. A bare
+    gfx1100 is refused: only the exact Radeon Pro W7900 (`w7900`) runs on it,
+    and an explicit `w7900` must agree with the probe whenever one is available.
     """
     explicit_gfx = str(h.get("expected_gfx") or "").strip().lower()
     explicit_target = str(h.get("expected_target") or "").strip().lower()
@@ -595,52 +634,63 @@ def _expected_gpu_identity(h: dict) -> dict[str, Any]:
             )
         if not re.fullmatch(r"gfx[0-9a-f]+", explicit_gfx):
             raise ValueError(f"invalid expected_gfx: {explicit_gfx!r}")
-        if explicit_target not in RDNA4_SERVING_PRODUCTS | {"unknown"}:
+        if explicit_target not in RDNA4_SERVING_PRODUCTS | {"w7900", "unknown"}:
             raise ValueError(
-                "expected_target must be 'r9700', 'r9600d' or 'unknown'"
+                "expected_target must be 'r9700', 'r9600d' or 'unknown', "
+                "or 'w7900' with expected_gfx=gfx1100"
             )
-        if explicit_target in RDNA4_SERVING_PRODUCTS and explicit_gfx != "gfx1201":
-            raise ValueError(f"expected_target={explicit_target} requires expected_gfx=gfx1201")
-        return {
+        required_gfx = _TARGET_GFX.get(explicit_target)
+        if required_gfx and explicit_gfx != required_gfx:
+            raise ValueError(
+                f"expected_target={explicit_target} requires expected_gfx={required_gfx}"
+            )
+        required_target = _PRODUCT_REQUIRED_GFX.get(explicit_gfx)
+        if required_target and explicit_target != required_target:
+            raise ValueError(
+                f"expected_gfx={explicit_gfx} requires expected_target={required_target}: "
+                f"no other {explicit_gfx} product is validated"
+            )
+        identity = {
             "gfx": explicit_gfx,
             "target": explicit_target,
             "marketing_name": str(h.get("expected_device_name") or ""),
             "physical_cu_count": int(h.get("expected_physical_cu_count") or 0),
         }
-
-    env_identity = os.environ.get("GEAK_GPU_IDENTITY_JSON", "").strip()
-    if env_identity:
-        try:
-            identity = json.loads(env_identity)
-        except json.JSONDecodeError as error:
-            raise ValueError("GEAK_GPU_IDENTITY_JSON is not valid JSON") from error
-    else:
-        proc = subprocess.run(
-            [sys.executable, str(GPU_IDENTITY_SCRIPT)],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if proc.returncode != 0:
-            detail = (proc.stderr or proc.stdout or "identity probe failed").strip()
-            raise RuntimeError(
-                "GPU identity must be established before E2E policy selection: "
-                f"{detail}. Pass expected_gfx and expected_target explicitly if "
-                "this host cannot run rocminfo."
+        if explicit_target == "w7900" and (
+            os.environ.get("GEAK_GPU_IDENTITY_JSON", "").strip() or _rocminfo_available()
+        ):
+            probed = _validated_probe_identity(_probe_gpu_identity())
+            if (probed["gfx"], probed["target"]) != (explicit_gfx, explicit_target):
+                raise RuntimeError(
+                    f"expected_target={explicit_target} on {explicit_gfx} does not match "
+                    f"the detected GPU: {probed['target']} on {probed['gfx']} "
+                    f"({probed['marketing_name'] or 'unnamed'})"
+                )
+            identity["marketing_name"] = identity["marketing_name"] or probed["marketing_name"]
+            identity["physical_cu_count"] = (
+                identity["physical_cu_count"] or probed["physical_cu_count"]
             )
-        try:
-            identity = json.loads(proc.stdout)
-        except json.JSONDecodeError as error:
-            raise RuntimeError("GPU identity probe returned invalid JSON") from error
+        return identity
 
+    return _validated_probe_identity(_probe_gpu_identity())
+
+
+def _validated_probe_identity(identity: dict) -> dict[str, Any]:
     gfx = str(identity.get("gfx") or "").strip().lower()
     target = str(identity.get("target") or "unknown").strip().lower()
     if not re.fullmatch(r"gfx[0-9a-f]+", gfx):
         raise RuntimeError(f"GPU identity probe returned invalid gfx: {gfx!r}")
-    if target not in RDNA4_SERVING_PRODUCTS | {"unknown"}:
+    if target not in RDNA4_SERVING_PRODUCTS | {"w7900", "unknown"}:
         raise RuntimeError(f"GPU identity probe returned invalid target: {target!r}")
-    if target in RDNA4_SERVING_PRODUCTS and gfx != "gfx1201":
-        raise RuntimeError(f"GPU identity probe returned {target} on a non-gfx1201 ISA")
+    required_gfx = _TARGET_GFX.get(target)
+    if required_gfx and gfx != required_gfx:
+        raise RuntimeError(f"GPU identity probe returned {target} on a non-{required_gfx} ISA")
+    required_target = _PRODUCT_REQUIRED_GFX.get(gfx)
+    if required_target and target != required_target:
+        raise RuntimeError(
+            f"GPU identity probe returned {gfx} with product {target}, not "
+            f"{required_target}: no other {gfx} product is validated"
+        )
     return {
         "gfx": gfx,
         "target": target,
@@ -797,7 +847,7 @@ def map_args(
         "workflow_dir": str(E2E_DIR),
         "backend": h.get("framework") or (
             "vllm" if gpu_identity and (
-                gpu_identity["target"] in RDNA4_SERVING_PRODUCTS
+                gpu_identity["target"] in RDNA4_SERVING_PRODUCTS | {"w7900"}
                 or VLLM_ONLY_ISA_RE.fullmatch(gpu_identity["gfx"])
             ) else "sglang"
         ),
@@ -865,6 +915,12 @@ def map_args(
         })
     else:
         ps_args["gpu_identity_status"] = "unavailable_dry_run"
+    # The operator's declared amdgpu performance level. GEAK cannot read it itself:
+    # the sysfs getter fails (EBUSY or EPERM, by driver) while the card is
+    # runtime-suspended. Absent => omitted, so handoffs without it map to the same args.
+    perf_level = str(h.get("gpu_perf_level") or "").strip().lower()
+    if perf_level:
+        ps_args["gpu_perf_level"] = perf_level
     # Launch identity for the execution tracker. A nonce allocated HERE -- before
     # the workflow is invoked -- is unique by construction, so the runtime records
     # it in the run's own args and the tracker can join THIS launch. Argument

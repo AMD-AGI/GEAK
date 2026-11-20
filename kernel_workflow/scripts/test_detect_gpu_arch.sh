@@ -300,4 +300,145 @@ got="$(PATH="$tmp:/usr/bin:/bin" DOCKER_DEFAULT="$model_cfg" GEAK_GPU_ARCH=R9700
 [ "$got" = "$want_r9700" ] \
   || fail "R9700 inherited a plain-string model pin instead of vllm.R9700 (got $got)"
 
-echo "PASS: GPU arch overrides, rocminfo parsing, R9700 expectations, and image resolution."
+# W7900 / gfx1100: only the exact product names resolve, and nothing on gfx1100
+# falls through to the SPUR default.
+for product in 'AMD Radeon Pro W7900' 'AMD Radeon PRO W7900 Dual Slot'; do
+  got="$(detect_from_rocminfo gfx1100 '' "$product" 96)" || fail "rocminfo $product"
+  [ "$got" = "W7900" ] || fail "$product -> W7900 (got $got)"
+  got="$(detect_from_rocminfo gfx1100 w7900 "$product" 96)" || fail "expected W7900 + $product"
+  [ "$got" = "W7900" ] || fail "expected W7900 + $product -> W7900 (got $got)"
+done
+
+for product in 'AMD Radeon Pro W7800' 'AMD Radeon Pro W7800 48GB' 'AMD Radeon RX 7900 XTX' ''; do
+  err=""
+  if err="$(detect_from_rocminfo gfx1100 '' "$product" 96 2>&1)"; then
+    fail "gfx1100 '$product' must be refused (got $err)"
+  fi
+  [[ "$err" == *"E_ARCH_UNVALIDATED"* && "$err" != *"$GEAK_GPU_ARCH_DEFAULT"$'\n'* ]] \
+    || fail "gfx1100 '$product' stderr missing E_ARCH_UNVALIDATED (got: $err)"
+  err=""
+  if err="$(detect_from_rocminfo gfx1100 w7900 "$product" 96 2>&1)"; then
+    fail "expected W7900 with gfx1100 '$product' must fail closed"
+  fi
+  [[ "$err" == *"E_TARGET_EXPECTED_MISMATCH"* ]] \
+    || fail "expected W7900 + '$product' stderr missing E_TARGET_EXPECTED_MISMATCH (got: $err)"
+done
+
+err=""
+if err="$(detect_from_rocminfo gfx1201 w7900 'AMD Radeon AI PRO R9700' 2>&1)"; then
+  fail "expected W7900 on an R9700 must fail closed"
+fi
+[[ "$err" == *"E_TARGET_EXPECTED_MISMATCH"* ]] \
+  || fail "W7900/R9700 stderr missing E_TARGET_EXPECTED_MISMATCH (got: $err)"
+err=""
+if err="$(detect_from_rocminfo gfx1100 r9700 'AMD Radeon Pro W7900' 96 2>&1)"; then
+  fail "expected R9700 on a W7900 must fail closed"
+fi
+[[ "$err" == *"E_TARGET_EXPECTED_MISMATCH"* ]] \
+  || fail "R9700/W7900 stderr missing E_TARGET_EXPECTED_MISMATCH (got: $err)"
+err=""
+if err="$(detect_from_rocminfo gfx1201 '' 'AMD Radeon Pro W7900' 96 2>&1)"; then
+  fail "a W7900 name on gfx1201 must fail identity"
+fi
+[[ "$err" == *"requires gfx1100"* ]] || fail "W7900 on gfx1201 stderr missing ISA failure (got: $err)"
+
+# Overrides: GEAK_GPU_ARCH=W7900 is a product request, gfx1100 is ISA-only.
+install_rocminfo_stub gfx1100 'AMD Radeon Pro W7900 Dual Slot' 96
+for val in W7900 gfx1100; do
+  got="$(PATH="$tmp:/usr/bin:/bin" GEAK_EXPECTED_TARGET= GEAK_GPU_ARCH="$val" detect_gpu_arch)" \
+    || fail "$val override on a W7900"
+  [ "$got" = "W7900" ] || fail "$val override on a W7900 -> W7900 (got $got)"
+done
+install_rocminfo_stub gfx1100 'AMD Radeon Pro W7800' 70
+err=""
+if err="$(PATH="$tmp:/usr/bin:/bin" GEAK_EXPECTED_TARGET= GEAK_GPU_ARCH=W7900 detect_gpu_arch 2>&1)"; then
+  fail "W7900 override on a W7800 must fail closed"
+fi
+[[ "$err" == *"E_TARGET_EXPECTED_MISMATCH"* ]] \
+  || fail "W7900 override/W7800 stderr missing E_TARGET_EXPECTED_MISMATCH (got: $err)"
+err=""
+if err="$(GEAK_EXPECTED_TARGET=w7900 GEAK_GPU_ARCH=gfx942 detect_gpu_arch 2>&1)"; then
+  fail "expected W7900 with gfx942 override must fail closed"
+fi
+[[ "$err" == *"E_ARCH_EXPECTED_MISMATCH"* ]] \
+  || fail "W7900/gfx942 override stderr missing E_ARCH_EXPECTED_MISMATCH (got: $err)"
+for val in W7900 gfx1100; do
+  err=""
+  if err="$(PATH="$tmp:/usr/bin:/bin" GPU_IDENTITY_SCRIPT="$tmp/missing-identity-helper" \
+            GEAK_EXPECTED_TARGET= GEAK_GPU_ARCH="$val" detect_gpu_arch 2>&1)"; then
+    fail "$val override without a probe must fail closed (got $err)"
+  fi
+  [[ "$err" == *"E_TARGET_EXPECTED_MISMATCH"* || "$err" == *"E_ARCH_UNVALIDATED"* ]] \
+    || fail "$val override without a probe stderr missing refusal (got: $err)"
+done
+err=""
+if err="$(PATH="$tmp:/usr/bin:/bin" GPU_IDENTITY_SCRIPT="$tmp/missing-identity-helper" \
+          GEAK_EXPECTED_TARGET=w7900 GEAK_GPU_ARCH= detect_gpu_arch 2>&1)"; then
+  fail "expected W7900 without a probe must not select the SPUR default"
+fi
+[[ "$err" == *"E_TARGET_EXPECTED_MISMATCH"* ]] \
+  || fail "W7900/no-probe stderr missing E_TARGET_EXPECTED_MISMATCH (got: $err)"
+
+err=""
+if err="$(PATH="$tmp:/usr/bin:/bin" GEAK_EXPECTED_TARGET=w7800 GEAK_GPU_ARCH= detect_gpu_arch 2>&1)"; then
+  fail "GEAK_EXPECTED_TARGET=w7800 must be rejected"
+fi
+[[ "$err" == *"E_TARGET_UNSUPPORTED"* ]] || fail "w7800 target stderr missing E_TARGET_UNSUPPORTED (got: $err)"
+
+# W7900 vLLM resolves only through its own vllm.W7900 key, which pins the rocm/vllm tag the
+# W7900 was validated with. SGLang has no W7900 image and fails closed instead of inheriting MI300.
+install_rocminfo_stub gfx1100 'AMD Radeon Pro W7900 Dual Slot' 96
+want_w7900="$(python3 - "$DOCKER_DEFAULT" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1])).get("vllm", {}).get("W7900", ""))
+PY
+)" || fail "could not read $DOCKER_DEFAULT"
+[ "$want_w7900" = "rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0" ] \
+  || fail "vllm.W7900 is not the rocm/vllm tag the W7900 was validated with (got $want_w7900)"
+got="$(PATH="$tmp:/usr/bin:/bin" GEAK_GPU_ARCH=W7900 resolve_image vllm)" || fail "W7900 vLLM image"
+[ "$got" = "$want_w7900" ] || fail "W7900 vLLM must be the W7900 key (got $got, want $want_w7900)"
+[ "$got" != "$mi300" ] || fail "W7900 vLLM resolved to the MI300 image"
+err=""
+if err="$(PATH="$tmp:/usr/bin:/bin" GEAK_GPU_ARCH=W7900 resolve_image sglang 2>&1)"; then
+  fail "W7900 sglang must not resolve an image (got $err)"
+fi
+[[ "$err" == *"E_IMAGE_UNAVAILABLE"* && "$err" == *"sglang"* && "$err" == *"W7900"* ]] \
+  || fail "W7900 sglang image failure was not explicit (got: $err)"
+no_w7900_cfg="$tmp/docker-no-w7900.json"
+python3 - "$DOCKER_DEFAULT" "$no_w7900_cfg" <<'PY'
+import json, sys
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    data = json.load(handle)
+data["vllm"].pop("W7900", None)
+data["vllm"]["default"] = "example.invalid/mi-default:latest"
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(data, handle)
+PY
+err=""
+if err="$(PATH="$tmp:/usr/bin:/bin" DOCKER_DEFAULT="$no_w7900_cfg" GEAK_GPU_ARCH=W7900 \
+          resolve_image vllm 2>&1)"; then
+  fail "W7900 vllm without a W7900 key must not resolve an image (got $err)"
+fi
+[[ "$err" == *"E_IMAGE_UNAVAILABLE"* && "$err" == *"W7900"* ]] \
+  || fail "W7900 vllm failure without a W7900 key was not explicit (got: $err)"
+w7900_cfg="$tmp/docker-w7900.json"
+python3 - "$DOCKER_DEFAULT" "$w7900_cfg" <<'PY'
+import json, sys
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    data = json.load(handle)
+data["vllm"]["W7900"] = "example.invalid/w7900-vllm:pinned"
+data["models"] = {"string-pin": "example.invalid/mi-only:latest"}
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(data, handle)
+PY
+got="$(PATH="$tmp:/usr/bin:/bin" DOCKER_DEFAULT="$w7900_cfg" GEAK_GPU_ARCH=W7900 resolve_image vllm)" \
+  || fail "explicit vllm.W7900 entry should resolve"
+[ "$got" = "example.invalid/w7900-vllm:pinned" ] || fail "W7900 picked $got instead of vllm.W7900"
+got="$(PATH="$tmp:/usr/bin:/bin" DOCKER_DEFAULT="$w7900_cfg" GEAK_GPU_ARCH=W7900 \
+       resolve_image vllm string-pin)" || fail "W7900 should skip a plain-string per-model pin"
+[ "$got" = "example.invalid/w7900-vllm:pinned" ] \
+  || fail "W7900 inherited a plain-string model pin instead of vllm.W7900 (got $got)"
+
+echo "PASS: GPU arch overrides, rocminfo parsing, R9700 and W7900 expectations, and image resolution."

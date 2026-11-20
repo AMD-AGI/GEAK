@@ -1,8 +1,8 @@
 export const meta = {
   name: 'e2e-workflow',
 
-  description: 'End-to-end LLM inference-throughput optimizer for AMD Instinct MI-series GPUs (CDNA gfx942/gfx950), the validated RDNA4 product Radeon AI PRO R9700 (gfx1201, vLLM or SGLang only), and RDNA 3.5 gfx115x (Strix Halo; validated only on a gfx1151 Radeon 8060S; vLLM only). Generic gfx1201 is not a product identity. The serving stack is pluggable via scripts/adapters/<backend>.sh (sglang + vllm + ATOM shipped on Instinct; R9700 is vLLM or SGLang only; gfx115x is vLLM-only). A system layer (e2e Director / System Architect / Profiler / Config Tuner / Kernel Extractor / e2e Integrator) wraps the UNCHANGED single-kernel kernel_workflow: it preflights the env, profiles a running server, triages hot kernels by Amdahl, tunes config/backends, extracts hot editable kernels into standalone unittests, recursively optimizes them with kernel_workflow.js, overlays them back, and re-validates serving throughput. Also still optimizes a single kernel (pass-through).',
-  whenToUse: 'Optimize the serving throughput of an LLM on AMD Instinct MI GPUs, on Radeon AI PRO R9700 with vLLM or SGLang, or on gfx115x (Strix Halo) with vLLM. Use interface/run_e2e.py for structured auto-detection; a direct model-mode call must pass expected_gfx and expected_target before backend/knowledge policy is selected. Pass args.model_path (required) + optional args.backend (sglang|vllm|atom on Instinct, default sglang; vllm or sglang only on confirmed R9700; vllm only on gfx115x) + args.launch_script (optional). For a single kernel, pass args.kernel_path instead and it delegates straight to the kernel layer.',
+  description: 'End-to-end LLM inference-throughput optimizer for AMD Instinct MI-series GPUs (CDNA gfx942/gfx950), the validated RDNA4 product Radeon AI PRO R9700 (gfx1201, vLLM or SGLang only), RDNA 3.5 gfx115x (Strix Halo; validated only on a gfx1151 Radeon 8060S; vLLM only), and the RDNA3 Radeon Pro W7900 (gfx1100, vLLM only, no FP8 WMMA). Generic gfx1201 is not a product identity, and gfx1100 without the exact W7900 product is refused. The serving stack is pluggable via scripts/adapters/<backend>.sh (sglang + vllm + ATOM shipped on Instinct; R9700 is vLLM or SGLang only; gfx115x and W7900 are vLLM-only). A system layer (e2e Director / System Architect / Profiler / Config Tuner / Kernel Extractor / e2e Integrator) wraps the UNCHANGED single-kernel kernel_workflow: it preflights the env, profiles a running server, triages hot kernels by Amdahl, tunes config/backends, extracts hot editable kernels into standalone unittests, recursively optimizes them with kernel_workflow.js, overlays them back, and re-validates serving throughput. Also still optimizes a single kernel (pass-through).',
+  whenToUse: 'Optimize the serving throughput of an LLM on AMD Instinct MI GPUs, on Radeon AI PRO R9700 with vLLM or SGLang, or on gfx115x (Strix Halo) or Radeon Pro W7900 with vLLM. Use interface/run_e2e.py for structured auto-detection; a direct model-mode call must pass expected_gfx and expected_target before backend/knowledge policy is selected. Pass args.model_path (required) + optional args.backend (sglang|vllm|atom on Instinct, default sglang; vllm or sglang only on confirmed R9700; vllm only on gfx115x or confirmed W7900) + args.launch_script (optional). For a single kernel, pass args.kernel_path instead and it delegates straight to the kernel layer.',
 
   phases: [
     { title: 'Setup', detail: 'e2e Director builds the isolated eval dir + records baseline throughput' },
@@ -106,6 +106,8 @@ const EXPECTED_GFX = String(A.expected_gfx || '').trim().toLowerCase();
 const EXPECTED_TARGET = String(A.expected_target || '').trim().toLowerCase();
 const EXPECTED_DEVICE_NAME = String(A.expected_device_name || '').trim();
 const EXPECTED_PHYSICAL_CU_COUNT = Number(A.expected_physical_cu_count || 0);
+// Operator-declared amdgpu performance level; only the kernel lane interprets it.
+const GPU_PERF_LEVEL = String(A.gpu_perf_level || '').trim().toLowerCase();
 if (['r9700', 'r9600d'].includes(EXPECTED_TARGET) && EXPECTED_GFX !== 'gfx1201') {
   throw new Error(`expected_target=${EXPECTED_TARGET} requires expected_gfx=gfx1201`);
 }
@@ -125,15 +127,28 @@ const GPU_FAMILIES = [
   { name: 'R9700', isa: /^gfx1201$/, isolate: true, matrixCore: 'WMMA' },
   // RDNA 3.5 APUs (Strix Halo is gfx1151). Only a gfx1151 Radeon 8060S has been run.
   { name: 'RDNA 3.5', isa: /^gfx115\d$/, isolate: true, matrixCore: 'WMMA' },
+  // Discrete RDNA3. The workflows accept gfx1100 only as the exact Radeon Pro W7900 (target w7900).
+  { name: 'W7900', isa: /^gfx1100$/, isolate: true, matrixCore: 'WMMA' },
 ];
 const GPU_FAMILY_DEFAULT = { name: 'default', isa: null, isolate: false, matrixCore: 'MFMA' };
 const gpuFamily = (gfx) => GPU_FAMILIES.find((f) => f.isa.test(String(gfx || ''))) || GPU_FAMILY_DEFAULT;
 // ---- end GPU families ----
+if (EXPECTED_TARGET === 'w7900' && EXPECTED_GFX !== 'gfx1100') {
+  throw new Error('expected_target=w7900 requires expected_gfx=gfx1100');
+}
+// gfx1100 is qualified only as the exact Radeon Pro W7900: other gfx1100 boards
+// (W7800, RX 7900) have different CU counts and clocks and get no policy here.
+if (EXPECTED_GFX === 'gfx1100' && EXPECTED_TARGET !== 'w7900') {
+  throw new Error(
+    `expected_gfx=gfx1100 requires expected_target=w7900 (got ${EXPECTED_TARGET || 'none'}): ` +
+    'no other gfx1100 product is validated');
+}
 const RDNA4_ISA = EXPECTED_GFX === 'gfx1201';
 // Products with a `product:` section in roofline/peaks.md; keep in sync with it.
 const RDNA4_SERVING_PRODUCTS = ['r9700', 'r9600d'];
 const RDNA4_PRODUCT_E2E = RDNA4_SERVING_PRODUCTS.includes(EXPECTED_TARGET);
 const R9700_E2E = EXPECTED_TARGET === 'r9700';
+const W7900_E2E = EXPECTED_TARGET === 'w7900';
 // ISA isolation and product policy are separate: any isolating family (GPU_FAMILIES) avoids CDNA
 // priors, but only an exact product identity selects calibrated peaks, serving backend and image policy.
 const GPU_FAMILY = gpuFamily(EXPECTED_GFX);
@@ -159,6 +174,8 @@ const E2E_FAMILY = {
       'probe a backend on this box before using it ' +
       `(${KERNEL_WF_DIR}/knowledge/amd_ryzen.md §2).`,
   },
+  // gfx1100 WMMA has no FP8 input type (kernel_workflow/knowledge/amd_rdna3.md §3).
+  W7900: { vllmOnly: true, noFp8Matrix: true },
 }[GPU_FAMILY.name] || {};
 const ARCH_CONSTRAINTS = E2E_FAMILY.archConstraints || '';
 const DEEP_ARCH_NOTE = ARCH_CONSTRAINTS ? ` ARCH_CONSTRAINTS: ${ARCH_CONSTRAINTS} ` : '';
@@ -207,6 +224,7 @@ const laneArgs = (wfArgs) => {
     out.expected_physical_cu_count =
       out.expected_physical_cu_count || EXPECTED_PHYSICAL_CU_COUNT;
   }
+  if (GPU_PERF_LEVEL) out.gpu_perf_level = out.gpu_perf_level || GPU_PERF_LEVEL;
   return out;
 };
 
@@ -305,6 +323,9 @@ if (RDNA4_PRODUCT_E2E && !R9700_E2E && BACKEND !== 'vllm') {
 }
 if (R9700_E2E && !['vllm', 'sglang'].includes(BACKEND)) {
   throw new Error(`R9700 E2E is vLLM or SGLang only (got backend=${BACKEND}): there is no validated R9700 image for it; pass args.backend=vllm or args.backend=sglang`);
+}
+if (W7900_E2E && BACKEND !== 'vllm') {
+  throw new Error(`W7900 E2E is vLLM-only (got backend=${BACKEND}): there is no validated W7900 image for it; pass args.backend=vllm`);
 }
 // Model mode only: a single-kernel pass-through never starts a server.
 if (MODEL_PATH && E2E_FAMILY.vllmOnly && BACKEND !== 'vllm') {
@@ -3596,6 +3617,11 @@ if (want('setup')) {
   }
   if (EXPECTED_TARGET && detectedTarget !== EXPECTED_TARGET) {
     throw new Error(`GPU product mismatch: expected ${EXPECTED_TARGET}, detected ${detectedTarget}`);
+  }
+  if (detectedGfx === 'gfx1100' && detectedTarget !== 'w7900') {
+    throw new Error(
+      `Setup detected gfx1100 with device_target=${detectedTarget}: only the exact Radeon Pro W7900 ` +
+      'is validated on gfx1100');
   }
   const normalizeDeviceName = (name) =>
     String(name || '').trim().replace(/\s+/g, ' ').toLowerCase();

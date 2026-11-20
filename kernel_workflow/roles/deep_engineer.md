@@ -46,10 +46,11 @@ Read ALL of these before and during your work, and re-consult as the bottleneck 
 - `SKILL_DIR/knowledge/hip_optimization.md` / `triton_optimization.md` — per the kernel's language.
 - `SKILL_DIR/knowledge/wrapper_optimization.md` — host/runtime patterns (you own these too).
 - the hardware reference for the card detected on-box — `SKILL_DIR/knowledge/amd_instinct.md` (`gfx94*`/`gfx95*`,
-  CDNA Instinct, MFMA, wave64), `SKILL_DIR/knowledge/amd_ryzen.md` (`gfx11*`, RDNA3.5 client), or
+  CDNA Instinct, MFMA, wave64), `SKILL_DIR/knowledge/amd_ryzen.md` (`gfx115x`, RDNA3.5 APU),
+  `SKILL_DIR/knowledge/amd_rdna3.md` (`gfx1100`, RDNA3 Radeon Pro W7900, gfx11 WMMA, wave32), or
   `SKILL_DIR/knowledge/amd_rdna4.md` (`gfx1201`, RDNA4, WMMA, wave32). DETECT first
   (`rocminfo` gfx), then use that card's peaks for the roofline estimate (below). Learned gfx950/gfx942
-  cards do not transfer to RDNA4.
+  cards do not transfer to RDNA4. On the W7900, use gfx1100 cards.
 - `SKILL_DIR/knowledge/profiling_guide.md` — how to read whatever profiler is available.
 - `SKILL_DIR/knowledge/self_monitoring.md` — the guard signals (you raise the step caps, see below).
 
@@ -73,12 +74,14 @@ flydsl→`flydsl`, tilelang→`tilelang`; read `overview.md`/`patterns.md`/`knob
 ## Roofline targeting (how to know how far you really are)
 Your target may be expressed as "% of roofline". Estimate the ceiling, then drive toward it:
 0. **Detect the card first** (`rocminfo` → gfx arch + CU/WGP count, `rocm-smi` → name), then read the matching
-   hardware reference — `amd_instinct.md` for `gfx94*`/`gfx95*`, `amd_ryzen.md` for `gfx11*`, `amd_rdna4.md`
-   for `gfx1201` — and use ITS peaks below. Never assume a default: peaks differ by integer factors across
+   hardware reference — `amd_instinct.md` for `gfx94*`/`gfx95*`, `amd_ryzen.md` for `gfx115x`, `amd_rdna3.md`
+   for `gfx1100`, `amd_rdna4.md` for `gfx1201` — and use ITS peaks below. Never assume a default: peaks differ by integer factors across
    cards, and so do the fp8 format and the matrix ISA. On RDNA4, MFMA/MX peaks do not exist — use a
    the product's datasheet peaks (see `peaks.md`) only
    when `ROOFLINE_STATUS` is `calibrated-<product>` or `tabulated-<gfx>`;
-   pair them with measured on-box rates when available.
+   pair them with measured on-box rates when available. On the W7900
+   (`calibrated-w7900`) use the published W7900 peaks in `amd_rdna3.md` §1: memory, FP16 and
+   INT8 WMMA, FP32 vector. A BF16, FP8 or INT4 kernel uses the memory axis.
 1. From the profile / per-case table, decide whether each case is **memory-bound** or **compute-bound**.
 2. **Memory-bound ceiling**: `min_time ≈ bytes_moved / mem_BW` — use this card's achievable memory
    bandwidth (~0.7–0.85× nameplate; e.g. ≈5.3 TB/s on MI300X, ~6 on MI325X, ~8 on MI350/355; see the
@@ -86,7 +89,7 @@ Your target may be expressed as "% of roofline". Estimate the ceiling, then driv
    ceiling; use a streaming-copy measurement for an achievable rate and label
    clearly which denominator you used. Achieved % = that min_time / your measured time.
 3. **Compute-bound ceiling**: `min_time ≈ FLOPs / peak_FLOPS` for the dtype — use the matrix-core peak
-   for that precision on THIS card (MFMA on CDNA, WMMA on RDNA3.5 and RDNA4) from its reference.
+   for that precision on THIS card (MFMA on CDNA, WMMA on RDNA3, RDNA3.5 and RDNA4) from its reference.
    RDNA4: the WMMA peak of the calibrated product from `amd_rdna4.md` §4 and
    `peaks.md` (datasheet). Use
    it only for `calibrated-<product>`; other gfx1201 products have no

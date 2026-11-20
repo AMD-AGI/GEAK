@@ -149,9 +149,10 @@ The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
   "framework": "sglang",                 // -> backend (sglang|vllm|atom)
   "gpu_type": "MI300X",
   "expected_gfx": "gfx950",              // optional pair; otherwise probed
-  "expected_target": "unknown",          // r9700|r9600d|unknown; supply with expected_gfx
+  "expected_target": "unknown",          // r9700|r9600d|w7900|unknown; supply with expected_gfx
   "expected_device_name": "AMD Instinct MI355X",
   "expected_physical_cu_count": 256,
+  "gpu_perf_level": "auto",              // optional; the operator-declared amdgpu perf level
   "tp": 8,                               // serving tensor-parallel size (honoured, no TP=1 lock)
   "gpu_ids": "0,1,2,3,4,5,6,7",          // optional; default 0..tp-1
   "workload": { "isl": 1024, "osl": 1024, "conc": 64 },
@@ -203,6 +204,28 @@ gfx115x (Strix Halo) has no product key: the ISA alone selects `vllm`, and the w
 other backend. Only a gfx1151 Radeon 8060S has been run; other gfx115x parts get the same policy.
 Unknown gfx1201 products remain `unknown` and keep their existing refusal
 behavior.
+
+`w7900` is emitted only for the exact names `AMD Radeon Pro W7900` and
+`AMD Radeon Pro W7900 Dual Slot` (either "Pro" or "PRO" casing) on `gfx1100`, and it
+requires `expected_gfx=gfx1100`. `gfx1100` with any other target is refused, whether
+it comes from the explicit pair, `GEAK_GPU_IDENTITY_JSON` or the probe. An explicit
+`w7900` pin must also agree with the probe whenever `rocminfo` is available. The
+W7900 defaults to vLLM, uses its own product-scoped roofline peaks (no BF16, FP8
+or INT4 entry), and does not inherit any R9700 calibration.
+
+`gpu_perf_level` declares the amdgpu performance level the operator set on the
+serving cards. GEAK does not read it itself: the sysfs getter fails (`EBUSY` or
+`EPERM`, depending on the driver) while a card is runtime-suspended. The value is
+lower-cased and forwarded as the workflow arg of the same name to every kernel
+lane; when it is absent, nothing is forwarded. Only the W7900 acts on it: gfx1100
+counters read correctly only at
+`profile_standard` (amd-smi `STABLE_STD`), so `profile_standard`, `stable_std` or
+`AMDSMI_DEV_PERF_LEVEL_STABLE_STD` gives a lane with profiling on
+`COUNTER_GUIDANCE=gfx1100-safe-set` and any other value, or none, gives
+`COUNTER_GUIDANCE=unavailable`. Kernel-lane profiling is off by default, and an
+E2E run does not turn it on, so its lanes get `unavailable` whatever the level.
+Even with the safe set, the agents use counters only if the installed Metrix has
+IntelliKit's gfx1100 safe set (`amd_rdna3.md` §4). GEAK never changes the level.
 
 `--dry-run` is host-only: when neither explicit nor environment identity is
 provided it skips rocminfo and reports `gpu_identity_status:
