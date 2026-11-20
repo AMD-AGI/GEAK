@@ -8,7 +8,9 @@ description: Build or repair qualified kernel tasks from workload evidence using
 Read the [UT contract](../README.md). Use the declaration, task construction and delivery
 parts of [kernel-extract](../../profile/kernel-extract/SKILL.md).
 Set `SKILL_ROOT` to that vendored directory, `SHARED_TOOLS` to its `shared/`, and
-`EVAL_DIR` to this invocation's output. Reuse compatible Profile evidence; request
+`EVAL_DIR` to this invocation's absolute output path before native task construction;
+relative exported paths change meaning under a container's working directory.
+Reuse compatible Profile evidence; request
 missing observations through Brain instead of silently launching another full replay.
 The plan sets scope; GPU capacity limits concurrent execution, not extraction coverage.
 
