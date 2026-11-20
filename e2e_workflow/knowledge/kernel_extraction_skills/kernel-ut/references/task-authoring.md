@@ -16,7 +16,6 @@ tasks/<name>/
   kernel_src/             actual editable native/JIT/generated source
   baseline_overlay/       immutable baseline overlay configuration
   baseline_ref/           original hashes/source text, not imported as baseline
-  fixtures/               optional minimal structural fixtures from profile (no outputs)
   run/                    declarations, raw traces, gate logs, results
 ```
 
@@ -51,8 +50,6 @@ negative-control checks in separate untimed diagnostic processes.
   for every declared timing case, and `make_timing_case(spec)` builds ONE case's
   `{sig, regime, m, args}` with actual operands before the timed call. The leg
   runner lists sigs without allocating anything and builds one shape at a time.
-  A task with only `timing_cases(h, meta)` still works, but every requested
-  shape's operands are then built up front in each timing process.
 - `random_shapes(h, meta)` yields `{sig, regime, make_inputs}`; the factory
   accepts a seeded torch Generator and varies values at the fixed served shapes.
   Preserve required routing semantics and the observed work/access pattern; reuse
@@ -98,11 +95,9 @@ seed 0). Graph replay still needs its normal boundary cases and in-place input r
 Do not introduce a `reference_io.pt`, suite-wide golden outputs or a second correctness
 runner.
 
-Record which inputs are generated and which are structural fixtures. For MoE
-routing, sparse indices, page tables and sequence state, first reuse handoff
+For MoE routing, sparse indices, page tables and sequence state, reuse handoff
 metadata or a validated reconstruction that preserves the observed work/access
-pattern. Use a profile structural fixture only when those are insufficient; its
-recorded output is never a reference.
+pattern; when neither can, report the gap rather than capturing state.
 Valid synthetic structures can test correctness, but random uniform routing can
 change expert occupancy and gather locality, so report its timing scope honestly.
 
@@ -130,8 +125,7 @@ The shared leg runner already performs this isolation.
    numerical/semantic contract. Reconstruct implicit state and all required glue.
 2. Build candidate overlay; prove distinct baseline/candidate entries in every
    phase and actual execution of every claimed editable leaf.
-3. Obtain independent baseline random outputs with
-   `h.baseline_random_outputs(task, meta, draws=...)`.
+3. Obtain baseline outputs with `h.baseline_random_outputs` (see *Seeded inputs*).
 4. In the candidate process, use `h.run_correctness(regime, eager_cases=...,
    current_call=..., random_shapes=..., tol=..., baseline_outputs=...,
    draws=..., replay=...)`. Read its docstring for the callable bundle contracts.
@@ -165,19 +159,13 @@ incompleteness. A prototype with only replay or timing is not a completed UT.
 It accepts `--validation-mode correctness|performance` (bare entry: `performance`).
 Qualify with `correctness`.
 
-## Optimization interface
+In `performance` mode (run by the optimizer) the same entry then calls
+`h.measure_legs(task, meta)` and `h.serving_weighted_speedup(per_case, meta)` and prints
+`GEAK_WEIGHTED_SPEEDUP=<value>`, keeping per-case timings as diagnostics; the weighting
+contract is in the [UT skill](../SKILL.md) §3.
 
-The optimizer runs `unittest.py --validation-mode performance`: the correctness gates,
-then `h.measure_legs(task, meta)` and `h.serving_weighted_speedup(per_case, meta)`,
-printing `GEAK_WEIGHTED_SPEEDUP=<value>`; per-case timings and the unweighted geomean
-stay as diagnostics, and every positive-mass signature needs finite timings on both
-sides. `measure_legs` starts one baseline process and one candidate process per round
-(and per GPU shard with `gpus=`), each streaming all pending shapes through
-`timing_specs`/`make_timing_case`; later rounds reverse side and shape order and only
-re-time undecided shapes. Baseline and candidate never share an interpreter.
-`process_mode="fresh"` restarts for every (shape, leg) -- keep it for A/A checks of
-state carried between shapes (e.g. an autotune cache keyed without the varying
-dimension), not as the routine path.
+## Delivery
+
 The collective case requires the real rank harness described in
 [collective UT](collective-ut.md); the single-process leg runner cannot test a
 multi-rank collective by itself.

@@ -384,8 +384,7 @@ freeze an out-of-regime oracle nobody should trust.
      (applied inside `leg_runner`, so graph/compile parity is not yours to forget), and the two legs are
      always separate interpreters, so warm-JIT/autotune state cannot leak between legs. The cold
      import is paid once per leg per round instead of once per (bucket, leg, pair); round 2+ reverses
-     the leg order and the bucket order so sweep drift is not one-sided. `gpus=[...]` shards buckets
-     over devices (a bucket's pairs stay on one device). `process_mode="fresh"` (one cold process per
+     the leg order and the bucket order so sweep drift is not one-sided. `process_mode="fresh"` (one cold process per
      bucket per leg) remains for A/A checks of state carried between buckets in one process.
      > A decisive bucket costs ONE pair; only a bucket whose running median lands in the undecided band
      > (default 0.95–1.10x, where cross-process noise can flip the verdict) spends up to `max_reps=3`.

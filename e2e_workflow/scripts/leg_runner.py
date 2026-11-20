@@ -90,26 +90,15 @@ def _snapshot(out):
 
 
 def timing_rows(cases, h, meta, bucket="", sigs=None, metadata_only=False):
-    """Timed cases, ONE at a time, filtered by --bucket and ordered by --sigs.
-
-    A task that defines metadata-only `timing_specs(h, meta)` + a one-shape `make_timing_case(spec)`
-    builds no operands for --mode list and only the requested shapes' operands for --mode time, one
-    shape at a time, in --sigs order. A task with only `timing_cases(h, meta)` keeps its own
-    allocation behaviour."""
-    requested = set(json.loads(sigs)) if sigs is not None else None
-    if callable(getattr(cases, "timing_specs", None)) and callable(getattr(cases, "make_timing_case", None)):
-        specs = [c for c in cases.timing_specs(h, meta) if not bucket or c["sig"] == bucket]
-        if requested is not None:
-            order = {sig: i for i, sig in enumerate(json.loads(sigs))}
-            specs = sorted((c for c in specs if c["sig"] in order), key=lambda c: order[c["sig"]])
-        for spec in specs:
-            yield spec if metadata_only else cases.make_timing_case(spec)
-        return
-    # Legacy factory: filtered, but timed in the factory's own order (reordering would hold every
-    # requested shape's operands at once).
-    for case in cases.timing_cases(h, meta):
-        if (not bucket or case["sig"] == bucket) and (requested is None or case["sig"] in requested):
-            yield case
+    """Timed cases from metadata-only `timing_specs(h, meta)`, filtered by --bucket and ordered by
+    --sigs; `make_timing_case(spec)` builds ONE shape's operands at a time, so --mode list builds
+    none and --mode time never holds two shapes' operands at once."""
+    specs = [c for c in cases.timing_specs(h, meta) if not bucket or c["sig"] == bucket]
+    if sigs is not None:
+        order = {sig: i for i, sig in enumerate(json.loads(sigs))}
+        specs = sorted((c for c in specs if c["sig"] in order), key=lambda c: order[c["sig"]])
+    for spec in specs:
+        yield spec if metadata_only else cases.make_timing_case(spec)
 
 
 def main():

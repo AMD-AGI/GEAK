@@ -11,7 +11,7 @@ file/hash transport and preflight against the saved original task declaration `K
 
 Begin with a bootstrap: write a minimal case adapter and executable baseline
 replay, then pass one seeded case with valid structural metadata through each declared
-phase entry. Use a profile structural fixture only where state cannot be reconstructed.
+phase entry. State that cannot be reconstructed is a reported gap.
 Resolve concrete replay errors before a broader sweep. Continue in the same task directory with editable leaves, full cases,
 weights and all GPU gates. Save per-phase bootstrap results; they are an
 intermediate checkpoint, never a complete UT pass.
@@ -154,5 +154,3 @@ binding/bad-source evidence, and a task-local report with hashes and limitations
 A driver that merely invokes two old leaf UTs is not a unified UT. Kernel UT
 completion still does not imply an e2e throughput result or full input-distribution
 fidelity when the inputs were reconstructed.
-
-<!-- Standalone adaptation, 2026-10-12: local tools and agent-owned stages. -->

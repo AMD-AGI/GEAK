@@ -82,7 +82,7 @@ temporary per-run artifact.
 Randomize ordinary numerical payloads, not the workload definition. Keep observed
 shape/layout/quantization, phase and call weights. Routing, indices, page tables and
 sequence metadata must retain valid semantics and the observed work/access pattern:
-reuse or reconstruct them from handoff metadata or a profile structural fixture. Synthetic
+reuse or reconstruct them from handoff metadata, or report the gap. Synthetic
 structural cases may extend correctness coverage, but do not claim they reproduce serving
 performance without evidence.
 
@@ -110,9 +110,7 @@ Optimization later runs `unittest.py --validation-mode performance`, which adds
 Each case has a unique `sig`, observed `regime` and finite nonnegative
 `effective_calls` on one consistent basis. Aggregate as
 `sum(baseline_ms * calls) / sum(candidate_ms * calls)`; no fixed-load fallback
-or weighted geometric mean. `measure_legs` times all shapes of a leg in one process per
-round; author metadata-only `timing_specs` plus a one-shape `make_timing_case` so no
-process preallocates every shape's tensors.
+or weighted geometric mean.
 
 ## 4. Validate and deliver
 

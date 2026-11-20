@@ -74,7 +74,7 @@ for (const args of [
       assert(prompt.includes(`${path.dirname(ut)}/references/workflow-handoff.md`));
       assert(prompt.includes('"PROFILE_SKILL_ROOT":' + JSON.stringify(path.dirname(profile))));
       assert(prompt.includes('"UT_SKILL_ROOT":' + JSON.stringify(path.dirname(ut))));
-      assert(prompt.includes('"CAPTURE_PERSIST_POLICY":"structure_only"'));
+      assert(!prompt.includes('CAPTURE_PERSIST_POLICY'), 'AgentX extraction persists no captures');
       assert(prompt.includes('"SHARED_TOOLS":' + JSON.stringify(path.join(root, 'scripts'))));
       assert(prompt.includes('"PARSE_PROFILE_STRICT_PHASES":"1"'));
       assert(prompt.includes('"KERNEL_ENV_SKIP_ENUM_REAP":"1"'));
@@ -167,8 +167,6 @@ assert.equal(explicit.validationMeasurement, 'isolated_server');
 assert.equal(explicit.validationSamples, 2);
 console.log('PASS: AgentX-only activation across models and resumes; fixed-load prompts, workload and state stay unchanged.');
 
-const override = make({workload_kind: 'agentx_trace_replay', capture_persist_policy: 'full'}, undefined);
-assert(override.roleAgent('kernel_extractor', 'prepare', '', {}).includes('"CAPTURE_PERSIST_POLICY":"full"'));
 
 // Verify instruction paths after moving common tools out of the skill packages.
 for (const skillRoot of ['kernel-profile', 'kernel-ut'].map(

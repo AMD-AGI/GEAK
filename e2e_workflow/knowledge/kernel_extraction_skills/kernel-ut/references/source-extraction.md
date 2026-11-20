@@ -53,8 +53,8 @@ smokes in the serving environment; parsing alone misses runtime errors.
 
 Cases are generated from seeds at handoff shapes; the UT never captures. Routing,
 page tables, cache objects and implicit state read by the callable are reconstructed
-from handoff metadata, or from a profile structural fixture when reconstruction cannot
-preserve the observed semantics (see [profile capture](../../kernel-profile/references/capture.md)).
+from handoff metadata; what cannot be reconstructed is a reported gap (see
+[profile capture](../../kernel-profile/references/capture.md)).
 Resolve implicit-state getters from the selected callable's actual globals or imports,
 rather than a guessed package path, and replay one small real case before building the
 full case set. Offline fakes cannot establish compatibility with live object APIs.
@@ -72,15 +72,12 @@ can send calls back to the installed library while names, grids and outputs
 still match. Use untimed evidence from the actual invoked editable leaf, or a
 reversible marker in a diagnostic copy with predeclared cases that must engage.
 A locally resolving wrapper or an inspected but uncalled function is insufficient.
-Use equivalent entry/launch proof for native or JIT code. Restore instrumentation
-and rerun normal identity/correctness checks before freezing the task.
-
-Make this an untimed task check at extraction smoke and after candidate binding
-or source changes. For each editable branch, record actual invocation evidence
-linked to the candidate source through `_cand_overlay`; fail if that branch
-still executes baseline code. Installed dependencies and declared unchanged
-fallbacks remain allowed. An import-path difference or correct output alone
-must not pass this check. Keep proof artifacts in `meta.kernel_extraction`.
+Use equivalent entry/launch proof for native or JIT code. Rerun this check after
+candidate binding or source changes, record the invocation evidence linked to the
+candidate source through `_cand_overlay` in `meta.kernel_extraction`, and fail if a
+claimed branch still executes baseline code (installed dependencies and declared
+unchanged fallbacks are allowed). Restore instrumentation and rerun normal
+identity/correctness checks before freezing the task.
 
 ## Cases and dispatch fidelity
 
@@ -110,22 +107,7 @@ the math, seeded random correctness and deployment graph/compile checks.
 Record every requested case and its missing/failure reason with the call/time mass
 attached. Diagnostic fallback timings and nonfinite sentinels cannot score.
 
-## Timing and table validation
-
-UT qualification does not time (`--validation-mode correctness`); these rules govern the
-performance mode the optimizer runs. After identity matches, compare per-case UT baseline
-and deployment latency.
-Match graph/compile mode and cache residency; rotate weights/KV buffers only
-when deployment evidence calls for it and within the memory budget. Explain
-shape-dependent fidelity gaps before projecting gains.
-
-Keep the shared timing primitives, separate-process lifecycle and repetition
-budget. When noise calibration is needed, use identical controls on the same
-allocation with matching code hashes, inputs and lifecycle, outside scored
-cases. Report absolute and relative spread per family/case; distinguish
-systematic run shifts from random noise. Exclude nonfinite values from statistics
-while retaining missing-case records. Keep identity probes and verbose dispatch
-logging outside timed regions; isolate probes that can abort natively by process.
+## Table overrides
 
 For table overrides, inspect the effective runtime table and actual lookup keys,
 including padding and solution parameters. Cached logs can be silent, and
@@ -133,5 +115,3 @@ lookup results can be overridden downstream; verify final launches. If overrides
 replace a table, premerge with the effective table, preserve all untargeted keys
 and values, and probe changed and unchanged branches. Numerical checks remain
 required because choices such as split-K can alter reduction order.
-
-<!-- Standalone adaptation, 2026-10-12: local tools and agent-owned stages. -->

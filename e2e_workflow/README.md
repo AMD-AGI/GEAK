@@ -401,13 +401,11 @@ tests remain in one place.
 
 UT inputs are fixed-seed generators at the handoff's shapes/dtypes/layouts; reference
 outputs come from the frozen baseline in an isolated process and are not persisted.
-UT execution does not launch serving, profile or capture. There is no input/output
-oracle capture: routing, indices, page tables and other structural metadata are reused
-or reconstructed, and a profile structural fixture (`structure_only`) covers what
-cannot be. UT qualification runs `unittest.py --validation-mode correctness`; timing
-legs run in optimization, where the bare `unittest.py` measures them. An explicit
-`capture_persist_policy` overrides the fixture storage policy; non-AgentX capture
-defaults are unchanged.
+UT execution does not launch serving, profile or capture, and extraction persists no
+tensors: routing, indices, page tables and other structural metadata are reused or
+reconstructed, and what cannot be is a reported gap. UT qualification runs
+`unittest.py --validation-mode correctness`; timing legs run in optimization, where
+the bare `unittest.py` measures them. Non-AgentX capture defaults are unchanged.
 
 GEAK supplies baseline/configuration paths, GPU allocation, accepted overlays and
 budgets through the [workflow handoff](knowledge/kernel_extraction_skills/kernel-ut/references/workflow-handoff.md).

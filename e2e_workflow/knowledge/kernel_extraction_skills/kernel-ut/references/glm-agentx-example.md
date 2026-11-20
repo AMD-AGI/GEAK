@@ -59,5 +59,3 @@ frozen overlay baseline and observed-call weighting.
 Record the matching feature and current evidence in `kernel_workload.json` or
 `meta.kernel_extraction`. Skip absent features and follow this skill's
 task artifacts and local delivery contract.
-
-<!-- Standalone adaptation, 2026-10-12: local tools and agent-owned stages. -->

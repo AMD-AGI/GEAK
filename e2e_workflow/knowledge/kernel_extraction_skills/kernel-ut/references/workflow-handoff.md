@@ -22,7 +22,6 @@ the legacy `roles/kernel_extractor.md` procedure.
 | `TASK`, `WORKLOAD` | User scope and replay specification |
 | `PREVIOUS_WORKLOAD_JSON`, `PREVIOUS_RANKING_JSON`, `PREVIOUS_UT_DELIVERY` | Reuse compatible evidence and passing tasks on resume/refresh |
 | `BUDGET`, `HEAD_BUDGET`, `REMAINING_MIN` | Scheduling limits; retain the complete selected inventory and explain deferred tasks |
-| `CAPTURE_PERSIST_POLICY` | Export into a profile structural-fixture capture; `structure_only` for AgentX |
 
 `PHASE=prepare` runs kernel-profile to a verified `profile_handoff.json`, then kernel-ut
 from that handoff, in one invocation. UT inputs come from seeded factories over handoff

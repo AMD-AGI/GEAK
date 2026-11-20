@@ -46,11 +46,7 @@ input contract. Store its complete JSON, raw trace and metadata. Do not pass `--
 there are no captured oracles to promote.
 
 Shapes, dtypes, strides, quantization and call counts are recorded as metadata in the
-ranking and handoff. The persistent input/output oracle path (`reference_io.pt`, oracle
-regeneration, captured outputs used as references) is retired. Only when routing, page
-tables or sequence state cannot be reconstructed from metadata, take a minimal structural
-fixture with `capture_shapes.py` under `CAPTURE_PERSIST_POLICY=structure_only` (integer and
-boolean operands kept, bulk floats reduced to descriptors; name extra structural floats in
-`CAPTURE_STRUCTURAL_OPERANDS`). Its recorded output is never a reference: the UT obtains
-references from the frozen baseline on its own seeded inputs. Otherwise record the gap in
-the handoff so the UT reports it.
+ranking and handoff. No capture persists tensors: there are no input/output oracles and no
+structural fixtures. Where routing, page tables or sequence state cannot be reconstructed
+from metadata, record the gap in the handoff; the UT reports it as a blocker or a declared
+approximation.

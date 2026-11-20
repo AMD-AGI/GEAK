@@ -1120,7 +1120,7 @@ const BASELINE_EXTRACT_RETRIES = parseInt(A.baseline_extract_retries != null ? A
 // Capture storage bounds forced into every extraction EXTRA_ENV (override via args).
 const CAPTURE_BYTE_BUDGET = String(A.capture_byte_budget != null ? A.capture_byte_budget : '8GiB');
 const CAPTURE_CASE_BYTE_LIMIT = String(A.capture_case_byte_limit != null ? A.capture_case_byte_limit : '2GiB');
-const CAPTURE_PERSIST_POLICY = String(A.capture_persist_policy != null ? A.capture_persist_policy : (KERNEL_EXTRACT_ON ? 'structure_only' : 'share_large'));
+const CAPTURE_PERSIST_POLICY = String(A.capture_persist_policy != null ? A.capture_persist_policy : 'share_large');
 const CAPTURE_WORKSPACE_BUDGET = String(A.capture_workspace_budget != null ? A.capture_workspace_budget : '32GiB');
 const CAPTURE_STORAGE_ENV = `CAPTURE_BYTE_BUDGET=${CAPTURE_BYTE_BUDGET} CAPTURE_CASE_BYTE_LIMIT=${CAPTURE_CASE_BYTE_LIMIT} CAPTURE_PERSIST_POLICY=${CAPTURE_PERSIST_POLICY}`;
 const TASK = A.task || '';
@@ -1749,7 +1749,6 @@ function roleAgent(role, phase, intro, inputs) {
       PROFILE_SKILL_ROOT: KERNEL_PROFILE_DIR, UT_SKILL_ROOT: KERNEL_UT_DIR,
       SHARED_TOOLS: `${WORKFLOW_DIR}/scripts`, WORKFLOW_DIR,
       PARSE_PROFILE_STRICT_PHASES: '1', KERNEL_ENV_SKIP_ENUM_REAP: '1',
-      CAPTURE_PERSIST_POLICY, CAPTURE_STORAGE_ENV,
     } : {}),
   };
   const instruction = standaloneExtraction
@@ -3537,7 +3536,7 @@ async function prepareAgentXKernels(round, throughput) {
     'in this invocation. UT inputs are fixed-seed factories over the handoff metadata and references come ' +
     'from the frozen baseline; UT execution must not start serving, capture or persist golden outputs. ' +
     'Qualify with `unittest.py --validation-mode correctness`; timing runs in optimization. ' +
-    'Capture only missing structural state needed for faithful cases. Do not return a candidate list ' +
+    'Persist no tensors; report structural state that cannot be reconstructed as a gap. Do not return a candidate list ' +
     'before UTs have been attempted. Reuse compatible evidence and passing UTs. Never rerun the full ' +
     'AgentX baseline for discovery. Follow TASK scope and the default per-phase selection rule. ' +
     'Prove that edits to each opt GPU leaf affect candidate correctness while the frozen baseline passes; ' +

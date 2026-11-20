@@ -2954,35 +2954,12 @@ class TestMeasureLegsResolution(_LegTestCase):
 
 
 class TestMeasureLegsBatched(unittest.TestCase):
-    """The batched sweep's bookkeeping: GPU shards and what a sweep may answer."""
+    """The batched sweep's bookkeeping: what a sweep may answer."""
 
     def _measure(self, leg, **kwargs):
         with patch.object(hl, "build_candidate_overlay", return_value=("base", "cand")), \
              patch.object(hl, "assert_legs_differ"), patch.object(hl, "_run_leg", side_effect=leg):
             return hl.measure_legs("/fixture", {}, **kwargs)
-
-    def test_gpu_shards_split_the_buckets_and_keep_each_pair_on_one_device(self):
-        seen = []
-
-        def leg(task, overlay, mode, **kw):
-            if mode == "list":
-                return {"sigs": ["a", "b", "c"]}
-            seen.append((kw["env_extra"]["HIP_VISIBLE_DEVICES"], overlay, tuple(kw["sigs"])))
-            return {"cases": [{"sig": s, "ms": 1.0} for s in kw["sigs"]]}
-        per = self._measure(leg, gpus=[0, 1], max_reps=1)
-        self.assertEqual([r["sig"] for r in per], ["a", "b", "c"])
-        self.assertEqual(sorted(seen), [("0", "base", ("a", "c")), ("0", "cand", ("a", "c")),
-                                        ("1", "base", ("b",)), ("1", "cand", ("b",))])
-
-    def test_a_failing_gpu_shard_reaches_the_caller(self):
-        def leg(task, overlay, mode, **kw):
-            if mode == "list":
-                return {"sigs": ["a", "b"]}
-            if kw["env_extra"]["HIP_VISIBLE_DEVICES"] == "1":
-                raise RuntimeError("worker failed")
-            return {"cases": [{"sig": s, "ms": 1.0} for s in kw["sigs"]]}
-        with self.assertRaisesRegex(RuntimeError, "worker failed"):
-            self._measure(leg, gpus=[0, 1], max_reps=1)
 
     def test_a_sweep_that_duplicates_or_adds_a_case_is_refused(self):
         for cases in ([{"sig": "a", "ms": 1.0}] * 2, [{"sig": "a", "ms": 1.0}, {"sig": "z", "ms": 1.0}]):

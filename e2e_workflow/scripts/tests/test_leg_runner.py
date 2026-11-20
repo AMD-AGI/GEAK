@@ -84,11 +84,12 @@ _CASES_STUB = textwrap.dedent('''
         def clone(self): return self
         def cpu(self): return self
 
-    def timing_cases(h, meta):
-        return [
-            {"sig": "decode", "args": {"m": 1}, "regime": "decode", "m": 1},
-            {"sig": "prefill", "args": {"m": 4096}, "regime": "prefill", "m": 4096},
-        ]
+    def timing_specs(h, meta):
+        return [{"sig": "decode", "regime": "decode", "m": 1},
+                {"sig": "prefill", "regime": "prefill", "m": 4096}]
+
+    def make_timing_case(spec):
+        return dict(spec, args={"m": spec["m"]})
 
     def random_shapes(h, meta):
         return [{"sig": "decode", "make_inputs": lambda rng: {"seed": rng.seed,
@@ -409,9 +410,6 @@ _STREAMING_CASES_STUB = textwrap.dedent('''
     def make_timing_case(spec):
         return dict(spec, args=Operand(spec["sig"]))
 
-    def timing_cases(h, meta):
-        raise AssertionError("the legacy factory must not be used when specs exist")
-
     def random_shapes(h, meta):
         return []
 
@@ -428,8 +426,7 @@ class TimingSweep(_LegRunnerTestCase):
         self._target_module()
         out = json.loads(self._main("--task", self.task, "--mode", "time",
                                     "--sigs", json.dumps(["prefill", "decode"])))
-        # a legacy timing_cases factory is filtered, in its own order
-        self.assertEqual([c["sig"] for c in out["cases"]], ["decode", "prefill"])
+        self.assertEqual([c["sig"] for c in out["cases"]], ["prefill", "decode"])
         out = json.loads(self._main("--task", self.task, "--mode", "time",
                                     "--sigs", json.dumps(["prefill"])))
         self.assertEqual([c["sig"] for c in out["cases"]], ["prefill"])

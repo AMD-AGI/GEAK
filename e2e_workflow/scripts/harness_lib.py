@@ -1531,21 +1531,9 @@ def _kill_process_group(proc, grace=5.0):
             continue
 
 
-def gpu_env(gpu):
-    """Pin a leg to one of the GPUs this process may use, by its logical index.
-
-    HIP_VISIBLE_DEVICES indexes into whatever ROCR_VISIBLE_DEVICES (or the container's device
-    mounts) already exposes, so a logical index is right under both pinning schemes."""
-    if gpu is None:
-        return {}
-    g = str(gpu)
-    return {"HIP_VISIBLE_DEVICES": g, "CUDA_VISIBLE_DEVICES": g}
-
-
 def _run_leg(task_dir, overlay, mode, *, bucket="", out="", seed=0, draws=0, timeout=3600,
-             target_callable="", env_extra=None, sigs=None):
+             target_callable="", sigs=None):
     env = dict(os.environ)
-    env.update(env_extra or {})
     env["PYTHONPATH"] = os.pathsep.join([overlay] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
     cmd = [sys.executable, os.path.join(task_dir, "leg_runner.py"),
            "--task", task_dir, "--mode", mode, "--seed", str(int(seed))]
@@ -1651,14 +1639,14 @@ def _median(xs):
     return s[n // 2] if n % 2 else 0.5 * (s[n // 2 - 1] + s[n // 2])
 
 
-def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1.10), gpus=None,
+def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1.10),
                  process_mode="batched"):
     """`per_case` for `serving_weighted_speedup`. Baseline and candidate always run in SEPARATE
     processes: a warm interpreter shared by the two legs shares JIT/autotune state and reports a
     pseudo-1.0x that is an artifact, not a measurement.
 
-    `process_mode="batched"` (default) starts ONE process per leg per round (per GPU shard with
-    `gpus`), streaming every pending bucket. A cold torch/stack import costs 5-25 s, so paying it
+    `process_mode="batched"` (default) starts ONE process per leg per round, streaming every
+    pending bucket. A cold torch/stack import costs 5-25 s, so paying it
     once per leg instead of once per (bucket, leg, pair) is most of a UT's wall time. Round 2+
     reverses the leg order and the bucket order, so drift over a sweep is not one-sided.
     `process_mode="fresh"` restarts for every (bucket, leg, pair); keep it for A/A checks of state
@@ -1690,21 +1678,13 @@ def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1
     if len(sigs) != len(set(sigs)):
         raise ValueError("duplicate timing case sigs: %s" % sigs)
     if process_mode == "fresh":
-        env = gpu_env(gpus[0]) if gpus else None
-        rows = {s: _measure_bucket(task, base, cand, s, timeout, max_reps, undecided, env) for s in sigs}
+        rows = {s: _measure_bucket(task, base, cand, s, timeout, max_reps, undecided) for s in sigs}
     else:
-        # A bucket's pairs stay on one device, so its ratio never compares two GPUs.
-        devices = list(gpus or [None])[:max(1, len(sigs))]
-        from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=len(devices)) as pool:
-            parts = pool.map(lambda i: _measure_sweep(task, base, cand, sigs[i::len(devices)], timeout,
-                                                      max_reps, undecided, gpu_env(devices[i])),
-                             range(len(devices)))
-            rows = {s: r for part in parts for s, r in part.items()}
+        rows = _measure_sweep(task, base, cand, sigs, timeout, max_reps, undecided)
     return [dict(rows[s], process_mode=process_mode) for s in sigs if rows.get(s)]
 
 
-def _measure_sweep(task, base, cand, sigs, timeout, max_reps, undecided, env):
+def _measure_sweep(task, base, cand, sigs, timeout, max_reps, undecided):
     """Rounds of one baseline process + one candidate process over every still-undecided sig."""
     pending, rows, pairs = list(sigs), {}, {s: ([], []) for s in sigs}
     for rep in range(max(1, int(max_reps))):
@@ -1712,8 +1692,8 @@ def _measure_sweep(task, base, cand, sigs, timeout, max_reps, undecided, env):
             break
         order = pending if rep % 2 == 0 else pending[::-1]
         sides = [("baseline", base), ("candidate", cand)][::-1 if rep % 2 else 1]
-        got = {side: _checked_timing_rows(_run_leg(task, overlay, "time", sigs=order, timeout=timeout,
-                                                   env_extra=env), order, side)
+        got = {side: _checked_timing_rows(_run_leg(task, overlay, "time", sigs=order, timeout=timeout),
+                                          order, side)
                for side, overlay in sides}
         again = []
         for sig in pending:
@@ -1731,14 +1711,14 @@ def _measure_sweep(task, base, cand, sigs, timeout, max_reps, undecided, env):
     return rows
 
 
-def _measure_bucket(task, base, cand, sig, timeout, max_reps, undecided, env):
+def _measure_bucket(task, base, cand, sig, timeout, max_reps, undecided):
     """One bucket's interleaved B,C pairs, each leg a fresh process; None if a leg has no case."""
     brows, orows = [], []
     for _ in range(max(1, int(max_reps))):
-        b = _checked_timing_rows(_run_leg(task, base, "time", bucket=sig, timeout=timeout,
-                                          env_extra=env), [sig], "baseline").get(sig)
-        o = _checked_timing_rows(_run_leg(task, cand, "time", bucket=sig, timeout=timeout,
-                                          env_extra=env), [sig], "candidate").get(sig)
+        b = _checked_timing_rows(_run_leg(task, base, "time", bucket=sig, timeout=timeout),
+                                 [sig], "baseline").get(sig)
+        o = _checked_timing_rows(_run_leg(task, cand, "time", bucket=sig, timeout=timeout),
+                                 [sig], "candidate").get(sig)
         if b is None or o is None:
             break
         brows.append(b)

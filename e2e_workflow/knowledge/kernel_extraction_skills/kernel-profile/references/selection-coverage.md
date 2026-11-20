@@ -122,5 +122,3 @@ be complete while inventory/workload coverage stays partial. For a skill test,
 include selection omissions and budget deferrals in the verdict, not just the
 passing UT results. Synthetic values or median-context reconstructions remain
 declared approximations even when every declared timing signature passed.
-
-<!-- Standalone adaptation, 2026-10-12: local tools and agent-owned stages. -->
