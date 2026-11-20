@@ -55,6 +55,9 @@
       "params": {
         "_note_request": "The UT stage writes the tasks a ut_request.json names (written by its caller from the profile's kernels.json; stages/ut/kernel-ut/references/request-authoring.md). Without a request it is blocked: task boundaries are not drafted inside UT.",
         "request": null,
+        "serving": "profile/out/serving.json",
+        "_note_serving": "Relative to RUN_ROOT. The deployment whose env and pythonpath the UT lanes reproduce and whose gpus bound the pool (ut_wave.py --serving).",
+        "gpus": null,
         "minimum_qualified_tasks": 0
       }
     },
@@ -64,7 +67,9 @@
       "params": {
         "roofline_mode": "tl-only",
         "arch_json": null,
-        "rank_key": "expected_e2e_gain_pct"
+        "rank_key": "expected_e2e_gain_pct",
+        "selection": "profile/out/selection_targets.json",
+        "_note_selection": "Relative to RUN_ROOT. The profile's GPU shares that rank tasks; a UT request does not carry them."
       }
     },
     "optimize": {

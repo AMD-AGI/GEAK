@@ -16,7 +16,7 @@ For every task:
   tasks/<label>/meta.json       server_preimports, server_evidence, expected_launches and
                                 compile_variant_waivers stamped from the request
   task_plan.json                tasks[] and blocked_identities[], the shape downstream reads
-  selection_targets.json        carried from the request when it has one
+  selection_targets.json        only with --selection: the profile's shares, for Roofline
 
 `--check` verifies the request (contract, every listed file's SHA-256, task fields) and
 writes nothing. Stdlib only.
@@ -155,7 +155,7 @@ def stamp_meta(tdir, task):
     return True
 
 
-def install(req, root, out, force=False):
+def install(req, root, out, force=False, selection=None):
     tasks = []
     for t in req.get("tasks") or []:
         tdir = os.path.join(out, "tasks", t["label"])
@@ -183,14 +183,19 @@ def install(req, root, out, force=False):
                       "selection_pct_gpu_time": t.get("selection_pct_gpu_time"),
                       "requested_kernel": os.path.join(run, "requested_kernel.json"),
                       "server_evidence": rk["server_evidence"], "scaffold": sc})
-    if os.path.isfile(os.path.join(root, "selection_targets.json")):
-        shutil.copy2(os.path.join(root, "selection_targets.json"),
-                     os.path.join(out, "selection_targets.json"))
+    carried = None
+    if selection:
+        # Share evidence for a later Roofline call, only when the caller passes it: a
+        # file that merely sits beside the request is not an input (pure UT needs none).
+        shutil.copy2(selection, os.path.join(out, "selection_targets.json"))
+        carried = {"source": os.path.abspath(selection), "sha256": sha256(selection),
+                   "path": os.path.join(out, "selection_targets.json")}
     plan = {"contract": "agentx_task_plan/v1",
             "scope": "UT generation; installed by scaffold_tasks.py from ut_request.json",
             "request": os.path.join(root, "ut_request.json"), "tasks": tasks,
             "blocked_identities": req.get("blocked_identities") or [],
             "selected_overall_pct": req.get("selected_overall_pct"),
+            "selection_targets": carried,
             "warnings": req.get("warnings") or []}
     dump(plan, os.path.join(out, "task_plan.json"))
     return plan
@@ -202,18 +207,23 @@ def main():
     ap.add_argument("--out", default=os.environ.get("OUT"))
     ap.add_argument("--force", action="store_true", help="regenerate existing UT scaffolds")
     ap.add_argument("--check", action="store_true", help="verify the request, write nothing")
+    ap.add_argument("--selection", default=None,
+                    help="the profile's selection_targets.json, carried into OUT for a later "
+                         "Roofline call (its GPU shares); not needed for UT itself")
     a = ap.parse_args()
     req, root, problems = check_request(a.request)
     for p in problems:
         print("  ERROR: %s" % p)
     if problems:
         return 1
+    if a.selection and not os.path.isfile(a.selection):
+        ap.error("--selection %s does not exist" % a.selection)
     if a.check:
         print("scaffold_tasks: request is consistent (%d tasks)" % len(req["tasks"]))
         return 0
     if not a.out:
         ap.error("--out or OUT is required")
-    plan = install(req, root, os.path.abspath(a.out), a.force)
+    plan = install(req, root, os.path.abspath(a.out), a.force, a.selection)
     for t in plan["tasks"]:
         sc = t["scaffold"]
         print("  %-44s %-18s scaffold %s%s" % (t["label"], t["ut_family"], sc["status"],

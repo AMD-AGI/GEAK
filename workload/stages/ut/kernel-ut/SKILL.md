@@ -38,6 +38,8 @@ scaffold (`cases.py`, `meta.json`, `unittest.py`, `run/ut_cases.json`,
 `run/ut_contract.json`) and `meta.server_preimports`, `meta.server_evidence`,
 `meta.expected_launches` and compile-variant waivers. An existing `unittest.py` is never
 overwritten without `--force`. A different request needs a fresh output directory.
+When a Roofline call follows, pass the profile's shares with
+`--selection <selection_targets.json>` (recorded in `task_plan.json`); UT itself needs none.
 
 ## 2. Verify the boundary and run the UT wave
 

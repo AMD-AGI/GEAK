@@ -32,7 +32,7 @@ tasks stay valid. A requested boundary that the live seam check refutes is repor
 | Artifact | Purpose |
 | --- | --- |
 | `task_plan.json` | Installed tasks and blocked identities, from the request |
-| `selection_targets.json` | Carried from the request for Roofline |
+| `selection_targets.json` | Only when the call passes the profile's selection (`scaffold_tasks.py --selection`), for Roofline |
 | `tasks/<name>/` | Qualified tasks with `unittest.py`, `meta.json`, `kernel_src/` and `cases.py` |
 | `tasks/<name>/run/ut_result.json` | Native full-test verdict |
 | `tasks/<name>/run/RETURN.json` | Native delivery-gate receipt |

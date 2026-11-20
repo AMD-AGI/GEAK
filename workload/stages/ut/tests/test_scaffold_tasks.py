@@ -69,12 +69,25 @@ class ScaffoldTasksTest(unittest.TestCase):
         self.assertEqual(plan["tasks"][0]["scaffold"]["status"], "skipped")   # custom family
         self.assertEqual(plan["tasks"][0]["required_companions"], ["c"])
         self.assertEqual(plan["blocked_identities"], [{"kernel": "b", "blocker": "no source"}])
-        self.assertTrue((self.out / "selection_targets.json").exists())
+        # A file that merely sits beside the request is not an input.
+        self.assertFalse((self.out / "selection_targets.json").exists())
+        self.assertIsNone(plan["selection_targets"])
         (tdir / "meta.json").write_text("{}")
         S.stamp_meta(str(tdir), self.doc["tasks"][0])
         meta = json.loads((tdir / "meta.json").read_text())
         self.assertEqual(meta["expected_launches"], {"DECODE": ["k"]})
         self.assertEqual(meta["provenance"], {"from": "anywhere"})
+
+    def test_share_evidence_for_roofline_is_carried_only_when_passed(self):
+        selection = self.root / "profile_selection.json"
+        selection.write_text(json.dumps({"targets": [{"id": "k", "overall_pct": 12.5}]}))
+        req, root, _ = S.check_request(str(self.path))
+        plan = S.install(req, root, str(self.out), selection=str(selection))
+        carried = self.out / "selection_targets.json"
+        self.assertEqual(json.loads(carried.read_text())["targets"][0]["overall_pct"], 12.5)
+        self.assertEqual(plan["selection_targets"]["source"], str(selection))
+        self.assertEqual(plan["selection_targets"]["sha256"],
+                         hashlib.sha256(selection.read_bytes()).hexdigest())
 
     def test_a_changed_request_file_is_refused(self):
         (self.req / "tasks/op/run/server_calls.json").write_text("{}")

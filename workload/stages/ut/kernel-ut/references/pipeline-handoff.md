@@ -6,10 +6,11 @@
 |---|---|
 | `SKILL_ROOT` | this directory; `SHARED_TOOLS="$SKILL_ROOT/shared"` |
 | `OUT` | `EVAL_DIR`: `task_plan.json`, `tasks/`, `ut_wave/`, `REPORT.md`, `results.json` |
-| `PARAMS` | `request` (path of a `ut_request.json`), `minimum_qualified_tasks`, any `agent_brief` facts |
+| `PARAMS` | `request` (path of a `ut_request.json`), `serving` (the deployment's `serving.json`: `ut_wave.py --serving`), `gpus` (this call's allocation: `--gpus`), `selection` (the profile's `selection_targets.json`, only when Roofline follows: `scaffold_tasks.py --selection`), `minimum_qualified_tasks`, any `agent_brief` facts |
 | `CONFIG` | `target.image` is the `--image` of the UT wave |
 | `RUNNER` | the runner script (`runners/CONTRACT.md`) the UT wave starts one lane session with per task: `ut_wave.py start --runner "$RUNNER"` |
 
+Relative paths in `PARAMS` are relative to `$RUN_ROOT`.
 The request is `params.request`, else `$OUT/ut_request.json`, else `$IN/ut_request.json`.
 Without one the stage is `blocked`: it does not draft task boundaries.
 
@@ -23,7 +24,7 @@ task entrypoint.
 | File | Step |
 |---|---|
 | `task_plan.json` | §1, `scripts/scaffold_tasks.py` from the request; every requested identity owned by a task or listed in `blocked_identities` with a blocker |
-| `selection_targets.json` | §1, carried from the request; the roofline stage ranks on `targets[].overall_pct` |
+| `selection_targets.json` | §1, only when `params.selection` names it (`scaffold_tasks.py --selection`); the roofline stage ranks on `targets[].overall_pct`. Without it Roofline needs its own `params.selection` |
 | `tasks/<name>/` | §1-§3; each holds `unittest.py`, `meta.json`, `cases.py`, `kernel_src/` and is run by the optimize stage |
 | `REPORT.md`, `results.json` | §4 |
 
