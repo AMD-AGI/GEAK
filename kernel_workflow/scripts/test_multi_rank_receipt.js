@@ -19,6 +19,7 @@
 //   E. a produced candidate needs per-rank candidate times too.
 //   F. a GPU count Setup finds switches to UT_MR only with the task's declaration.
 //   G. the multi-GPU schemas and the receipt checks on their own.
+//   H. the Benchmark role: step 5a (per-rank baseline) under main's single-run setup of a weighted oracle.
 // main's lane is read from $GEAK_MAIN_TREE/kernel_workflow/kernel_lane.js, else `git show d8bb12c8:`,
 // else /src/commits/d8bb12c8. Without any of them A-C compare with pinned digests of main's runs
 // (recompute them with main available and PRINT_DIGESTS=1 when a stub here changes).
@@ -409,7 +410,9 @@ const itemsOf = (schema, key) => schema.properties[key].items;
       'HIP_VISIBLE_DEVICES to the leased ids, so start every rank inside that one call. ' + SENTENCE + ' ' +
       '(Only a test whose own documented command is a launcher, e.g. `torchrun --nproc_per_node=4 ...` in ' +
       'its config, keeps that command.) Never call gpu_lock.sh from inside a leased command (it is rejected) ' +
-      'and never background a lease (`&`, nohup). A leased command is killed after GEAK_GPU_RUN_TIMEOUT ' +
+      'and never leave a lease running behind you: when a role step tells you to start a long UT run in the ' +
+      'background and poll (`nohup ... &`), that run is one whole `gpu_lock.sh` call; wait for its `UT_EXIT=` ' +
+      'line before the next GPU command and before you return. A leased command is killed after GEAK_GPU_RUN_TIMEOUT ' +
       'seconds, and this job\'s limit is the UT\'s whole-run limit, 3600 s: prefix every `gpu_lock.sh` and ' +
       '`profile_kernel.sh` call with `GEAK_GPU_RUN_TIMEOUT=3600` (the COMMANDMENT\'s GPU commands carry the ' +
       'same prefix). Leases on the same GPUs serialize, so put the arms you compare into one run.';
@@ -634,6 +637,26 @@ const itemsOf = (schema, key) => schema.properties[key].items;
     const built = benchReceipt(benchMR().baseline_per_case, 4, 'summary.json');
     ok(receiptGap(built, 4, false) === '' && built.source === 'Benchmark baseline_per_case (summary.json)',
        'the receipt built from the Benchmark record passes the same check');
+  }
+
+  // -------------------------------------------------------------------------
+  console.log('\n# H. the Benchmark role under main\'s single-run setup of a weighted oracle');
+  {
+    const role = fs.readFileSync(path.join(WF_DIR, 'roles/benchmark_engineer.md'), 'utf8');
+    const weighted = role.indexOf('**Weighted oracle:** skip the 3 runs.');
+    const step5a = role.indexOf('### 5a. Multi-rank UT tasks: per-rank baseline');
+    const ret = role.indexOf('## Return JSON');
+    ok(weighted > 0 && step5a > weighted && ret > step5a,
+       'step 5 ends with main\'s weighted-oracle paragraph; step 5a follows it, before Return JSON');
+    const s5a = role.slice(step5a, ret);
+    ok(s5a.includes('over your timed runs (3, or the single run of a weighted oracle)') && !s5a.includes('over your 3 runs'),
+       'step 5a reads the per-rank baseline from the timed runs there are: 3, or a weighted oracle\'s single run');
+    ok(s5a.includes('**Weighted oracle (single-run setup):**') &&
+       s5a.includes('take the `next_run: full` path even when it says `usable: true`') &&
+       s5a.includes('read `latency_ms`, `rank_ms` and `alignment` from that run'),
+       'a multi-rank task times one full UT run of its own, also when the saved extraction baseline is usable');
+    ok(role.includes('top-level `timing.per_case` of a generated `unittest.py`'),
+       'the result layouts the role names for the baseline reader include the generated unittest.py\'s');
   }
 
   console.log(failures

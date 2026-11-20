@@ -2421,6 +2421,9 @@ function expertSkillsBlock(role) {
 // Appended to every role prompt only for multi-GPU jobs, so single-GPU prompts are unchanged. A
 // UT-module multi-GPU task (UT_MR, known after Setup) gets the UT's own rules and its whole-UT limit
 // as the lease run timeout; every other multi-GPU job, and Setup itself, gets the original text.
+// The UT block does not repeat the original's "never background a lease": the roles start a long UT
+// run in the background and poll it (one Bash call is killed after 10 min), so it says how that run
+// fits the lease instead.
 function multiGpuBlock(role) {
   if (!GPU_JOB) return '';
   const n = GPU_RESOURCE.gpusPerJob;
@@ -2441,8 +2444,10 @@ function multiGpuBlock(role) {
     `its own rank processes: run python3 unittest.py directly; do not wrap it in torchrun or another ` +
     `multi-process launcher. (Only a test whose own documented command is a launcher, e.g. ` +
     `\`torchrun --nproc_per_node=${n} ...\` in its config, keeps that command.) Never call gpu_lock.sh ` +
-    `from inside a leased command (it is rejected) and never background a lease (\`&\`, nohup). ` +
-    `A leased command is killed after GEAK_GPU_RUN_TIMEOUT seconds, and this job's limit is the ` +
+    `from inside a leased command (it is rejected) and never leave a lease running behind you: when a ` +
+    `role step tells you to start a long UT run in the background and poll (\`nohup ... &\`), that run is ` +
+    `one whole \`gpu_lock.sh\` call; wait for its \`UT_EXIT=\` line before the next GPU command and before ` +
+    `you return. A leased command is killed after GEAK_GPU_RUN_TIMEOUT seconds, and this job's limit is the ` +
     `UT's whole-run limit, ${UT_TOTAL_S} s: prefix every \`gpu_lock.sh\` and \`profile_kernel.sh\` ` +
     `call with \`GEAK_GPU_RUN_TIMEOUT=${UT_TOTAL_S}\` (the COMMANDMENT's GPU commands carry the same ` +
     `prefix). Leases on the same GPUs serialize, so put the arms you compare into one run.`;
