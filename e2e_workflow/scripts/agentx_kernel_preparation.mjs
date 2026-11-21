@@ -3,7 +3,6 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { checkPreparedUT } from './kernel_extraction_delivery.mjs';
-import { perRankTimingDefect, readUtResult } from './kernel_source_delivery.mjs';
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 // A multi-GPU count is declared when the request or the result writes required_gpu_count and every
@@ -100,23 +99,19 @@ async function readPreparedDocument(root, delivery, deliveryPath) {
       // lanes exactly what passed the gate instead of a promise to re-read it later.
       candidate.prepared_ut = { phase: task.phase, result_path: resultPath,
         sha256: sha256(bytes), result };
-      // A multi-GPU task enters its queue with required_gpu_count when its UT result times every
-      // case per rank with a recorded alignment (timing receipt, or the older per_rank_us +
-      // alignment) and its GPU count is declared consistently; e2e_workflow.js decides whether a
-      // GPU pool can hold it. Otherwise it stays deferred, naming what is missing.
+      // A multi-GPU task enters its queue with required_gpu_count when its GPU count is declared
+      // consistently; e2e_workflow.js decides whether a GPU pool can hold it. Extraction qualifies
+      // on correctness only, so per-rank timing is not checked here: the kernel lane's Benchmark
+      // times the UT and gates its per-rank receipt. Otherwise it stays deferred, naming what is missing.
       const gpuCount = kernel.required_gpu_count ?? result.required_gpu_count ??
         (candidate.op_kind === 'collective' ? 2 : 1);
       if (!Number.isInteger(gpuCount) || gpuCount < 1) throw new Error('invalid required_gpu_count');
       if (gpuCount > 1) {
-        // A UT result it cannot read is a missing per-rank timing, not a failed delivery (main defers it).
-        const timing = await readUtResult(result).then(ut => perRankTimingDefect(ut, gpuCount),
-          e => `the UT result cannot be read: ${e.message}`);
-        const missing = [gpuCountUndeclared(kernel, result, gpuCount), timing].filter(Boolean);
-        if (missing.length) {
+        const missing = gpuCountUndeclared(kernel, result, gpuCount);
+        if (missing) {
           output.deferred_tasks.push({ ...candidate, task_dir: result.task_dir,
             result_path: resultPath, required_gpu_count: gpuCount,
-            reason: `UT validated; multi-GPU optimization needs a declared GPU count and per-rank time and ` +
-              `alignment for every timed case: ${missing.join('; ')}` });
+            reason: `UT validated; multi-GPU optimization needs a declared GPU count: ${missing}` });
           continue;
         }
         candidate.required_gpu_count = gpuCount;

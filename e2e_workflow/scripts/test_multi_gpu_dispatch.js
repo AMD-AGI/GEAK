@@ -6,7 +6,7 @@
 //
 //   1. The AgentX extractor's prompt and inputs are main's (A23): the arguments e2e reads, the
 //      kernel_extractor:prepare inputs and every rendered role prompt equal those of main's
-//      e2e_workflow.js (d8bb12c8) under the same arguments. A multi-rank UT leases SERVING_GPU, which
+//      e2e_workflow.js (b3bb4e22) under the same arguments. A multi-rank UT leases SERVING_GPU, which
 //      the UT module's own documents say; the workflow adds nothing for it.
 //   2. makeSem refuses a request its pool can never hold instead of waiting forever.
 //   3. After the envelope / carried state is read, a multi-GPU candidate whose path in this run cannot
@@ -17,7 +17,7 @@
 //      lane reads the UT's time limit from the task. Single-GPU candidates keep byte-identical call objects.
 //
 // The code under test is EXTRACTED from the real source and run against stubs. main's e2e_workflow.js
-// is read from $GEAK_MAIN_TREE, else `git show d8bb12c8:`, else /src/commits/d8bb12c8; without any of
+// is read from $GEAK_MAIN_TREE, else `git show b3bb4e22:`, else /src/commits/b3bb4e22; without any of
 // them section 1 compares with pinned digests of main's renderings.
 //
 // Run:  node e2e_workflow/scripts/test_multi_gpu_dispatch.js
@@ -30,7 +30,7 @@ const { execFileSync } = require('child_process');
 const ROOT = path.resolve(__dirname, '..');
 const src = fs.readFileSync(path.join(ROOT, 'e2e_workflow.js'), 'utf8');
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-const MAIN_COMMIT = 'd8bb12c8';
+const MAIN_COMMIT = 'b3bb4e22';
 const E2E_REL = 'e2e_workflow/e2e_workflow.js';
 function readMain() {
   const sources = [];
@@ -94,7 +94,7 @@ function singleGpu(name, phase = 'extract') {
   const argsRead = (text) => [...new Set([...text.matchAll(/(?<![\w$.])A\s*(?:\?\.|\.)\s*([A-Za-z_$][\w$]*)/g)].map((m) => m[1])
     .concat([...text.matchAll(/(?<![\w$.])A\s*(?:\?\.)?\[\s*(['"])([^'"]+)\1\s*\]/g)].map((m) => m[2])))].sort();
   // sha256 of the sorted args.* names main's e2e_workflow.js reads.
-  const MAIN_ARGS_SHA256 = '91e047926e26dcddb9a24a41ee4844271c64070d6fabd76e12a79234f7a2e5b3';
+  const MAIN_ARGS_SHA256 = '0611fd43a18c189aaee974dc900de9a95fb83e7146fa676a93450c009ad2c3d5';
   if (process.env.PRINT_DIGESTS && MAIN) console.log(`    main args: ${sha(argsRead(MAIN.src))}`);
   ok(sha(argsRead(src)) === MAIN_ARGS_SHA256 && (!MAIN || sha(argsRead(MAIN.src)) === MAIN_ARGS_SHA256),
      'e2e reads exactly main\'s args.* set', MAIN && [argsRead(src).filter((k) => !argsRead(MAIN.src).includes(k)),
@@ -151,16 +151,16 @@ function singleGpu(name, phase = 'extract') {
   ok(mine.prepare && mine.prepare.inputs.GPU_ID === '0', 'kernel_extractor:prepare inputs carry the single-GPU GPU_ID');
   // main's renderings (sha256 of each), pinned so CI without main's source still compares.
   const PINNED = {
-    'prepare': 'f4d0cb6f9d5892136f3b17f77a028a9c87993d9fc27d7424dc13df1a3af9e1e1',
-    'agentx:kernel_extractor:prepare': '6f527ca56eaf9489e4ab1ec13bfcba9675da819157b4e4c15e2f5bb5fc7592ff',
-    'agentx:kernel_extractor:repair_delivery': '44074a14d27640e16c1c00fe2565f208cb2ceca176de7be668a629fd421fdf18',
+    'prepare': '818e2b743eea72cbfd00bd0785b44c73c0510ccb7cc806d3547f318cb0756934',
+    'agentx:kernel_extractor:prepare': '712703b511e93341dec74f1cd36f835b99c261b6587057ba7620cee067d73907',
+    'agentx:kernel_extractor:repair_delivery': 'a50d7c645ae2e6f9b6e20ce0880abbbf5e851911b42ea3e95a231cbd86cab388',
     'agentx:director': '66ca811520a2d12af5a91fb6363d1c576c707bb5bd112644a5975f49dc137019',
-    'agentx:system_architect': '468b66b579bfe7ee7b089685fb883e293475c6a42413c2cf291116692a17116b',
-    'agentx:op_benchmarker': '8830da8a5ea6012e0636267532e0ac4dc43c06267a10b9c9887eb959f9e6210e',
+    'agentx:system_architect': '87e4bcb83f2fcddd86b85cd27147e2b93c1f311d845a16bbbbf5dc7bb2941025',
+    'agentx:op_benchmarker': '22ab9f4fb8354adbc00b9f5613d5ded341495a83f322680ca8097d9a8f7e70db',
     'agentx:e2e_integrator': '7ca9c16be27502631455f5424484b71cdbc4590bc16be213d781eb4756212279',
     'agentx:kernel_surgeon': '8fe38b50ce3710d67ce7f51a5d72836ffeaa8ec673821e9a1c8ea8ae6139c096',
     'agentx:config_tuner': 'e29446b4c32700ae49758a79de71a9788ff7d74ef69a11a2b55e9c5a5d3ccae3',
-    'fixed:kernel_extractor:prepare': '82b96e500d7f958a42ef18ab0cfb1ca33444051af33fcdc161a91adf5277eb12',
+    'fixed:kernel_extractor:prepare': '6ada0021fb3ec520f875699dea3c0367ace51f797a2c8eacc18f32ef3f66d11d',
     'fixed:kernel_extractor:repair_delivery': '6f3fde8309e6ea3e83801969f760fed59ee7f3fd9fa9f51a85a6fbefc5923f61',
     'fixed:director': '7f57df6a1e55c8b5c46e411869a7fba22e5225abaf63a262a67bb3bfe31a2291',
     'fixed:system_architect': 'a5ae72f716ea47d0301ae8c3b768433930ac30b898d4c823bc5198f3f0f133ce',

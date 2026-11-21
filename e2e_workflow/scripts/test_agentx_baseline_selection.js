@@ -21,9 +21,9 @@ const profileSchema = new Function(`${schemas}\nreturn PROFILE_SCHEMA;`)();
 const helper = between('async function prepareAgentXKernels(', "\nif (want('setup'))");
 const initial = between("  if (searchClosed('Profile and Strategize')",
   '} else {\n  // Load carried state');
-// main's e2e_workflow.js (d8bb12c8), whose extractor call this one must equal (A23): from
-// $GEAK_MAIN_TREE, else `git show d8bb12c8:`, else /src/commits/d8bb12c8; else a pinned digest.
-const MAIN_COMMIT = 'd8bb12c8';
+// main's e2e_workflow.js (b3bb4e22), whose extractor call this one must equal (A23): from
+// $GEAK_MAIN_TREE, else `git show b3bb4e22:`, else /src/commits/b3bb4e22; else a pinned digest.
+const MAIN_COMMIT = 'b3bb4e22';
 const mainSrc = (() => {
   const rel = 'e2e_workflow/e2e_workflow.js';
   const sources = [
@@ -42,7 +42,7 @@ const mainParts = mainSrc && {
   initial: between("  if (searchClosed('Profile and Strategize')", '} else {\n  // Load carried state', 0, mainSrc),
 };
 // sha256 of main's kernel_extractor:prepare call (role, phase, intro, inputs, options) under run(initial).
-const MAIN_PREPARE_CALL_SHA256 = 'ed9e904db4e1e7f4d4fb846b142a727a2a5b79602347e30a54a278f0ee16185e';
+const MAIN_PREPARE_CALL_SHA256 = '2de693df405210d727ee117e2170b5915ff2bfd5a12c2663ac42f14306df457b';
 const resume = between('  // Load carried state', '\n}\n\n// ===');
 const phaseSelector = between('const PHASES =', 'const ST = A.state');
 const config = "if (want('config')) {\n" + between('      profile = await safeAgent(',

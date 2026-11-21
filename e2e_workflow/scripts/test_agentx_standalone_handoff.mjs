@@ -297,30 +297,37 @@ function assertSingleGpuShape(entry, f, single, s, extra) {
   assert.deepEqual(rest(entry, f.evalDir), rest(single, s.evalDir));
   assert.deepEqual(Object.keys(entry.prepared_ut), Object.keys(single.prepared_ut));
 }
-const DEFERRED = /^UT validated; multi-GPU optimization needs a declared GPU count and per-rank time and alignment for every timed case: /;
+const DEFERRED = /^UT validated; multi-GPU optimization needs a declared GPU count: /;
 
-test('completed multi-rank UTs without per-rank timing retain evidence and stay deferred', async t => {
+// Extraction qualifies on correctness only (#632): per-rank timing is the kernel lane's gate, so a
+// declared multi-rank UT without timing enters its queue and only an undeclared count stays deferred.
+test('completed multi-rank UTs: an undeclared GPU count stays deferred, a declared one enters without timing', async t => {
   const missingAlignment = {...wfNegTiming, alignment: undefined};
-  for (const [options, declaration, gpus, missing] of [
-    [{}, {required_gpu_count: 8}, 8, /: no timing receipt; old format: no timing$/],
-    [{}, {op_kind: 'collective'}, 2, /: no required_gpu_count in the request or the result \(the collective default of 2 GPUs is not a declaration\); no timing receipt; old format: no timing$/],
-    [{ut: {timing: missingAlignment}}, {required_gpu_count: 4}, 4, /: no timing receipt; old format: timing has no alignment$/],
-    [{ut: {timing: wfNegTiming}}, {required_gpu_count: 8}, 8, /: no timing receipt; old format: timing case swa_moe_r1_ctx128k: baseline.per_rank_us is not 8 finite per-rank times$/],
+  for (const [options, declaration, gpus, queued] of [
+    [{}, {required_gpu_count: 8}, 8, true],
+    [{}, {op_kind: 'collective'}, 2, false],
+    [{ut: {timing: missingAlignment}}, {required_gpu_count: 4}, 4, true],
+    [{ut: {timing: wfNegTiming}}, {required_gpu_count: 8}, 8, true],
   ]) {
     const f = await delivered(t, options);
     await f.write('run/requested_kernel.json', {...f.kernel, ...declaration});
     await f.pack();
     const queues = await readPreparedKernels(f.evalDir, 'delivery.json');
-    assert.equal(queues.head_candidates.length + queues.kernel_candidates.length, 0);
     assert.deepEqual(queues.failed_tasks, f.manifest.failed_tasks, 'a GPU-count problem never fails the task');
+    if (queued) {
+      const entries = [...queues.head_candidates, ...queues.kernel_candidates];
+      assert.equal(entries.length, 1);
+      assert.equal(entries[0].required_gpu_count, gpus);
+      continue;
+    }
+    assert.equal(queues.head_candidates.length + queues.kernel_candidates.length, 0);
     const task = queues.deferred_tasks.at(-1);
     assert.equal(task.task_dir, f.task);
     assert.equal(task.result_path, await fs.realpath(path.join(f.task, 'run/RETURN.json')));
     assert.equal(task.required_gpu_count, gpus);
     assert.match(task.reason, DEFERRED);
-    assert.match(task.reason, missing);
-    assert.deepEqual(Object.keys(task).slice('required_gpu_count' in declaration ? -3 : -4),
-      ['task_dir', 'result_path', ...('required_gpu_count' in declaration ? [] : ['required_gpu_count']), 'reason'],
+    assert.match(task.reason, /no required_gpu_count in the request or the result \(the collective default of 2 GPUs is not a declaration\)$/);
+    assert.deepEqual(Object.keys(task).slice(-4), ['task_dir', 'result_path', 'required_gpu_count', 'reason'],
       'main\'s deferred entry fields');
     assert.equal(task.prepared_ut.result.unittest_smoke, 'pass', 'deferred tasks keep their evidence');
   }
@@ -463,17 +470,18 @@ const SCENARIOS = [
   ['old-1gpu-ut-fail', {result: {unittest_smoke: 'fail'}}, {failed: 'ut_status'}],
   ['gen-1gpu', {world: 1}, {queue: 'kernel_candidates'}],
   ['gen-1gpu-k1', {world: 1, kernel: {required_gpu_count: 1}}, {queue: 'kernel_candidates'}],
-  // Multi-GPU without per-rank timing or a declared count: main's deferred bucket and entry fields.
+  // Multi-GPU without a declared count: main's deferred bucket and entry fields. Per-rank timing is the
+  // kernel lane's gate (#632 qualifies on correctness only), so a declared count enters without it.
   ['old-k4-r2', {kernel: {required_gpu_count: 4}, result: {required_gpu_count: 2}},
-    {deferred: 4, why: /: the request and the result do not declare one positive-integer GPU count: request required_gpu_count 4, result required_gpu_count 2; no timing receipt/}],
+    {deferred: 4, why: /: the request and the result do not declare one positive-integer GPU count: request required_gpu_count 4, result required_gpu_count 2$/}],
   ["old-k4-r'4'", {kernel: {required_gpu_count: 4}, result: {required_gpu_count: '4'}},
-    {deferred: 4, why: /: the request and the result do not declare one positive-integer GPU count: request required_gpu_count 4, result required_gpu_count "4"; no timing receipt/}],
+    {deferred: 4, why: /: the request and the result do not declare one positive-integer GPU count: request required_gpu_count 4, result required_gpu_count "4"$/}],
   ['old-collective-nocount', {kernel: {op_kind: 'collective'}},
-    {deferred: 2, why: /: no required_gpu_count in the request or the result \(the collective default of 2 GPUs is not a declaration\); no timing receipt/}],
+    {deferred: 2, why: /: no required_gpu_count in the request or the result \(the collective default of 2 GPUs is not a declaration\)$/}],
   ['old-collective-in-result-only', {result: {op_kind: 'collective'}},
-    {deferred: 2, why: /: no required_gpu_count in the request or the result \(the collective default of 2 GPUs is not a declaration\); no timing receipt/}],
-  ['old-collective-k2-no-timing', {kernel: {op_kind: 'collective', required_gpu_count: 2}}, {deferred: 2, why: /: no timing receipt; old format: no timing$/}],
-  ['old-k8-no-timing', {kernel: {required_gpu_count: 8}}, {deferred: 8, why: /: no timing receipt; old format: no timing$/}],
+    {deferred: 2, why: /: no required_gpu_count in the request or the result \(the collective default of 2 GPUs is not a declaration\)$/}],
+  ['old-collective-k2-no-timing', {kernel: {op_kind: 'collective', required_gpu_count: 2}}, {queue: 'kernel_candidates', gpus: 2}],
+  ['old-k8-no-timing', {kernel: {required_gpu_count: 8}}, {queue: 'kernel_candidates', gpus: 8}],
   // Multi-GPU, timed per rank and declared: a candidate with required_gpu_count (D1).
   ['old-k4-legacy-timing', {kernel: {required_gpu_count: 4}, ut: {timing: legacyTiming(4)}}, {queue: 'kernel_candidates', gpus: 4}],
   ['old-r4-only-legacy-timing', {result: {required_gpu_count: 4}, ut: {timing: legacyTiming(4)}}, {queue: 'kernel_candidates', gpus: 4}],
