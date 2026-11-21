@@ -102,6 +102,7 @@ A kernel win or completed call does not establish serving improvement.
 
 ## Monitor and communicate
 
+Drive inspections from recorded deadlines, independently of module messages or continuations.
 At each inspection, check current allocation authority alongside runtime progress.
 A cached lease deadline or a live worker does not establish continued resource access.
 
