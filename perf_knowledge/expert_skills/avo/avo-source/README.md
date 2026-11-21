@@ -41,6 +41,11 @@ and `knowledge/` from. AVO's own files there are the four kernel roles,
 `scripts/profile_kernel.sh`, and `knowledge/amd_instinct.md`. GEAK's
 `kernel_workflow/knowledge/learned/` card store is deliberately not linked.
 
+The linked knowledge files are written for GEAK's `kernel_workflow/`. Where
+they say `$SKILL_DIR/../...`, that path does not resolve under `kernel_base/`.
+Those references are all in the RDNA/Ryzen sections; AVO has been run on AMD
+Instinct (gfx942/gfx950) only.
+
 Keep the kernel directory you optimize **outside** the GEAK checkout. Campaign
 output defaults to `<GEAK>-runs/avo-source`, next to the checkout.
 
@@ -139,8 +144,12 @@ Minimal `handoff.json`:
 
 Omitted operator fields normalize to `operator="team"`,
 `start_policy="diverse"`, and `start_k=operator_directions`.
-`kernel_path` must resolve to an existing directory; direct wrapper calls use an
-absolute runtime path.
+`kernel_path` must be an absolute path to an existing directory; a relative
+path is rejected. A relative `exp_root` is resolved against the current
+directory; give an absolute path outside `<GEAK>`, or omit it to use
+`<GEAK>-runs/avo-source`. `root_dir` (the agents' working directory) defaults to
+the common parent of `<GEAK>` and `kernel_path`; set it explicitly when you want
+a narrower or a specific directory.
 
 Validate without agents or a GPU:
 
@@ -164,13 +173,13 @@ Examples keep versioned paths relative and resolve them before delegating to the
 canonical wrapper:
 
 ```bash
-python3 examples/run_example.py triton-w8a8-block-scaled-mm --dry-run
-
-python3 examples/run_example.py flydsl-per-token-group-quant-fp8 --dry-run
+cd <GEAK>/perf_knowledge/expert_skills/avo/avo-source/examples
+python3 run_example.py triton-w8a8-block-scaled-mm --dry-run
+python3 run_example.py flydsl-per-token-group-quant-fp8 --dry-run
 ```
 
 Remove `--dry-run` to launch. A real run copies the case's `kernel/` to the
-output directory and optimizes that copy. Select an idle GPU in `handoff.json`. The FlyDSL
+output directory and optimizes that copy. Select an idle GPU with `--gpu-ids`. The FlyDSL
 case additionally requires `AVO_FLYDSL_ENV`.
 
 ### 4. Node shim
@@ -183,6 +192,10 @@ workflow, knowledge, kernel, and output paths:
 node <IMPL>/run_avo.mjs avo_run_config.json --validate-only
 node <IMPL>/run_avo.mjs avo_run_config.json
 ```
+
+The config must set `root_dir` (a directory outside `<GEAK>` that contains the
+kernel) and `claude_home`. Without `root_dir` the agents start in the GEAK
+checkout root, which is not a supported setup.
 
 Use it only when an external orchestrator owns that expanded contract. Normal
 callers should not duplicate the path injection and normalization already
@@ -325,9 +338,8 @@ AVO can continue an interrupted evaluation directory when its runtime config
 uses the same `eval_dir`. State is reconstructed from the git tags,
 `avo_state/lineage.json`, baseline state, and supervisor log.
 
-The small GEAK handoff does not currently expose `eval_dir` as a top-level
-field. Advanced resume callers may place it under `args`, or invoke the Node
-shim with a fully expanded config.
+Put `eval_dir` at the top level of the handoff (or under `args`), or invoke the
+Node shim with a fully expanded config.
 
 ## Tests
 
@@ -336,6 +348,8 @@ Run the workflow test suite:
 ```bash
 bash <IMPL>/run_tests.sh        # needs pytest and Node.js 18 or newer
 ```
+
+Set `GEAK_PYTHON_BIN` to choose the python that has pytest.
 
 These tests are not part of GEAK's CI; run them by hand after a change here.
 

@@ -37,8 +37,9 @@ Set `AVO_EXAMPLE_RUNS_ROOT` to override that output root.
 
 ## Launch a campaign
 
-Choose an idle GPU by changing `gpu_ids` in the case's `handoff.json`, then omit
-`--dry-run`. The included budgets are short example budgets, not exact copies
+Choose an idle GPU with `--gpu-ids` (for example `--gpu-ids 6`), then omit
+`--dry-run`. If `<GEAK>-runs/avo-examples/<case>/kernel` already exists, the run
+reuses that copy; delete it to stage a fresh one. The included budgets are short example budgets, not exact copies
 of the historical day-long runs.
 
 The FlyDSL case also requires the ROCm/FlyDSL environment. Set
@@ -79,6 +80,7 @@ The `flydsl` selector continues to target the existing per-token campaign.
 Validate all expanded configurations without launching agents:
 
 ```bash
+CLAUDE_ACTIVATE=<activate-script> AVO_FLYDSL_ENV=<flydsl-environment-script> \
 DRY_RUN=1 ./run_12h_3gpu.sh all 0,1,2
 ```
 
@@ -93,7 +95,11 @@ To run concurrently, start each case separately with mutually disjoint
 three-GPU sets. Logs, normalized results, and campaign artifacts are written under the
 external output root described above, not inside this repository.
 
-Override portable environment discovery when needed:
+`run_12h_3gpu.sh` sources a Claude activation script before it starts and exits
+if the script is missing, also with `DRY_RUN=1`. Its default location
+(`<GEAK>/../../claude-portable/activate.sh`) is a site convention, so set
+`CLAUDE_ACTIVATE` to an existing script. FlyDSL cases also need
+`AVO_FLYDSL_ENV`:
 
 ```bash
 CLAUDE_ACTIVATE=<activate-script> \

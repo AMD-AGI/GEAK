@@ -5,11 +5,12 @@ integration. Three layers, increasing cost: deterministic unit tests (no
 GPU/LLM), an integration smoke run on the `knn` example (GPU + LLM), and an
 acceptance/quality gate.
 
-> Run the cheap deterministic layer in CI on every change; run the integration
-> layer on the rig before trusting a real evolution run.
+> Run the cheap deterministic layer by hand after every change here (it is not
+> part of GEAK's CI); run the integration layer on the rig before trusting a real
+> evolution run.
 
 **Headless shim:** the versioned entry point is `run_avo.mjs` in this directory; see
-the README one level up (*Headless runs*). Commands below run from this directory
+the README one level up (*4. Node shim*). Commands below run from this directory
 (`avo-source-impl/`).
 
 ---
@@ -44,7 +45,7 @@ subject truncation, `context` (top-k priors), and **`resume`** (reconstructs
 committed/best/baseline/failed/direction from durable files).
 
 ```bash
-python -m pytest tests/test_avo_lineage.py -q   # 24 passed
+python -m pytest tests/test_avo_lineage.py -q
 ```
 
 **Invariant under test (defense in depth):** even if the JS gate were wrong,
@@ -113,8 +114,8 @@ are intentionally excluded from this source-only integration.
 
 ### Run the whole deterministic layer
 
-One command (runs pytest always; runs the node suites if `node` is present, else
-skips them with a notice):
+One command (runs pytest and every node suite; a missing pytest or Node.js 18+
+is reported and counts as a failure):
 
 ```bash
 bash run_tests.sh
@@ -123,8 +124,8 @@ bash run_tests.sh
 …or manually:
 
 ```bash
-python -m pytest tests/ -q   # 24 passed
-for t in commit_gate start_select roofline headroom archive; do node tests/$t.test.mjs; done
+python -m pytest tests/ -q
+for t in tests/*.test.mjs; do node --test "$t"; done
 ```
 
 ---
@@ -135,19 +136,25 @@ End-to-end on GEAK's canonical `examples/tasks/knn` task with a **short wall-clo
 budget**, to prove the whole chain runs and the contract holds. Run it on a copy
 outside the GEAK checkout, so the run writes nothing into the repository.
 
+`handoff.json`:
+
+```json
+{
+  "kernel_path": "<COPY>/knn",
+  "budget_s": 900,
+  "gpu_ids": "<idle gpu>",
+  "verify_repeats": 3,
+  "apply_to_original": "false"
+}
 ```
-Workflow({
-  scriptPath: "<AVO_IMPL>/avo_workflow.js",
-  args: {
-    kernel_path: "<COPY>/knn",
-    workflow_dir: "<AVO_IMPL>",
-    budget_s: 900,            // 15-min smoke; raise once green
-    gpu_ids: "<idle gpu>",    // rocm-smi to pick one
-    verify_repeats: 3,
-    apply_to_original: "false"
-  }
-})
+
+```bash
+python3 run_geak_avo.py handoff.json result.json --dry-run
+python3 run_geak_avo.py handoff.json result.json
 ```
+
+`budget_s: 900` is a 15-minute smoke; raise it once green. Pick the GPU with
+`rocm-smi`.
 
 Pre-flight (fair baseline + idle GPU):
 ```bash
@@ -166,8 +173,9 @@ rocm-smi   # pick an idle GPU id for gpu_ids
 4. **`director_validation.json` exists** and its
    `director_verified_speedup_geomean` is **independently** measured (not the
    runner's number).
-5. **Integrity:** the copied `knn` kernel directory is byte-identical
-   (`orig_manifest.sha256` == `orig_manifest_after.sha256`).
+5. **Integrity:** the copied `knn` kernel directory is byte-identical: rerun the
+   `find ... sha256sum` command from `roles/director.md` on it and compare with
+   `orig_manifest.sha256`.
 6. **If any commit happened:** `final_patch.diff` applies cleanly on a fresh copy
    of the original and passes the COMMANDMENT correctness command; each `avo-v{N}`
    commit message carries speedup/strategy/per-shape (rich message).
@@ -176,8 +184,8 @@ rocm-smi   # pick an idle GPU id for gpu_ids
 
 ### Smoke acceptance
 
-- The run **completes without an exception** and returns `validation_status` in
-  `{accepted, flagged}` (not `evolve_failed`).
+- The run **completes without an exception** and `result.json` has `status`
+  `ok` or `no_gain` (`validation_status` `accepted` or `no_significant_gain`).
 - `final_geomean >= 1.0` and, if `num_commits > 0`, the final patch is correct.
 - A 0-commit smoke (budget too short to find a win) is still a PASS for the
   *plumbing* as long as 1–7 hold — it tests the loop, not the optimizer quality.
@@ -187,10 +195,12 @@ rocm-smi   # pick an idle GPU id for gpu_ids
 Run the same knn smoke with the heavier operator + diverse starts to exercise the
 parallel paths and the **tree** lineage:
 
+```json
+{ "operator": "team", "operator_directions": 2, "start_policy": "diverse",
+  "start_k": 2, "gpu_ids": "<g0>,<g1>" }
 ```
-args: { ..., operator: "team", operator_directions: 2, start_policy: "diverse",
-        start_k: 2, gpu_ids: "<g0>,<g1>" }   // one worker per GPU
-```
+
+Add these keys to the handoff above (one worker per GPU).
 
 Extra assertions on top of 1–7:
 
@@ -209,9 +219,11 @@ Extra assertions on top of 1–7:
 
 Interrupt a run (Ctrl-C mid-Evolve), then re-invoke with the **same `eval_dir`**:
 
+```json
+{ "eval_dir": "<the interrupted run's eval_dir>" }
 ```
-args: { ..., eval_dir: "<the interrupted run's eval_dir>" }
-```
+
+Add this key to the same handoff.
 
 Assert:
 12. Setup logs `(RESUME)` and **skips Benchmark/Seed** (no re-baseline); the loop
@@ -250,9 +262,9 @@ kernel, same wall-clock, compare speedup/hour and final geomean.
 - **Backtrack** (`supervisor.backtrack_to`) needs a multi-commit lineage to test
   the checkout path. Note: `avo_verify` is now base-ref aware, so a backtracked
   start verifies on the correct ref (smoke this once a multi-commit run exists).
-- **Reused roles** (`benchmark_engineer` / `profile_engineer` from `workflows/`)
-  are covered by team_workflow's own validation; avo-workflow only confirms the
-  inputs it passes match their expected schema (verified during the Layer-2 smoke).
+- **Kernel roles** (`benchmark_engineer` / `profile_engineer` / `tech_lead`) are
+  AVO's own copies in `kernel_base/roles/`; the Layer-2 smoke confirms that the
+  inputs AVO passes match what they expect.
   Independent verification uses avo-workflow's **own** `roles/avo_verify.md`
   (base-ref aware), not team's `verify_engineer`.
 - **Island model** (persistent per-branch budgets/best) is explicitly out of scope

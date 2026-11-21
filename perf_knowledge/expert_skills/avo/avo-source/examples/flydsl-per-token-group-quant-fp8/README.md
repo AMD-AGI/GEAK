@@ -20,10 +20,10 @@ the existing FlyDSL wide-streaming path.
 - `reference/trajectory.json`: campaign lineage summary
 - `handoff.json`: short source-only example campaign
 
-Run from the repository root:
+Run from `avo-source/examples/`:
 
 ```bash
-python3 examples/avo-examples/run_example.py \
+python3 run_example.py \
   flydsl-per-token-group-quant-fp8 --dry-run
 ```
 

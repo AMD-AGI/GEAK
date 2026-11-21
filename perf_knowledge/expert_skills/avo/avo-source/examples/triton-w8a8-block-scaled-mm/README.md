@@ -17,10 +17,10 @@ checkpoint evidence and does not label the campaign as director-finalized.
 - `reference/baseline_timing.json`: baseline timing evidence
 - `handoff.json`: short source-only example campaign
 
-Run from the repository root:
+Run from `avo-source/examples/`:
 
 ```bash
-python3 examples/avo-examples/run_example.py \
+python3 run_example.py \
   triton-w8a8-block-scaled-mm --dry-run
 ```
 

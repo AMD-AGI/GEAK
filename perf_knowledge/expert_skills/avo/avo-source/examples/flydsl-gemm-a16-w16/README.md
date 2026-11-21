@@ -23,10 +23,10 @@ the result as a pure FlyDSL backend win.
 - `reference/trajectory.json`: compact campaign lineage
 - `handoff.json`: short Team + diverse example configuration
 
-Validate configuration from the repository root:
+Validate configuration from `avo-source/examples/`:
 
 ```bash
-python3 examples/avo-examples/run_example.py flydsl-gemm-a16-w16 --dry-run
+python3 run_example.py flydsl-gemm-a16-w16 --dry-run
 ```
 
 GPU execution requires `AVO_FLYDSL_ENV` to name the FlyDSL environment script.
