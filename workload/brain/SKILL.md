@@ -102,6 +102,9 @@ A kernel win or completed call does not establish serving improvement.
 
 ## Monitor and communicate
 
+At each inspection, check current allocation authority alongside runtime progress.
+A cached lease deadline or a live worker does not establish continued resource access.
+
 At the user's cadence, otherwise `report.interval_sec`, send **Plan / Finish**: running
 and next work, blockers and verified completions with evidence. Say when nothing new has
 finished. Record the next inspection/report times; background logs are not conversation
