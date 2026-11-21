@@ -1,7 +1,7 @@
 # AVO lineage keep + parent-direction port — Design (for review)
 
 **Status:** design only. No code in this drop. Implementation later on the
-fork `/shared_nfs/liuji/avo_proj/PerfSkills-avo-opt` (copy of `PerfSkills-avo`
+fork `PerfSkills-avo-opt` (copy of `PerfSkills-avo`
 when coding starts). Default-off flags so trunk behavior is unchanged until a
 handoff opts in.
 

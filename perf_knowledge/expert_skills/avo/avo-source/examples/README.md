@@ -17,21 +17,22 @@ patch, optimized source snapshot, lineage, and validation evidence under
 
 ## Validate the integrations without launching agents
 
-From the repository root:
+From this directory (`avo-source/examples/`):
 
 ```bash
-python3 examples/avo-examples/run_example.py \
+python3 run_example.py \
   flydsl-per-token-group-quant-fp8 --dry-run
-python3 examples/avo-examples/run_example.py \
+python3 run_example.py \
   flydsl-gemm-a16-w16 --dry-run
-python3 examples/avo-examples/run_example.py \
+python3 run_example.py \
   triton-w8a8-block-scaled-mm --dry-run
 ```
 
 The helper resolves the portable paths in each `handoff.json` and delegates to
-`avo-workflow/run_geak_avo.py`. Results and campaign output are written outside
-the repository under the sibling directory
-`../PerfSkills-avo-runs/avo-examples/<case>/{.avo,runs}`.
+`../avo-source-impl/run_geak_avo.py`. A real run first copies the case's `kernel/`
+to the output directory and optimizes that copy. Results and campaign output are
+written outside the GEAK checkout under the sibling directory
+`<GEAK>-runs/avo-examples/<case>/{kernel,.avo,runs}`.
 Set `AVO_EXAMPLE_RUNS_ROOT` to override that output root.
 
 ## Launch a campaign
@@ -67,9 +68,9 @@ verified, but was not director-finalized.
 Run one case:
 
 ```bash
-examples/avo-examples/run_12h_3gpu.sh triton 0,1,2
-examples/avo-examples/run_12h_3gpu.sh flydsl 0,1,2
-examples/avo-examples/run_12h_3gpu.sh flydsl-gemm 0,1,2
+./run_12h_3gpu.sh triton 0,1,2
+./run_12h_3gpu.sh flydsl 0,1,2
+./run_12h_3gpu.sh flydsl-gemm 0,1,2
 ```
 
 The `flydsl` selector continues to target the existing per-token campaign.
@@ -78,13 +79,13 @@ The `flydsl` selector continues to target the existing per-token campaign.
 Validate all expanded configurations without launching agents:
 
 ```bash
-DRY_RUN=1 examples/avo-examples/run_12h_3gpu.sh all 0,1,2
+DRY_RUN=1 ./run_12h_3gpu.sh all 0,1,2
 ```
 
 Run all three sequentially on the same GPUs:
 
 ```bash
-examples/avo-examples/run_12h_3gpu.sh all 0,1,2
+./run_12h_3gpu.sh all 0,1,2
 ```
 
 `all` takes up to 36 hours because each case receives its own 12-hour budget.
@@ -97,5 +98,5 @@ Override portable environment discovery when needed:
 ```bash
 CLAUDE_ACTIVATE=<activate-script> \
 AVO_FLYDSL_ENV=<flydsl-environment-script> \
-examples/avo-examples/run_12h_3gpu.sh flydsl 0,1,2
+./run_12h_3gpu.sh flydsl 0,1,2
 ```

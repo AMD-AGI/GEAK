@@ -1,12 +1,48 @@
-# AVO workflow
+# AVO source-level workflow (`avo-source`)
 
-AVO is GEAK's long-horizon source optimizer. It repeatedly proposes one source
+AVO is a long-horizon source optimizer. It repeatedly proposes one source
 change, checks correctness and performance, and commits only independently
 verified improvements into an auditable `avo-vN` lineage.
 
 Use AVO for a high-value kernel when a longer, commit-gated campaign is more
 appropriate than the bounded multi-direction optimization in
 `kernel_workflow/`.
+
+## Where this lives
+
+```text
+perf_knowledge/expert_skills/avo/         AVO agents (one directory per agent)
+  avo-source/                             this agent: source-level optimization
+    README.md                             this file
+    examples/                             three portable example tasks
+    avo-source-impl/                      implementation (run_geak_avo.py, run_avo.mjs,
+                                          avo_workflow.js, lib/, roles/, kernel_base/, tests/)
+```
+
+`avo-source` is a standalone workflow with its own entry point. You start it
+yourself; nothing in `kernel_workflow/` or `e2e_workflow/` refers to it, and
+it is not registered in `index.yaml`. Below, `<GEAK>` is the checkout root and
+`<IMPL>` is `<GEAK>/perf_knowledge/expert_skills/avo/avo-source/avo-source-impl`.
+
+### What it reuses from GEAK
+
+AVO owns its workflow, runner, gates, and every role file. It reuses four GEAK
+assets by path, so it must run from inside a complete GEAK checkout:
+
+| GEAK asset | How AVO reaches it |
+| --- | --- |
+| `perf_knowledge/` reference library | passed to the roles as `KERNEL_KNOWLEDGE_DIR` |
+| `kernel_workflow/scripts/gpu_lock.sh` | `kernel_base/scripts/gpu_lock.sh` is a three-line forwarder |
+| ten files in `kernel_workflow/knowledge/` | `kernel_base/knowledge/` holds one symlink per file |
+| `examples/tasks/knn` | used by the Layer-2 smoke test in `TESTING.md` |
+
+`kernel_base/` is the directory AVO's kernel roles resolve `roles/`, `scripts/`
+and `knowledge/` from. AVO's own files there are the four kernel roles,
+`scripts/profile_kernel.sh`, and `knowledge/amd_instinct.md`. GEAK's
+`kernel_workflow/knowledge/learned/` card store is deliberately not linked.
+
+Keep the kernel directory you optimize **outside** the GEAK checkout. Campaign
+output defaults to `<GEAK>-runs/avo-source`, next to the checkout.
 
 ## Scope
 
@@ -48,32 +84,43 @@ Use one of four entry methods:
 
 ### 1. Claude Code natural language
 
-Start Claude Code from the repository root so it loads `CLAUDE.md`. With the
-portable installation inside a container:
-
-```bash
-source <claude-portable-dir>/activate.sh
-claude --dangerously-skip-permissions
-```
-
-Then describe the campaign:
+Start Claude Code, point it at this directory, and describe the campaign:
 
 ```text
-Use AVO to optimize ./kernel for four hours on GPUs 0 and 1. Keep the original
-unchanged, use the default Team multi-start mode, and validate before launch.
+Use <GEAK>/perf_knowledge/expert_skills/avo/avo-source to optimize ./kernel for
+four hours on GPUs 0 and 1. Keep the original unchanged, use the default Team
+multi-start mode, and validate before launch.
 ```
 
-`CLAUDE.md` routes AVO intent to the headless wrapper, generates a handoff, runs
-`--dry-run`, and launches only when execution was requested. Phrases such as
-`single`, `best start`, or `linear chain` explicitly select the non-default
-single/best behavior.
+The agent then follows this procedure:
+
+1. Resolve the kernel directory and the output directory to absolute paths.
+   Ask only when the kernel or a materially important setting cannot be inferred.
+2. Write a handoff JSON. Keep explicit user choices. Otherwise use the engine
+   defaults: `operator: "team"`, `start_policy: "diverse"`,
+   `start_k: operator_directions`, `apply_to_original: "false"`.
+3. Map the request directly: hours/minutes to `budget_s`, the GPU list to
+   `gpu_ids`, the requested language to `target_language`, the optimization
+   focus and constraints to `task`. `single` selects `operator: "single"`;
+   `best start` or `linear chain` selects `start_policy: "best"`.
+4. Always validate first with `--dry-run` (see below).
+5. Launch only when execution was requested.
+6. Report the result path and the campaign output directory. Do not claim
+   success from an agent-reported speedup; use the Director validation and the
+   normalized result.
+
+Do not run `avo_workflow.js` with the native Workflow tool; that runtime cannot
+load AVO's Node modules. Reject requests for assembly, LLVM IR, or TTGIR
+optimization. FlyDSL tasks need their environment script (`AVO_FLYDSL_ENV`)
+before GPU execution.
 
 Natural language is an intent/configuration layer, not a separate optimizer.
 
 ### 2. GEAK handoff wrapper
 
 `run_geak_avo.py` is the canonical production API. It validates source-only
-mode, normalizes defaults, injects checkout-local dependencies, locates Node and
+mode, normalizes defaults, checks the GEAK checkout it lives in, injects the
+checkout-local dependencies, locates Node and
 Claude, invokes the Node runtime, and writes normalized result JSON.
 
 Minimal `handoff.json`:
@@ -98,13 +145,13 @@ absolute runtime path.
 Validate without agents or a GPU:
 
 ```bash
-python3 avo-workflow/run_geak_avo.py handoff.json result.json --dry-run
+python3 <IMPL>/run_geak_avo.py handoff.json result.json --dry-run
 ```
 
 Launch:
 
 ```bash
-python3 avo-workflow/run_geak_avo.py handoff.json result.json
+python3 <IMPL>/run_geak_avo.py handoff.json result.json
 ```
 
 Inspect `result.json` for `status`, `validation_status`, `final_speedup`,
@@ -117,14 +164,13 @@ Examples keep versioned paths relative and resolve them before delegating to the
 canonical wrapper:
 
 ```bash
-python3 examples/avo-examples/run_example.py \
-  triton-w8a8-block-scaled-mm --dry-run
+python3 examples/run_example.py triton-w8a8-block-scaled-mm --dry-run
 
-python3 examples/avo-examples/run_example.py \
-  flydsl-per-token-group-quant-fp8 --dry-run
+python3 examples/run_example.py flydsl-per-token-group-quant-fp8 --dry-run
 ```
 
-Remove `--dry-run` to launch. Select an idle GPU in `handoff.json`. The FlyDSL
+Remove `--dry-run` to launch. A real run copies the case's `kernel/` to the
+output directory and optimizes that copy. Select an idle GPU in `handoff.json`. The FlyDSL
 case additionally requires `AVO_FLYDSL_ENV`.
 
 ### 4. Node shim
@@ -134,8 +180,8 @@ expanded config containing `scriptPath`, CLI/runtime settings, and complete
 workflow, knowledge, kernel, and output paths:
 
 ```bash
-node avo-workflow/run_avo.mjs avo_run_config.json --validate-only
-node avo-workflow/run_avo.mjs avo_run_config.json
+node <IMPL>/run_avo.mjs avo_run_config.json --validate-only
+node <IMPL>/run_avo.mjs avo_run_config.json
 ```
 
 Use it only when an external orchestrator owns that expanded contract. Normal
@@ -144,7 +190,7 @@ provided by `run_geak_avo.py`.
 
 ### Unsupported invocations
 
-- `kernel_workflow` with `mode=avo` only returns a redirect to the wrapper.
+- `kernel_workflow` has no AVO mode; start AVO through the entry points above.
 - Direct native-Workflow execution of `avo_workflow.js` is unsupported because
   that runtime cannot load AVO's Node modules and filesystem helpers.
 
@@ -235,6 +281,7 @@ committed.
 
 ## Runtime requirements
 
+- a complete GEAK checkout (see *What it reuses from GEAK*)
 - Python 3
 - Node.js 18 or newer
 - a working Claude CLI
@@ -287,14 +334,20 @@ shim with a fully expanded config.
 Run the workflow test suite:
 
 ```bash
-bash avo-workflow/run_tests.sh
+bash <IMPL>/run_tests.sh        # needs pytest and Node.js 18 or newer
 ```
+
+These tests are not part of GEAK's CI; run them by hand after a change here.
 
 For integration-only checks without a GPU or agent:
 
 ```bash
-python3 avo-workflow/run_geak_avo.py handoff.json result.json --dry-run
+python3 <IMPL>/run_geak_avo.py handoff.json result.json --dry-run
 ```
 
-Detailed design notes remain under `docs/`; testing internals are documented in
-`TESTING.md`.
+Detailed design notes are under `avo-source-impl/docs/`; testing internals are
+documented in `avo-source-impl/TESTING.md`.
+
+## Provenance
+
+Imported from `PerfSkills-avo`, branch `GEAK-v4-integrated`, commit `8a57517`.
