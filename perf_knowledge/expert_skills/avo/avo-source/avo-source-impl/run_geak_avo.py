@@ -15,7 +15,7 @@ import uuid
 
 AVO_DIR = Path(__file__).resolve().parent
 # <GEAK>/perf_knowledge/expert_skills/avo/avo-source/avo-source-impl -> <GEAK>
-ROOT = AVO_DIR.parents[4]
+ROOT = AVO_DIR.parents[4] if len(AVO_DIR.parents) > 4 else AVO_DIR
 KERNEL_BASE = AVO_DIR / "kernel_base"
 RUNS_ROOT = ROOT.parent / f"{ROOT.name}-runs"
 LOW_LEVEL = {"asm", "amdgcn", "gcn", "ir", "llvm-ir", "llvm_ir", "ll", "ttgir"}
