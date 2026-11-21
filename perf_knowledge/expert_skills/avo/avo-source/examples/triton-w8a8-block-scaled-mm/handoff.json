@@ -1,0 +1,20 @@
+{
+  "kernel_path": "kernel",
+  "exp_root": "runs",
+  "avo_language_level": "source",
+  "target_language": "triton",
+  "budget_s": 1800,
+  "final_phase_reserve_s": 300,
+  "gpu_ids": "0",
+  "operator": "team",
+  "operator_directions": 2,
+  "start_policy": "diverse",
+  "start_k": 2,
+  "escalate_workers": 1,
+  "min_commits": 1,
+  "max_steps": 5,
+  "verify_repeats": 3,
+  "apply_to_original": "false",
+  "use_profiling": "false",
+  "task": "Optimize the Triton source-level kernel _w8a8_triton_block_scaled_mm for AMD MI300X/gfx942. Preserve its signature and numerical tolerance, edit only source/triton__w8a8_triton_block_scaled_mm.py, and optimize the c2/c32/c64 latency geomean. Focus on tiling, program-id mapping, locality, FP8 operand delivery, and occupancy. Do not use ASM, LLVM IR, or TTGIR optimization."
+}

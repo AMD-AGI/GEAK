@@ -1,0 +1,68 @@
+[
+  {
+    "test_case_id": "c2",
+    "args_sig": [
+      {"kind": "tensor", "dtype": "bfloat16", "shape": [2048, 4096], "stride": [4096, 1], "device": "cuda:0"},
+      {"kind": "tensor", "dtype": "float8_e4m3fnuz", "shape": [2048, 4096], "stride": [4096, 1], "device": "cuda:0"},
+      {"kind": "tensor", "dtype": "float32", "shape": [2048, 32], "stride": [32, 1], "device": "cuda:0"},
+      {"kind": "scalar", "py_type": "int", "value": 128},
+      {"kind": "scalar", "py_type": "int", "value": 4096},
+      {"kind": "scalar", "py_type": "int", "value": 4096},
+      {"kind": "scalar", "py_type": "float", "value": 1e-10}
+    ],
+    "kwargs_sig": {
+      "fp8_min": {"kind": "scalar", "py_type": "float", "value": -224.0},
+      "fp8_max": {"kind": "scalar", "py_type": "float", "value": 224.0},
+      "use_ue8m0": {"kind": "scalar", "py_type": "bool", "value": false},
+      "BLOCK": {"kind": "scalar", "py_type": "int", "value": 128},
+      "num_warps": {"kind": "scalar", "py_type": "int", "value": 1},
+      "num_stages": {"kind": "scalar", "py_type": "int", "value": 1},
+      "grid": {"kind": "seq", "items": [{"kind": "scalar", "py_type": "int", "value": 65536}]}
+    },
+    "params_repr": {"B": 2, "seqlen": 1024, "num_tokens": 2048, "hidden": 4096, "group_size": 128, "BLOCK": 128}
+  },
+  {
+    "test_case_id": "c32",
+    "args_sig": [
+      {"kind": "tensor", "dtype": "bfloat16", "shape": [32768, 4096], "stride": [4096, 1], "device": "cuda:0"},
+      {"kind": "tensor", "dtype": "float8_e4m3fnuz", "shape": [32768, 4096], "stride": [4096, 1], "device": "cuda:0"},
+      {"kind": "tensor", "dtype": "float32", "shape": [32768, 32], "stride": [32, 1], "device": "cuda:0"},
+      {"kind": "scalar", "py_type": "int", "value": 128},
+      {"kind": "scalar", "py_type": "int", "value": 4096},
+      {"kind": "scalar", "py_type": "int", "value": 4096},
+      {"kind": "scalar", "py_type": "float", "value": 1e-10}
+    ],
+    "kwargs_sig": {
+      "fp8_min": {"kind": "scalar", "py_type": "float", "value": -224.0},
+      "fp8_max": {"kind": "scalar", "py_type": "float", "value": 224.0},
+      "use_ue8m0": {"kind": "scalar", "py_type": "bool", "value": false},
+      "BLOCK": {"kind": "scalar", "py_type": "int", "value": 128},
+      "num_warps": {"kind": "scalar", "py_type": "int", "value": 1},
+      "num_stages": {"kind": "scalar", "py_type": "int", "value": 1},
+      "grid": {"kind": "seq", "items": [{"kind": "scalar", "py_type": "int", "value": 1048576}]}
+    },
+    "params_repr": {"B": 32, "seqlen": 1024, "num_tokens": 32768, "hidden": 4096, "group_size": 128, "BLOCK": 128}
+  },
+  {
+    "test_case_id": "c64",
+    "args_sig": [
+      {"kind": "tensor", "dtype": "bfloat16", "shape": [65536, 4096], "stride": [4096, 1], "device": "cuda:0"},
+      {"kind": "tensor", "dtype": "float8_e4m3fnuz", "shape": [65536, 4096], "stride": [4096, 1], "device": "cuda:0"},
+      {"kind": "tensor", "dtype": "float32", "shape": [65536, 32], "stride": [32, 1], "device": "cuda:0"},
+      {"kind": "scalar", "py_type": "int", "value": 128},
+      {"kind": "scalar", "py_type": "int", "value": 4096},
+      {"kind": "scalar", "py_type": "int", "value": 4096},
+      {"kind": "scalar", "py_type": "float", "value": 1e-10}
+    ],
+    "kwargs_sig": {
+      "fp8_min": {"kind": "scalar", "py_type": "float", "value": -224.0},
+      "fp8_max": {"kind": "scalar", "py_type": "float", "value": 224.0},
+      "use_ue8m0": {"kind": "scalar", "py_type": "bool", "value": false},
+      "BLOCK": {"kind": "scalar", "py_type": "int", "value": 128},
+      "num_warps": {"kind": "scalar", "py_type": "int", "value": 1},
+      "num_stages": {"kind": "scalar", "py_type": "int", "value": 1},
+      "grid": {"kind": "seq", "items": [{"kind": "scalar", "py_type": "int", "value": 2097152}]}
+    },
+    "params_repr": {"B": 64, "seqlen": 1024, "num_tokens": 65536, "hidden": 4096, "group_size": 128, "BLOCK": 128}
+  }
+]

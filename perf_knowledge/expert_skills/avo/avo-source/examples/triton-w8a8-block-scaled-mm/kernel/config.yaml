@@ -1,0 +1,25 @@
+source_file_path:
+- source/triton__w8a8_triton_block_scaled_mm.py
+target_kernel_functions:
+- _w8a8_triton_block_scaled_mm
+compile_command:
+- python3 scripts/task_runner.py compile
+correctness_command:
+- python3 scripts/task_runner.py correctness
+performance_command:
+- python3 scripts/task_runner.py performance
+task_type: triton2triton
+task_result_template: null
+prompt:
+  source_code: null
+  instructions: Optimize the Triton kernel `_w8a8_triton_block_scaled_mm` (originally
+    vllm.model_executor.layers.quantization.utils.fp8_utils). Captured via inspect.getsource.
+    Tests generate inputs from test_cases.json on the fly.
+  cheatsheet: null
+extracted_from:
+  engine: vllm
+  kernel_id: triton:vllm.model_executor.layers.quantization.utils.fp8_utils._w8a8_triton_block_scaled_mm
+  triton_fn: _w8a8_triton_block_scaled_mm
+  origin_module: vllm.model_executor.layers.quantization.utils.fp8_utils
+  source: triton_inspect
+  test_cases: 8

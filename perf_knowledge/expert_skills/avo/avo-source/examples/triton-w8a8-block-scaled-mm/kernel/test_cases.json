@@ -1,0 +1,83 @@
+[
+  {
+    "test_case_id": "c2",
+    "params_repr": {
+      "B": 2,
+      "M": 2048,
+      "N": 2112,
+      "K": 7168,
+      "group_n": 128,
+      "group_k": 128,
+      "seqlen": 1024,
+      "As_shape": [
+        2048,
+        56
+      ],
+      "Bs_shape": [
+        17,
+        56
+      ],
+      "BLOCK_SIZE_M": 64,
+      "BLOCK_SIZE_N": 128,
+      "BLOCK_SIZE_K": 128,
+      "GROUP_SIZE_M": 32,
+      "num_warps": 4,
+      "num_stages": 2
+    },
+    "note": "campaign20 regime; token-parallel GEMM, M=B*1024. Shapes built by scripts/harness_run.py."
+  },
+  {
+    "test_case_id": "c32",
+    "params_repr": {
+      "B": 32,
+      "M": 32768,
+      "N": 2112,
+      "K": 7168,
+      "group_n": 128,
+      "group_k": 128,
+      "seqlen": 1024,
+      "As_shape": [
+        32768,
+        56
+      ],
+      "Bs_shape": [
+        17,
+        56
+      ],
+      "BLOCK_SIZE_M": 64,
+      "BLOCK_SIZE_N": 128,
+      "BLOCK_SIZE_K": 128,
+      "GROUP_SIZE_M": 32,
+      "num_warps": 4,
+      "num_stages": 2
+    },
+    "note": "campaign20 regime; token-parallel GEMM, M=B*1024. Shapes built by scripts/harness_run.py."
+  },
+  {
+    "test_case_id": "c64",
+    "params_repr": {
+      "B": 64,
+      "M": 65536,
+      "N": 2112,
+      "K": 7168,
+      "group_n": 128,
+      "group_k": 128,
+      "seqlen": 1024,
+      "As_shape": [
+        65536,
+        56
+      ],
+      "Bs_shape": [
+        17,
+        56
+      ],
+      "BLOCK_SIZE_M": 64,
+      "BLOCK_SIZE_N": 128,
+      "BLOCK_SIZE_K": 128,
+      "GROUP_SIZE_M": 32,
+      "num_warps": 4,
+      "num_stages": 2
+    },
+    "note": "campaign20 regime; token-parallel GEMM, M=B*1024. Shapes built by scripts/harness_run.py."
+  }
+]

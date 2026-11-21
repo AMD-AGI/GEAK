@@ -1,0 +1,14 @@
+{
+  "steps": 1,
+  "commits": 1,
+  "best_version": "avo-v1",
+  "final_geomean": 3.188179,
+  "speedup_curve": [
+    {"version": "avo-v0", "speedup": 1.0},
+    {"version": "avo-v1", "speedup": 3.188179}
+  ],
+  "per_strategy": {
+    "unblock-flydsl-streaming-path": {"commits": 1, "best": 3.188179}
+  },
+  "supervisor_interventions": 0
+}
