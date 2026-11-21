@@ -17,6 +17,12 @@ AVO_DIR = Path(__file__).resolve().parent
 # <GEAK>/perf_knowledge/expert_skills/avo/avo-source/avo-source-impl -> <GEAK>
 ROOT = AVO_DIR.parents[4] if len(AVO_DIR.parents) > 4 else AVO_DIR
 KERNEL_BASE = AVO_DIR / "kernel_base"
+# Read from <GEAK>/kernel_workflow/knowledge through one relative symlink each.
+LINKED_KNOWLEDGE = (
+    "amd_rdna3.md", "amd_rdna4.md", "amd_ryzen.md", "geomean_levers.md",
+    "hip_optimization.md", "optimization_strategies.md", "profiling_guide.md",
+    "self_monitoring.md", "triton_optimization.md", "wrapper_optimization.md",
+)
 RUNS_ROOT = ROOT.parent / f"{ROOT.name}-runs"
 LOW_LEVEL = {"asm", "amdgcn", "gcn", "ir", "llvm-ir", "llvm_ir", "ll", "ttgir"}
 
@@ -59,10 +65,19 @@ def check_geak_layout() -> None:
         KERNEL_BASE / "roles" / "profile_engineer.md",
         KERNEL_BASE / "roles" / "tech_lead.md",
         KERNEL_BASE / "knowledge" / "amd_instinct.md",
-        # Links into <GEAK>/kernel_workflow/knowledge; a dangling one fails exists().
-        *sorted((KERNEL_BASE / "knowledge").glob("*.md")),
+        *(KERNEL_BASE / "knowledge" / name for name in LINKED_KNOWLEDGE),
     ]
     missing = [str(path) for path in required if not path.exists()]
+    not_links = [
+        name for name in LINKED_KNOWLEDGE
+        if (KERNEL_BASE / "knowledge" / name).exists()
+        and not (KERNEL_BASE / "knowledge" / name).is_symlink()
+    ]
+    if not_links:
+        raise ValueError(
+            "this checkout did not keep symbolic links (kernel_base/knowledge/"
+            + ", ".join(not_links) + "); clone GEAK with symlink support"
+        )
     if missing:
         raise ValueError(
             "AVO must run from inside a complete GEAK checkout; missing: "
@@ -145,7 +160,7 @@ def make_config(handoff: dict) -> dict:
         ),
         "root_dir": str(Path(str(
             handoff.get("root_dir")
-            or os.path.commonpath([str(ROOT), str(kernel.resolve()), str(exp_root)])
+            or os.path.commonpath([str(ROOT), str(kernel.resolve())])
         )).resolve()),
         "model": str(handoff.get("model") or os.environ.get("GEAK_CLAUDE_MODEL") or ""),
         "agent_timeout_ms": int(handoff.get("agent_timeout_ms") or 2_400_000),

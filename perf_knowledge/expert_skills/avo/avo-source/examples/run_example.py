@@ -56,7 +56,10 @@ def main() -> int:
         # Optimize a copy outside the GEAK checkout: the run then writes nothing into
         # the repository, and the agents do not sit next to this case's reference/.
         staged_kernel = case_output / "kernel"
-        if not staged_kernel.exists():
+        if staged_kernel.exists():
+            print(f"reusing staged kernel {staged_kernel} (delete it to stage a fresh copy)",
+                  file=sys.stderr)
+        else:
             shutil.copytree(handoff["kernel_path"], staged_kernel)
         handoff["kernel_path"] = str(staged_kernel)
     configured_exp = Path(str(handoff.get("exp_root") or "runs"))

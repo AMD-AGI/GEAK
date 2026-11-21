@@ -1,12 +1,15 @@
 """Static contracts for source-level AVO living inside a GEAK checkout."""
 
 from pathlib import Path
+import re
 
 
 AVO_DIR = Path(__file__).resolve().parents[1]
 # <GEAK>/perf_knowledge/expert_skills/avo/avo-source/avo-source-impl -> <GEAK>
 GEAK_ROOT = AVO_DIR.parents[4]
 KERNEL_BASE = AVO_DIR / "kernel_base"
+# avo_workflow.js strips five path components from its own directory to find <GEAK>.
+WORKFLOW_DIR_DEPTH_OK = Path(*AVO_DIR.parts[:-5]) == GEAK_ROOT
 AVO_JS = AVO_DIR / "avo_workflow.js"
 DIRECTOR = AVO_DIR / "roles" / "director.md"
 VARIATION = AVO_DIR / "roles" / "variation_engineer.md"
@@ -16,6 +19,11 @@ AVO_TEST_RUNNER = AVO_DIR / "run_tests.sh"
 PROFILE_WRAPPER = KERNEL_BASE / "scripts" / "profile_kernel.sh"
 GPU_LOCK_FORWARDER = KERNEL_BASE / "scripts" / "gpu_lock.sh"
 OWN_KNOWLEDGE = {"amd_instinct.md"}
+LINKED_KNOWLEDGE = {
+    "amd_rdna3.md", "amd_rdna4.md", "amd_ryzen.md", "geomean_levers.md",
+    "hip_optimization.md", "optimization_strategies.md", "profiling_guide.md",
+    "self_monitoring.md", "triton_optimization.md", "wrapper_optimization.md",
+}
 
 
 def test_workflow_metadata_is_first_statement():
@@ -64,9 +72,11 @@ def test_gpu_lock_is_reused_from_geak_through_a_forwarder():
     geak_lock = GEAK_ROOT / "kernel_workflow" / "scripts" / "gpu_lock.sh"
     assert geak_lock.is_file()
     text = GPU_LOCK_FORWARDER.read_text()
-    assert "kernel_workflow/scripts" in text and 'gpu_lock.sh" "$@"' in text
-    # The forwarder must resolve to GEAK's script from where it sits.
-    target = (GPU_LOCK_FORWARDER.parent / ("../" * 7) / "kernel_workflow" / "scripts").resolve()
+    assert 'gpu_lock.sh" "$@"' in text
+    # The path written in the forwarder must resolve to GEAK's script directory.
+    relative = re.search(r'dirname "\$\{BASH_SOURCE\[0\]\}"\)(/[^"]+)"', text)
+    assert relative, text
+    target = (GPU_LOCK_FORWARDER.parent / relative.group(1).lstrip("/")).resolve()
     assert target == geak_lock.parent
 
 
@@ -75,8 +85,7 @@ def test_kernel_knowledge_is_reused_file_by_file_without_the_card_store():
     geak_knowledge = GEAK_ROOT / "kernel_workflow" / "knowledge"
     assert knowledge.is_dir() and not knowledge.is_symlink()
     entries = sorted(path.name for path in knowledge.iterdir())
-    assert "learned" not in entries
-    assert all(name.endswith(".md") for name in entries)
+    assert set(entries) == OWN_KNOWLEDGE | LINKED_KNOWLEDGE
     for name in entries:
         path = knowledge / name
         if name in OWN_KNOWLEDGE:
@@ -110,6 +119,11 @@ def test_headless_defaults_point_at_the_geak_checkout_and_all_js_tests_run():
     assert "CFG.root_dir || CFG.args.root_dir || DEFAULT_ROOT" in shim
     assert "`${DEFAULT_ROOT}-runs/avo-source`" in shim
 
+    workflow = AVO_JS.read_text()
+    assert "WORKFLOW_DIR.split('/').slice(0, -5).join('/')" in workflow
+    assert "`${GEAK_ROOT}-runs/avo-source`" in workflow
+    assert WORKFLOW_DIR_DEPTH_OK
+
     runner = AVO_TEST_RUNNER.read_text()
     assert '"$HERE"/tests/*.test.mjs' in runner
 
@@ -130,4 +144,9 @@ def test_geak_entry_points_do_not_know_about_avo():
     for rel in ("kernel_workflow/kernel_workflow.js", "e2e_workflow/e2e_workflow.js"):
         text = (GEAK_ROOT / rel).read_text()
         assert "run_geak_avo" not in text and "avo_workflow" not in text, rel
-    assert not (GEAK_ROOT / "CLAUDE.md").exists()
+    guidance = GEAK_ROOT / "CLAUDE.md"
+    if guidance.exists():
+        text = guidance.read_text()
+        assert "run_geak_avo" not in text and "avo_workflow" not in text
+    index = (GEAK_ROOT / "perf_knowledge" / "expert_skills" / "index.yaml").read_text()
+    assert "avo-source" not in index and "avo_workflow" not in index

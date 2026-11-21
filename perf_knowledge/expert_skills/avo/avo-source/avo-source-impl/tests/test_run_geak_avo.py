@@ -53,6 +53,10 @@ def test_normalizes_natural_language_gpu_list_and_defaults(tmp_path):
     })["args"]
 
     assert args["gpu_ids"] == "1"
+    # Default campaign output sits next to the GEAK checkout, never inside it.
+    exp_root = Path(args["exp_root"])
+    assert exp_root == RUNNER.ROOT.parent / f"{RUNNER.ROOT.name}-runs" / "avo-source"
+    assert RUNNER.ROOT not in exp_root.parents
     assert args["operator"] == "team"
     assert args["operator_directions"] == 2
     assert args["start_policy"] == "diverse"
@@ -190,3 +194,12 @@ def test_nested_args_cannot_bypass_source_only_guard(tmp_path, nested):
             "kernel_path": str(kernel),
             "args": nested,
         })
+
+
+def test_rejects_a_location_outside_a_complete_geak_checkout(tmp_path, monkeypatch):
+    kernel = tmp_path / "kernel"
+    kernel.mkdir()
+    monkeypatch.setattr(RUNNER, "ROOT", tmp_path)
+    with pytest.raises(ValueError, match="complete GEAK checkout"):
+        RUNNER.make_config({"kernel_path": str(kernel)})
+

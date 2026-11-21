@@ -18,7 +18,12 @@ else
   PY=python
 fi
 echo; echo "-- pytest ($PY) --"
-"$PY" -m pytest "$HERE/tests/" -q || rc=1
+if "$PY" -c 'import pytest' >/dev/null 2>&1; then
+  "$PY" -m pytest "$HERE/tests/" -q || rc=1
+else
+  echo "pytest not found for $PY: install pytest, or set GEAK_PYTHON_BIN to a python that has it."
+  rc=1
+fi
 
 # --- JS: every deterministic module/evidence test.
 # Discover instead of maintaining a hand-written list, which previously omitted
