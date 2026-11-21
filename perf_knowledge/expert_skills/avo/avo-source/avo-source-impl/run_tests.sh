@@ -27,9 +27,6 @@ NODE_BIN="${GEAK_NODE_BIN:-}"
 if [ -z "$NODE_BIN" ] && command -v node >/dev/null 2>&1; then
   NODE_BIN="$(command -v node)"
 fi
-if [ -z "$NODE_BIN" ] && [ -x "$HERE/../../../tooling/node/bin/node" ]; then
-  NODE_BIN="$HERE/../../../tooling/node/bin/node"
-fi
 if [ -n "$NODE_BIN" ] && [ "$("$NODE_BIN" -p 'Number(process.versions.node.split(".")[0])')" -ge 18 ]; then
   for test_path in "$HERE"/tests/*.test.mjs; do
     [ -e "$test_path" ] || continue

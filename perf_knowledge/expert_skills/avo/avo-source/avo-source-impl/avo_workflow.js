@@ -82,11 +82,14 @@ if (!WORKFLOW_DIR) {
   throw new Error('args.workflow_dir is required: absolute path to the directory containing ' +
     'avo_workflow.js, roles/, knowledge/, scripts/.');
 }
-const EXP_ROOT = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/exp')).replace(/\/+$/, '');
-// Reuse GEAK-v4 kernel_workflow roles (benchmark/profile) + scripts
-// (gpu_lock, profile_kernel).
+// <GEAK>/perf_knowledge/expert_skills/avo/avo-source/avo-source-impl -> <GEAK>
+const GEAK_ROOT = WORKFLOW_DIR.split('/').slice(0, -5).join('/');
+const EXP_ROOT = String(A.exp_root || `${GEAK_ROOT}-runs/avo-source`).replace(/\/+$/, '');
+// kernel_base/ holds the kernel roles AVO carries, its own profile_kernel.sh, and
+// by-path entries for what it reuses from GEAK's kernel_workflow (gpu_lock,
+// knowledge).
 const KERNEL_WORKFLOW_DIR = String(A.kernel_workflow_dir ||
-  (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/kernel_workflow')).replace(/\/+$/, '');
+  (WORKFLOW_DIR + '/kernel_base')).replace(/\/+$/, '');
 const ASM_WORKFLOW_DIR = String(A.asm_workflow_dir ||
   (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/asm-workflow')).replace(/\/+$/, '');
 const IR_WORKFLOW_DIR = String(A.ir_workflow_dir ||
@@ -391,7 +394,7 @@ const START_K = parseInt(A.start_k != null ? A.start_k : OPERATOR_DIRECTIONS, 10
 
 // Knowledge base K (§3.1): GEAK-v4's operator/backend reference base.
 const KERNEL_KNOWLEDGE_DIR = String(A.kernel_knowledge_dir ||
-  (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge')).replace(/\/+$/, '');
+  (GEAK_ROOT + '/perf_knowledge')).replace(/\/+$/, '');
 
 // Delayed profiling (CuTeGen / §3.2): structural-first for the first N steps (or
 // until the first commit), then profiling-guided. 0 = profile from step 1.

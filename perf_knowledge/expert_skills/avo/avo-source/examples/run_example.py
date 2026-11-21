@@ -6,14 +6,16 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
 
 
 EXAMPLES_DIR = Path(__file__).resolve().parent
-REPO_ROOT = EXAMPLES_DIR.parents[1]
-RUNNER = REPO_ROOT / "avo-workflow" / "run_geak_avo.py"
+# <GEAK>/perf_knowledge/expert_skills/avo/avo-source/examples -> <GEAK>
+REPO_ROOT = EXAMPLES_DIR.parents[4]
+RUNNER = EXAMPLES_DIR.parent / "avo-source-impl" / "run_geak_avo.py"
 DEFAULT_OUTPUT_ROOT = REPO_ROOT.parent / f"{REPO_ROOT.name}-runs" / "avo-examples"
 
 
@@ -50,6 +52,13 @@ def main() -> int:
     output_root = Path(os.environ.get(
         "AVO_EXAMPLE_RUNS_ROOT", DEFAULT_OUTPUT_ROOT)).expanduser().resolve()
     case_output = output_root / ns.case
+    if not ns.dry_run:
+        # Optimize a copy outside the GEAK checkout: the run then writes nothing into
+        # the repository, and the agents do not sit next to this case's reference/.
+        staged_kernel = case_output / "kernel"
+        if not staged_kernel.exists():
+            shutil.copytree(handoff["kernel_path"], staged_kernel)
+        handoff["kernel_path"] = str(staged_kernel)
     configured_exp = Path(str(handoff.get("exp_root") or "runs"))
     handoff["exp_root"] = str(
         configured_exp.resolve() if configured_exp.is_absolute()

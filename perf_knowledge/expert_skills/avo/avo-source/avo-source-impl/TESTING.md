@@ -1,4 +1,4 @@
-# avo-workflow — Testing (kernel-level)
+# avo-source — Testing (kernel-level)
 
 Rigorous, layered testing for the AVO kernel engine, **before** any e2e
 integration. Three layers, increasing cost: deterministic unit tests (no
@@ -8,9 +8,9 @@ acceptance/quality gate.
 > Run the cheap deterministic layer in CI on every change; run the integration
 > layer on the rig before trusting a real evolution run.
 
-**Headless shim:** the versioned entry point is `avo-workflow/run_avo.mjs` (not the
-avo_projects root). A root-level forwarder may delegate to it; see README *Headless
-runs*.
+**Headless shim:** the versioned entry point is `run_avo.mjs` in this directory; see
+the README one level up (*Headless runs*). Commands below run from this directory
+(`avo-source-impl/`).
 
 ---
 
@@ -19,10 +19,9 @@ runs*.
 These pin the **exactness-critical** logic — the commit gate and the lineage
 writer — which must never be left to LLM judgement.
 
-> **Prereq:** the `node` suites import from `avo-workflow/lib/`. That dir was once
-> caught by the root `.gitignore`'s generic `lib/` rule (now negated with
-> `!avo-workflow/lib/`); if a fresh clone has no `avo-workflow/lib/`, the import (and
-> the workflow) fails — re-check the `.gitignore` negation. See README "Repo note".
+> **Prereq:** the `node` suites import from `lib/`. GEAK's root `.gitignore` has a
+> generic `lib/` rule; the `.gitignore` in this directory negates it (`!/lib/`). If a
+> fresh clone has no `lib/`, the import (and the workflow) fails — re-check that file.
 
 ### 1a. Commit gate (JS) — `tests/commit_gate.test.mjs`
 
@@ -31,7 +30,7 @@ Tests `lib/commit_gate.mjs` (the single source of truth imported by
 correctness/failed handling, custom opts.
 
 ```bash
-node avo-workflow/tests/commit_gate.test.mjs    # exit 0 = all pass
+node tests/commit_gate.test.mjs    # exit 0 = all pass
 ```
 
 (Node is required only on the rig; the gate is pure and has no runtime deps.)
@@ -45,7 +44,7 @@ subject truncation, `context` (top-k priors), and **`resume`** (reconstructs
 committed/best/baseline/failed/direction from durable files).
 
 ```bash
-python -m pytest avo-workflow/tests/test_avo_lineage.py -q   # 24 passed
+python -m pytest tests/test_avo_lineage.py -q   # 24 passed
 ```
 
 **Invariant under test (defense in depth):** even if the JS gate were wrong,
@@ -62,7 +61,7 @@ best; `topk` is best-first by speedup; `diverse` is one-per-strategy-bucket;
 (`elites` policy is covered by `archive.test.mjs`.)
 
 ```bash
-node avo-workflow/tests/start_select.test.mjs    # exit 0 = all pass
+node tests/start_select.test.mjs    # exit 0 = all pass
 ```
 
 ### 1d. Roofline model (JS) — `tests/roofline.test.mjs`
@@ -118,29 +117,30 @@ One command (runs pytest always; runs the node suites if `node` is present, else
 skips them with a notice):
 
 ```bash
-bash avo-workflow/run_tests.sh
+bash run_tests.sh
 ```
 
 …or manually:
 
 ```bash
-python -m pytest avo-workflow/tests/ -q   # 24 passed
-for t in commit_gate start_select roofline headroom archive; do node avo-workflow/tests/$t.test.mjs; done
+python -m pytest tests/ -q   # 24 passed
+for t in commit_gate start_select roofline headroom archive; do node tests/$t.test.mjs; done
 ```
 
 ---
 
 ## Layer 2 — Integration smoke (rig: GPU + LLM)
 
-End-to-end on the canonical `examples/tasks/knn` task with a **short wall-clock
-budget**, to prove the whole chain runs and the contract holds.
+End-to-end on GEAK's canonical `examples/tasks/knn` task with a **short wall-clock
+budget**, to prove the whole chain runs and the contract holds. Run it on a copy
+outside the GEAK checkout, so the run writes nothing into the repository.
 
 ```
 Workflow({
-  scriptPath: "<ABS>/avo-workflow/avo_workflow.js",
+  scriptPath: "<AVO_IMPL>/avo_workflow.js",
   args: {
-    kernel_path: "<ABS>/examples/tasks/knn",
-    workflow_dir: "<ABS>/avo-workflow",
+    kernel_path: "<COPY>/knn",
+    workflow_dir: "<AVO_IMPL>",
     budget_s: 900,            // 15-min smoke; raise once green
     gpu_ids: "<idle gpu>",    // rocm-smi to pick one
     verify_repeats: 3,
@@ -151,7 +151,7 @@ Workflow({
 
 Pre-flight (fair baseline + idle GPU):
 ```bash
-cd examples/tasks/knn && git checkout -- . 2>/dev/null; rm -rf build __pycache__ *.so
+rm -rf <COPY>/knn && cp -r <GEAK>/examples/tasks/knn <COPY>/knn   # <COPY> is outside <GEAK>
 rocm-smi   # pick an idle GPU id for gpu_ids
 ```
 
@@ -166,7 +166,7 @@ rocm-smi   # pick an idle GPU id for gpu_ids
 4. **`director_validation.json` exists** and its
    `director_verified_speedup_geomean` is **independently** measured (not the
    runner's number).
-5. **Integrity:** the original `examples/tasks/knn` is byte-identical
+5. **Integrity:** the copied `knn` kernel directory is byte-identical
    (`orig_manifest.sha256` == `orig_manifest_after.sha256`).
 6. **If any commit happened:** `final_patch.diff` applies cleanly on a fresh copy
    of the original and passes the COMMANDMENT correctness command; each `avo-v{N}`

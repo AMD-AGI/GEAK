@@ -73,7 +73,8 @@ if (REQUESTED_LEVEL !== 'source' || LOW_LEVEL_TARGETS.has(TARGET_LANGUAGE) || LO
   process.exit(2);
 }
 
-const DEFAULT_ROOT = path.resolve(path.dirname(CFG.scriptPath), '..');
+// <GEAK>/perf_knowledge/expert_skills/avo/avo-source/avo-source-impl -> <GEAK>
+const DEFAULT_ROOT = path.resolve(path.dirname(CFG.scriptPath), '../../../../..');
 const CLAUDE_HOME = CFG.claude_home || process.env.HOME || DEFAULT_ROOT;
 const CLAUDE_BIN = CFG.claude_bin || 'claude';
 const CLAUDE_MODEL = CFG.model || '';                       // '' = user's configured default
@@ -94,10 +95,10 @@ const AGENT_TRANSPORT_BACKOFF_CAP_MS = parseInt(
 const FINAL_ANSWER_GRACE_MS = 3000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Default to this checkout instead of a site-specific mount. Set root_dir when
-// the kernel/capture intentionally lives outside the PerfSkills repository.
+// the kernel/capture intentionally lives outside the GEAK repository.
 const ROOT_DIR = CFG.root_dir || CFG.args.root_dir || DEFAULT_ROOT; // cwd + --add-dir scope
 
-const EXP_ROOT = String(CFG.args.exp_root || `${path.dirname(CFG.scriptPath)}/exp`).replace(/\/+$/, '');
+const EXP_ROOT = String(CFG.args.exp_root || `${DEFAULT_ROOT}-runs/avo-source`).replace(/\/+$/, '');
 if (VALIDATE_ONLY) {
   console.log(JSON.stringify({
     status: 'ok',

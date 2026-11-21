@@ -2,7 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# <GEAK>/perf_knowledge/expert_skills/avo/avo-source/examples -> <GEAK>
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../../../.." && pwd)"
 SITE_ROOT="$(cd "$REPO_ROOT/../.." && pwd)"
 OUTPUT_ROOT="${AVO_EXAMPLE_RUNS_ROOT:-${REPO_ROOT}-runs/avo-examples}"
 

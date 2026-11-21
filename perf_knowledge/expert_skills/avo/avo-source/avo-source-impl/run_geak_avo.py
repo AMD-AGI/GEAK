@@ -13,11 +13,11 @@ import sys
 import uuid
 
 
-ROOT = Path(__file__).resolve().parents[1]
-AVO_DIR = ROOT / "avo-workflow"
-SITE_ROOT = ROOT.parents[1]
-PORTABLE_CLAUDE = SITE_ROOT / "claude-portable" / "bin" / "claude"
-PORTABLE_CLAUDE_HOME = SITE_ROOT / "tooling" / "home"
+AVO_DIR = Path(__file__).resolve().parent
+# <GEAK>/perf_knowledge/expert_skills/avo/avo-source/avo-source-impl -> <GEAK>
+ROOT = AVO_DIR.parents[4]
+KERNEL_BASE = AVO_DIR / "kernel_base"
+RUNS_ROOT = ROOT.parent / f"{ROOT.name}-runs"
 LOW_LEVEL = {"asm", "amdgcn", "gcn", "ir", "llvm-ir", "llvm_ir", "ll", "ttgir"}
 
 
@@ -32,8 +32,6 @@ def node_binary() -> str:
     for candidate in (
         os.environ.get("GEAK_NODE_BIN"),
         shutil.which("node"),
-        "/shared_nfs/liuji/tooling/node/bin/node",
-        str(SITE_ROOT / "tooling" / "node" / "bin" / "node"),
     ):
         if not candidate or not Path(candidate).is_file():
             continue
@@ -50,10 +48,33 @@ def node_binary() -> str:
     raise RuntimeError("Node.js >=18 not found; set GEAK_NODE_BIN")
 
 
+def check_geak_layout() -> None:
+    """AVO reads these from the GEAK checkout it lives in; fail before any agent starts."""
+    required = [
+        ROOT / "perf_knowledge",
+        ROOT / "kernel_workflow" / "scripts" / "gpu_lock.sh",
+        KERNEL_BASE / "scripts" / "gpu_lock.sh",
+        KERNEL_BASE / "scripts" / "profile_kernel.sh",
+        KERNEL_BASE / "roles" / "benchmark_engineer.md",
+        KERNEL_BASE / "roles" / "profile_engineer.md",
+        KERNEL_BASE / "roles" / "tech_lead.md",
+        KERNEL_BASE / "knowledge" / "amd_instinct.md",
+        # Links into <GEAK>/kernel_workflow/knowledge; a dangling one fails exists().
+        *sorted((KERNEL_BASE / "knowledge").glob("*.md")),
+    ]
+    missing = [str(path) for path in required if not path.exists()]
+    if missing:
+        raise ValueError(
+            "AVO must run from inside a complete GEAK checkout; missing: "
+            + ", ".join(missing)
+        )
+
+
 def make_config(handoff: dict) -> dict:
     kernel = Path(str(handoff.get("kernel_path") or "")).expanduser()
     if not kernel.is_absolute() or not kernel.exists():
         raise ValueError("kernel_path must be an existing absolute path")
+    check_geak_layout()
     nested_args = handoff.get("args") or {}
     if not isinstance(nested_args, dict):
         raise ValueError("args must be a JSON object when provided")
@@ -75,7 +96,7 @@ def make_config(handoff: dict) -> dict:
         raise ValueError("integrated AVO supports source-level optimization only")
 
     exp_root = Path(str(
-        handoff.get("exp_root") or ROOT / "exp" / "avo-source"
+        handoff.get("exp_root") or RUNS_ROOT / "avo-source"
     )).expanduser().resolve()
     args = dict(nested_args)
     for key in (
@@ -101,7 +122,7 @@ def make_config(handoff: dict) -> dict:
     args.update({
         "kernel_path": str(kernel),
         "workflow_dir": str(AVO_DIR),
-        "kernel_workflow_dir": str(ROOT / "kernel_workflow"),
+        "kernel_workflow_dir": str(KERNEL_BASE),
         "kernel_knowledge_dir": str(ROOT / "perf_knowledge"),
         "exp_root": str(exp_root),
         "avo_language_level": "source",
@@ -115,18 +136,16 @@ def make_config(handoff: dict) -> dict:
             handoff.get("claude_bin")
             or os.environ.get("GEAK_CLAUDE_BIN")
             or shutil.which("claude")
-            or (PORTABLE_CLAUDE if PORTABLE_CLAUDE.is_file() else "")
             or "claude"
         ),
         "claude_home": str(
             handoff.get("claude_home")
             or os.environ.get("GEAK_CLAUDE_HOME")
-            or (PORTABLE_CLAUDE_HOME if PORTABLE_CLAUDE_HOME.is_dir() else "")
             or Path.home()
         ),
         "root_dir": str(Path(str(
             handoff.get("root_dir")
-            or os.path.commonpath([str(ROOT), str(kernel.resolve())])
+            or os.path.commonpath([str(ROOT), str(kernel.resolve()), str(exp_root)])
         )).resolve()),
         "model": str(handoff.get("model") or os.environ.get("GEAK_CLAUDE_MODEL") or ""),
         "agent_timeout_ms": int(handoff.get("agent_timeout_ms") or 2_400_000),

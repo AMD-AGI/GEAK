@@ -39,8 +39,9 @@ def test_maps_triton_as_source_and_injects_geak_paths(tmp_path):
     assert args["operator_directions"] == 2
     assert args["start_policy"] == "diverse"
     assert args["start_k"] == 2
-    assert Path(args["kernel_workflow_dir"]).name == "kernel_workflow"
-    assert Path(args["kernel_knowledge_dir"]).name == "perf_knowledge"
+    assert Path(args["kernel_workflow_dir"]) == RUNNER.AVO_DIR / "kernel_base"
+    assert Path(args["kernel_knowledge_dir"]) == RUNNER.ROOT / "perf_knowledge"
+    assert (RUNNER.ROOT / "kernel_workflow" / "kernel_workflow.js").is_file()
 
 
 def test_normalizes_natural_language_gpu_list_and_defaults(tmp_path):
