@@ -371,8 +371,15 @@ test('team operator refuses a lone TechLead stop and still spends the round', as
   assert.ok(logs.some((line) => line.includes('REFUSED [awaiting_confirmations]')));
 });
 
+// A patch that really applies: the workflow skips verify for a candidate whose
+// patch fails `git apply --check`, so a missing file would hide every case below.
+const FIXTURE_PATCH = path.join(mkdtempSync(path.join(tmpdir(), 'avo-patch-')), 'candidate.patch');
+writeFileSync(FIXTURE_PATCH, 'diff --git a/new.txt b/new.txt\nnew file mode 100644\n'
+  + 'index 0000000..ce01362\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+hello\n');
+process.on('exit', () => rmSync(path.dirname(FIXTURE_PATCH), { recursive: true, force: true }));
+
 const okVariation = () => ({
-  status: 'ok', strategy: 'fixture', patch_file: 'patch.diff',
+  status: 'ok', strategy: 'fixture', patch_file: FIXTURE_PATCH,
   patch_hash: 'abc', self_speedup: 1.2, per_case: [], rationale: 'fixture',
 });
 
@@ -443,7 +450,7 @@ test('a direction measured below the commit gate is not retired on first sight',
   const { prompts } = await runSmoke('team', {
     extraArgs: { max_steps: 2, max_infra_failures: 0 },
     variation: () => ({
-      status: 'ok', strategy: 'fixture', patch_file: 'patch.diff',
+      status: 'ok', strategy: 'fixture', patch_file: FIXTURE_PATCH,
       patch_hash: 'abc', self_speedup: 1.2, per_case: [], rationale: 'fixture',
     }),
     verify: () => ({
