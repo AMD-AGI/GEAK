@@ -27,7 +27,7 @@ filesystem and shell work yourself with Bash/Read/Write. Return ONLY the request
 Inputs in your prompt: `KERNEL_PATH_ORIG`, `EXP_ROOT` (base dir for timestamped runs),
 `EVAL_DIR_OVERRIDE` (may be empty), `KERNEL_NAME_HINT` (basename), `TASK` (may be empty), and
 `MODE` (`optimize` default | `author`), `EXPECTED_GFX` (possibly empty), and
-`EXPECTED_TARGET` (`r9700` | `r9600d` | empty), `EXPECTED_DEVICE_NAME` (possibly empty),
+`EXPECTED_TARGET` (`r9700` | `r9600d` | `w7900` | empty), `EXPECTED_DEVICE_NAME` (possibly empty),
 and `EXPECTED_PHYSICAL_CU_COUNT` (possibly zero). In `author` mode you also
 get `TARGET_LANGUAGE` and `OP_SPEC`.
 
@@ -37,9 +37,13 @@ single source for `device_gfx`, `device_target`, `device_name`, and
 `physical_cu_count`. It scopes all fields to the same real GPU agent, rejects
 mixed visible identities, ignores `gfx000`, and emits `r9700` or `r9600d` only
 when the trimmed Marketing Name is exactly `AMD Radeon AI PRO R9700` or
-`AMD Radeon AI PRO R9600D`, respectively, on `gfx1201`. Every other product
-remains `unknown`. Recognition does not qualify R9600D kernel policy or permit
-R9700 calibration inheritance. Do **not** use
+`AMD Radeon AI PRO R9600D`, respectively, on `gfx1201`. It emits `w7900` only
+when the Marketing Name is `AMD Radeon Pro W7900` or
+`AMD Radeon Pro W7900 Dual Slot` (either "Pro" or "PRO" casing) on `gfx1100`.
+Every other product remains `unknown`. Recognition does not qualify R9600D kernel
+policy or permit R9700 calibration inheritance. A `gfx1100` board whose target is
+not `w7900` is refused by the orchestrator; on the W7900 the hardware reference is
+`SKILL_DIR/knowledge/amd_rdna3.md` (`gfx1100`). Do **not** use
 `torch.cuda.get_device_properties().multi_processor_count` for physical CUs:
 on R9700 that is 32 WGPs, not 64 physical CUs, and on a gfx1151 Radeon 8060S it is 20, not 40.
 
@@ -251,7 +255,7 @@ Return JSON:
   "baseline_dir": "<EVAL_DIR>/baseline",
   "kernel_name": "<basename>",
   "device_gfx": "<detected real gfx token>",
-  "device_target": "r9700|r9600d|unknown",
+  "device_target": "r9700|r9600d|w7900|unknown",
   "device_name": "<detected product/marketing name>",
   "physical_cu_count": 64,
   "source_files": ["<relative paths under workspace>"],
@@ -343,6 +347,11 @@ no-op. A clean benchmark of the reverted original does not validate the discarde
    the profile window. If `res["weighted"] is None` (all buckets identity/untrusted) the measurement is not
    trustworthy → re-measure per-bucket ms / regenerate; fall back to `geomean` only then. This is identical
    to what the unittest computes, so Director and TechLead arbitrate on the same instrument.
+   **Workload-weighted oracle** (`unittest.py` prints `GEAK_WEIGHTED_SPEEDUP`): use `baseline_ms` from
+   THIS run's own baseline leg, not from `BASELINE_TIMING`. Absolute ms drift 1–4% between sessions on
+   these UTs, and `BASELINE_TIMING` may come from KernelExtract's validation run; only the in-run pair
+   is a like-for-like comparison. Then `director_verified_speedup_weighted` equals the
+   `GEAK_WEIGHTED_SPEEDUP` the UT printed. A single Bash tool call is killed after 10 min, and one UT run takes longer, so start it in the background and poll: `nohup bash -c '<cmd>; echo UT_EXIT=$?' > <log> 2>&1 &`, then `sleep 540; tail -5 <log>` until `UT_EXIT=` appears.
 6. Arbitration vs the TechLead's claim (on the PRIMARY metric — `director_verified_speedup_weighted` from
    `h.serving_weighted_speedup`; `geomean` only when it returns `None`):
    - Within 10%, or Director higher → `accepted`.

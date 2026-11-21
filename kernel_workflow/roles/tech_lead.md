@@ -16,6 +16,18 @@ Identity/roofline inputs are policy, not suggestions:
   `calibrated-r9600d`) permits that product's peaks, and `tabulated-<gfx>` that
   ISA's `peaks.md` row. Any `unknown-*` status forbids numeric peak/roofline
   directions; plan from measured latency and architecture-neutral levers instead.
+- `DEVICE_TARGET=w7900` identifies the Radeon Pro W7900 on gfx1100 (gfx1100 with
+  any other target is refused before you run). Its `ROOFLINE_STATUS` is
+  `calibrated-w7900`, which permits the product-scoped W7900 peaks in
+  `amd_rdna3.md` §1: memory bandwidth, FP16 and INT8 matrix, FP32 vector. Plan a
+  BF16, FP8 or INT4 kernel against the memory axis or measured latency.
+- `COUNTER_GUIDANCE` is sent on the W7900 only. `unavailable` means profiling
+  is off (`args.profile`, off by default) or the operator did not declare the
+  `profile_standard` perf level: plan from kernel-trace durations, per-case
+  latency and dispatch count.
+  `gfx1100-safe-set` means profiling is on and the level was declared: if the profile engineer's installed
+  Metrix passed the `amd_rdna3.md` §4 version check, the profile's bound class may
+  rest on the 12 metrics there.
 - `PHYSICAL_CU_COUNT` is the grid-sizing count. Do not substitute a PyTorch
   WGP count or a hard-coded Instinct CU count.
 
@@ -25,7 +37,7 @@ Always-available references (Read what's relevant to the phase):
 - `SKILL_DIR/knowledge/hip_optimization.md` / `triton_optimization.md` — per kernel type
 - `SKILL_DIR/knowledge/wrapper_optimization.md` — host/runtime patterns
 - the hardware reference for the card detected on-box — `SKILL_DIR/knowledge/amd_instinct.md` (`gfx94*`/`gfx95*`,
-  CDNA Instinct), `SKILL_DIR/knowledge/amd_ryzen.md` (`gfx11*`, RDNA3.5 client), or `SKILL_DIR/knowledge/amd_rdna4.md` (`gfx1201`, RDNA4 — never apply CDNA MFMA/wave64/MX to RDNA4); `SKILL_DIR/knowledge/profiling_guide.md`
+  CDNA Instinct), `SKILL_DIR/knowledge/amd_ryzen.md` (`gfx115x`, RDNA3.5 APU), `SKILL_DIR/knowledge/amd_rdna3.md` (`gfx1100`, RDNA3 Radeon Pro W7900: wave32, gfx11 WMMA with FP16/BF16/INT8; INT4 not validated), or `SKILL_DIR/knowledge/amd_rdna4.md` (`gfx1201`, RDNA4 — never apply CDNA MFMA/wave64/MX to RDNA4); `SKILL_DIR/knowledge/profiling_guide.md`
 - `SKILL_DIR/knowledge/learned/INDEX.md` — **only when the `LEARNED_KB` input says `on`.** When it
   says `off` this file and every card under `knowledge/learned/` is out of bounds for the whole run:
   do not open them, do not cite them, plan from the profile alone. That input is the switch a caller
