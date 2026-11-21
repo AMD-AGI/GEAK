@@ -90,8 +90,9 @@ Place selected sources in their final snapshot directory before testing; the liv
 tree may hold an unaccepted attempt. Check source/harness identity before and after each
 run. Test independent tasks concurrently on disjoint slots; a task's repeats are sequential.
 
-Retain each receipt, stdout, exit status and source hashes before another run overwrites
-them. Use fresh runtime/compile caches, including native task-local build paths; preserve
+Retain each receipt with actual start/finish times, stdout, exit status and source hashes
+before another run overwrites them. Confirm the requested sequence from these receipts
+before admission. Use fresh runtime/compile caches, including native task-local build paths; preserve
 weights, immutable inputs and previous measurement data. Retain generated oracle versions
 and state any archive coverage limits. A retained symlink records its literal target,
 not the external contents. Evidence helpers are described in [engine](../../engine/README.md).
