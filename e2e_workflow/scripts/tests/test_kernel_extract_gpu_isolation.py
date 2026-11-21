@@ -1,4 +1,4 @@
-"""Exercise kernel-extract's real GPU lock with CPU-only placeholder commands."""
+"""Exercise kernel-ut's real GPU lock with CPU-only placeholder commands."""
 
 import os
 from pathlib import Path

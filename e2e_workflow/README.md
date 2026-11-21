@@ -392,25 +392,26 @@ it as described below. Full contract:
 ## AgentX kernel extraction and UT delivery
 
 An explicit `workload_kind: "agentx_trace_replay"` (or matching workload specification)
-activates the [kernel-extract skill](knowledge/kernel_extraction_skills/kernel-extract/SKILL.md).
-The extractor follows the complete procedure: measured baseline logs
-→ observed workload → sampling points → runtime kernel selection → source extraction
-→ standalone GPU UTs. The method comes from the validated standalone skill at `ce1dbe5`. It retains the
-five-stage procedure and the additional sampling, coverage, reference-output and
-self-noise tools. Existing capture, trace, harness, GPU-lock and delivery helpers
-are reused from the repository; their regression tests remain in one place.
+activates two skills, run in order by one extractor:
+[kernel-profile](knowledge/kernel_extraction_skills/kernel-profile/SKILL.md) (measured
+baseline logs → observed workload → sampling points → runtime census, ranking and
+selection → `profile_handoff.json`) and
+[kernel-ut](knowledge/kernel_extraction_skills/kernel-ut/SKILL.md) (task boundaries →
+source extraction → standalone GPU UTs qualified for correctness). Existing trace,
+harness, GPU-lock and delivery helpers are reused from the repository; their regression
+tests remain in one place.
 
-UT inputs default to fixed-seed generators at the observed shapes/dtypes/layouts;
-reference outputs come from the frozen baseline in an isolated process. UT execution
-does not launch serving, profile or capture shapes. Reuse or reliably reconstruct
-routing, indices, page tables and other structural metadata; capture only missing
-state. Necessary captures default to `structure_only`, with reference regeneration
-before validation. An explicit `capture_persist_policy` overrides the fallback
-storage policy; non-AgentX capture defaults are unchanged.
+UT inputs are fixed-seed generators at the handoff's shapes/dtypes/layouts; reference
+outputs come from the frozen baseline in an isolated process and are not persisted.
+UT execution does not launch serving, profile or capture, and extraction persists no
+tensors: routing, indices, page tables and other structural metadata are reused or
+reconstructed, and what cannot be is a reported gap. UT qualification runs
+`unittest.py --validation-mode correctness`; timing legs run in optimization, where
+the bare `unittest.py` measures them. Non-AgentX capture defaults are unchanged.
 
 GEAK supplies baseline/configuration paths, GPU allocation, accepted overlays and
-budgets through the [workflow handoff](knowledge/kernel_extraction_skills/kernel-extract/references/workflow-handoff.md).
-The skill completes scheduled UT work before returning a delivery path. The packaging
+budgets through the [workflow handoff](knowledge/kernel_extraction_skills/kernel-ut/references/workflow-handoff.md).
+The extractor completes scheduled UT work before returning a delivery path. The packaging
 adapter reads each task's saved declaration and return, preserves failed/deferred
 tasks and coverage, and feeds verified tasks into the existing optimization queues.
 It checks source/binding/UT evidence without repeating selection or GPU tests; changes

@@ -19,7 +19,7 @@ and neither is visible until an e2e run is already burning GPU hours:
      copy, never on the install. test_patch_is_applied_to_the_overlay_copy_not_the_install pins the
      exact argv, and a failed patch must abort without recording a manifest entry.
 
-Also covered: the manifest round-trip, module resolution (pkg_root / module_file) against real
+Also covered: the manifest round-trip, module resolution (module_file) against real
 temp packages, _try_apply's full attempt ladder with exact argv and missing-tool handling, the
 argparse surface driven by explicit argv lists (including the copy-subtree/monkeypatch back-compat
 aliases and the legacy --package/--subpath conversion), and error paths: overlay dir missing,
@@ -279,31 +279,9 @@ class TestManifestIO(_OverlayCase):
 
 
 # --------------------------------------------------------------------------- #
-# pkg_root / module_file -- resolution against real temp packages
+# module_file -- resolution against real temp packages
 # --------------------------------------------------------------------------- #
 class TestResolution(_OverlayCase):
-    def test_pkg_root_of_a_regular_package_is_its_directory(self):
-        root = self._import_dir()
-        self._write(os.path.join("importable", "ovpkg", "__init__.py"), "")
-        self._forget("ovpkg")
-        self.assertEqual(ov.pkg_root("ovpkg"), os.path.join(root, "ovpkg"))
-
-    def test_pkg_root_of_a_namespace_package_uses_the_first_path_entry(self):
-        # A namespace package has no __file__, so the __path__ fallback is the only way through.
-        root = self._import_dir()
-        os.makedirs(os.path.join(root, "ovns"))
-        self._forget("ovns")
-        mod = importlib.import_module("ovns")
-        self.assertIsNone(getattr(mod, "__file__", None))
-        self.assertEqual(ov.pkg_root("ovns"), os.path.join(root, "ovns"))
-
-    def test_pkg_root_of_a_module_with_neither_file_nor_path_exits(self):
-        sys.modules["ovbodiless"] = types.ModuleType("ovbodiless")
-        self._forget("ovbodiless")
-        with self.assertRaises(SystemExit) as caught:
-            ov.pkg_root("ovbodiless")
-        self.assertIn("cannot locate package root for ovbodiless", str(caught.exception))
-
     def test_module_file_returns_the_installed_submodule_path(self):
         self._import_dir()
         self._write(os.path.join("importable", "ovsrt", "__init__.py"), "")

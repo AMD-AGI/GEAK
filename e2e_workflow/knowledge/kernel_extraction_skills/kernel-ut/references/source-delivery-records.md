@@ -47,5 +47,3 @@ not independent truth of the recorded tests; preserve raw logs for review.
 It rejects missing members, changed sources/entry, stale UT results and
 negative controls that only fail compilation. Declare `source_delivery_required=true` for every task; do not accept
 a source-free declaration as an extraction delivery.
-
-<!-- Standalone adaptation, 2026-10-12: local tools and agent-owned stages. -->

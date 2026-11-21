@@ -3,8 +3,9 @@
 For vLLM, use the [iteration-observer and probe commands](vllm.md); the SGLang
 `server.log` / `decode_log_interval` examples below are not vLLM inputs.
 
-Use the sections matching the current run. The [core skill](../SKILL.md) owns
-activation, ranking artifacts and the weighting contract.
+Use the sections matching the current run. The [profile skill](../SKILL.md) owns
+activation and ranking artifacts; the [UT skill](../../kernel-ut/SKILL.md) §3 owns the
+weighting contract.
 
 ## Distribution and phase sampling
 
