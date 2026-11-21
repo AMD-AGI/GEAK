@@ -9,6 +9,7 @@ Read the [invocation contract](../../CONTRACT.md#direct-module-calls) and
 [Evaluate's artifact interface](../README.md). Inputs are the reference and candidate
 identities, integration/effect evidence, workload, quality requirements, budget and
 comparison policy. Resolve them before launching measured traffic.
+Use native input preparation to resolve required run metadata in the intended client context.
 
 For a scoped screen, follow Evaluate's screening contract and return matched native
 observations. The complete receipt and finalization steps below apply to full comparisons.
