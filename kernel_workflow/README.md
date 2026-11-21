@@ -151,6 +151,14 @@ be read, or `gpu_ids` holds fewer than N GPUs, the lane logs a warning with the 
 single-GPU; pass `gpus_per_job` and enough `gpu_ids` to run it on N GPUs. What an e2e extraction
 captured from the server (selection traces, shape captures) is not scanned.
 
+A multi-rank UT task from the e2e UT module declares its GPU count (`required_gpu_count` in
+`run/requested_kernel.json` / `run/RETURN.json`, `capabilities.multi_rank.world_size` in `meta.json`),
+and Setup takes that count as it is. Give such a task at least that many `gpu_ids`: its UT starts its
+own ranks and ends with an environment error (exit 2) on fewer GPUs. For these tasks the lane uses
+the task's whole-UT limit (`meta.timeouts.total_s`, 3600 s when unset) as `GEAK_GPU_RUN_TIMEOUT`,
+Benchmark, Report and Validate carry each rank's time and the alignment method, and the return adds
+`gpus_per_job`, `timing_receipt` and `timing_receipt_gap`.
+
 `gpus_per_job`, `job_gpu_ids` (one fixed group) or `op_spec.resource` override the detection; an
 override that `gpu_ids` cannot hold stops the run. Group
 leases share the per-GPU lock files with single-GPU jobs, are acquired all-or-nothing, and are killed
