@@ -17,9 +17,10 @@ receipts own results and the worker owns accounting. Reuse qualified inputs.
 
 ## Decide and act
 
-1. Read new and partial reports alongside running work and current steering. Rank useful
-   questions by plausible effect on the native objective, observed bottlenecks, remaining
-   headroom and cost through verification and delivery. Use the workload's
+1. Read new and partial reports alongside running work and current steering. Group open
+   questions in `STATE.md` by competing mechanisms and the assumptions that distinguish
+   them. Rank their plausible effect on the native objective, remaining headroom and total
+   verification/delivery cost, including what a call could change in that ordering. Use the workload's
    [experience guidance](../../../../brain/experience/README.md) within this task's scope;
    a missing historical match does not exclude an opportunity.
 2. Choose a module and then its implementation under the
@@ -32,7 +33,10 @@ receipts own results and the worker owns accounting. Reuse qualified inputs.
    defect returns to the parent for requalification, not an edit to the test.
 4. Read the native verdict, reconcile source identities and update the index. Advance the
    inner incumbent only under the shared contract; a merge is a new candidate for Verify.
-   Reorder remaining work and budgets, then reason again, including after a rejection.
+   Update the question ordering only within the result's source and coverage. Retry a
+   direction when a named repair, changed assumption or new observation could change
+   the decision; otherwise choose a distinct unresolved question.
+   Reorder remaining work and budgets, then reason again.
 
 ## Starting route and continuation
 

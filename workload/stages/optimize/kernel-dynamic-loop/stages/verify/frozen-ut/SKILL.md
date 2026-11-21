@@ -6,9 +6,10 @@ description: Verify an exact kernel candidate in a fresh process through the unc
 # Frozen native UT
 
 Read the [Verify contract](../README.md).
-Use the supplied source tools to check the edit boundary. Use an independent complete
-task copy where native bindings support relocation; preserve frozen inputs and prove the
-candidate's actual binding through the native checks. Otherwise snapshot the canonical
+Use the supplied source tools to check the edit boundary.
+Use an independent complete task copy where native bindings support relocation;
+retain all declared inputs and workspace metadata, including hidden entries, and
+prove the candidate's actual binding through the native checks. Otherwise snapshot the canonical
 computation tree and materialize the candidate there exclusively.
 For `source_tree.py check`, exit 1 means permitted changes; exit 2 rejects them.
 
