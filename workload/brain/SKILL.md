@@ -24,6 +24,9 @@ times. Native receipts own measured results and credited time; resume from these
 State each budget's accounting basis (elapsed time, effective work or task credit) and
 remaining allowance; account for waits and parallel overlap under that basis. A renewable
 watch-call limit is not the campaign deadline.
+Track each task's planned search depth, observed preparation/search/verification costs and
+next continuation separately from the campaign clock. Call duration or worker credit alone
+does not establish search depth; keep unobserved costs explicit.
 
 A user-selected optimization mode is an external file with at most five short, nonempty
 guidance lines. Record its path in `BRIEF.md`. It takes priority over experience and default
@@ -82,13 +85,23 @@ The [sequential driver](../engine/core/README.md) still supports the configured 
 Preserve task coverage, parallelism, selected method, required search credit, cold checks
 and a verified floor with recovery artifacts. A scoped alternative does not complete the
 starting route; revisit unfinished work when that alternative no longer advances the objective.
-Budget exploration and adoption evidence together using observed costs at the intended
-concurrency and runtime, within authorized resources. Do not reduce search to whatever
-remains after validating every proposal.
+Plan sustained search horizons and adoption evidence together from observed costs and
+authorized parallel capacity. Independent kernels can share an overlapping search window;
+do not divide that window by task count as if they ran serially. Priorities resolve resource
+competition; ready work on independent idle slots need not wait for higher-ranked work.
+A short probe or module-call limit is a checkpoint within a task's search horizon, not
+completion of that horizon. Continue useful unresolved search from its receipts; justify
+shortening its allocation with evidence or actual limits, while preserving task commitments.
+Keep provisional search candidates separate from the admitted floor. Schedule full cold
+checks and serving comparisons at decision checkpoints; an interim comparison should answer
+a question that can change the search plan. Preserve native adoption criteria, and do not
+reduce search to whatever remains after validating every proposal.
 Reconcile inner and outer execution limits before dispatch; a larger outer allowance
 does not extend an implementation's phase deadline.
-Reallocate from new evidence while preserving explicit task commitments; compare policies
-from the same starting state and total resource allowance.
+Reallocate from new evidence while preserving explicit task commitments and the configured
+starting route's declared search depth unless evidence supports a better allocation.
+Claims of outperforming another route need matched workload, quality, starting inputs and
+total resource/time allowances; a local win or an unmatched historical percentage is insufficient.
 After truncation or an input/runtime change, reprice from matching observed whole-method
 costs, including preparation before search and completion after it. Verify what the native
 method can resume; retained files alone do not make a checkpoint. Resolve the cause of a
