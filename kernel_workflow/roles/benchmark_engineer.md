@@ -276,9 +276,9 @@ Skip this step when `GPUS_PER_JOB` is not listed in your `## Inputs`: on a singl
 multi-GPU job whose prompt only has the `## Multi-GPU job (GPUS_PER_JOB=n)` lease note (e.g. a
 torchrun test), whose baseline you record as before.
 A multi-rank UT runs every case on all `GPUS_PER_JOB` ranks at
-once and merges their times; the merged number alone cannot show how the ranks were aligned or which
-rank set the pace, so it is not a baseline on its own. For every timed case also record each rank's
-time and the alignment method, read from the UT's own structured output of YOUR runs:
+once and merges their times. The merged time is the baseline; for every timed case also record each
+rank's time and the alignment method when the UT reports them, read from the UT's own structured
+output of YOUR runs:
 - **Generated task** (first line of `unittest.py` starts with `# GEAK-GENERATED unittest.py`): the
   `GEAK_TIMING_RECEIPT: <json>` stdout line, or `receipt` in the `run/ut_result.json` the run rewrites.
   Per case `<sig>`: `cases[<sig>].baseline.rank_ms` (ms, one per rank), `cases[<sig>].baseline.ms`
@@ -296,9 +296,10 @@ rank order, exactly `GPUS_PER_JOB` values), `alignment` = the UT's alignment obj
 ranks are aligned before every timed sample, and how the per-rank times are merged). Write the same
 three fields into `baseline_timing.json`'s `test_cases`, put where you read them in
 `rank_timing_source`, and describe that parse in the COMMANDMENT's `PARSE` so Verify and the Director
-read the same fields. If the UT prints no per-rank times or no alignment method for a case, set that
-case's `rank_ms` / `alignment` to `null`, return `reliable: false`, and say what is missing in `notes`.
-Never copy one merged time into every rank and never write an alignment the UT did not report.
+read the same fields. If the UT prints only a merged time for a case (e.g. the slowest rank's), use it as
+`latency_ms`, set that case's `rank_ms` / `alignment` to `null`, and say what is missing in `notes`;
+this alone does not make the baseline unreliable. Never copy one merged time into every rank and never
+write an alignment the UT did not report.
 
 **Weighted oracle (single-run setup):** the saved extraction baseline carries no per-rank times of a
 run of yours, so for a multi-rank result the reader answers `next_run: full` also when it is `usable: true`.

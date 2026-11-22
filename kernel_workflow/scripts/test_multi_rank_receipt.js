@@ -46,7 +46,7 @@ if (!SRC.includes(EXPOSE_AT)) {
   process.exit(1);
 }
 const EXPOSED = ['perCase', 'SETUP_SCHEMA', 'BENCH_SCHEMA', 'REPORT_SCHEMA', 'VALIDATE_SCHEMA', 'BENCH_SCHEMA_MR',
-  'REPORT_SCHEMA_MR', 'VALIDATE_SCHEMA_MR', 'rankTimesOk', 'alignmentOk', 'benchRankGap', 'receiptGap',
+  'REPORT_SCHEMA_MR', 'VALIDATE_SCHEMA_MR', 'rankTimesOk', 'alignmentOk', 'benchRankGap', 'benchRankNote', 'receiptGap',
   'benchReceipt'];
 const BODY = asBody(SRC).replace(EXPOSE_AT, `__expose({ ${EXPOSED.join(', ')} });\n${EXPOSE_AT}`);
 
@@ -249,8 +249,8 @@ function mainSetupSchema(schema, where) {
 const SENTENCE = 'This UT starts its own rank processes: run python3 unittest.py directly; do not wrap it in ' +
   'torchrun or another multi-process launcher.';
 const REPORT_SENTENCE = ' Multi-GPU job: copy each case\'s per-rank baseline times and alignment from ' +
-  'BASELINE_PER_CASE (rank_ms, alignment) into its per_case row (baseline_rank_ms, alignment); one merged ' +
-  'time is not the whole result.';
+  'BASELINE_PER_CASE (rank_ms, alignment) into its per_case row (baseline_rank_ms, alignment) when ' +
+  'they are there; a case with only the merged time keeps it.';
 const MR_RETURN_KEYS = ['gpus_per_job', 'timing_receipt', 'timing_receipt_gap'];
 const blockAt = (p) => p.indexOf('\n\n## Multi-GPU job (');
 // The role prompts of a run; on a multi-GPU job each ends with a multi-GPU block (main's too).
@@ -519,9 +519,10 @@ const itemsOf = (schema, key) => schema.properties[key].items;
 
     const noReceipt = await runLane(BODY, WF_NEG, { 'director:validate': { ...DEFAULTS['director:validate'], timing_receipt: null } });
     const r2 = noReceipt.result;
-    ok(r2.validation_status === 'flagged' && /no timing_receipt/.test(r2.timing_receipt_gap),
-       'no director receipt -> flagged with the reason', `${r2.validation_status} / ${r2.timing_receipt_gap}`);
-    ok(/no timing_receipt; one merged time is not a multi-rank result/.test(noReceipt.call('director:validate').returned.arbitration_note),
+    // Per-rank detail is best effort: an incomplete receipt is noted, never flagged.
+    ok(r2.validation_status === 'accepted' && /no timing_receipt/.test(r2.timing_receipt_gap),
+       'no director receipt -> verdict kept, the gap recorded', `${r2.validation_status} / ${r2.timing_receipt_gap}`);
+    ok(/per-rank receipt incomplete: no timing_receipt; merged times used/.test(noReceipt.call('director:validate').returned.arbitration_note),
        'and the reason is in the director\'s arbitration_note');
     ok(r2.timing_receipt && r2.timing_receipt.world_size === 4 &&
        JSON.stringify(r2.timing_receipt.cases[SIG].baseline.rank_ms) === JSON.stringify(BASE_RANKS) &&
@@ -530,22 +531,29 @@ const itemsOf = (schema, key) => schema.properties[key].items;
 
     const merged = { world_size: 4, alignment: ALIGN, cases: { [SIG]: { baseline: { ms: 0.0548, rank_ms: [0.0548] } } } };
     const r3 = (await runLane(BODY, WF_NEG, { 'director:validate': { ...DEFAULTS['director:validate'], timing_receipt: merged } })).result;
-    ok(r3.validation_status === 'flagged' && /no per-rank baseline times/.test(r3.timing_receipt_gap),
-       'one merged time in the receipt -> flagged', r3.timing_receipt_gap);
+    ok(r3.validation_status === 'accepted' && /no per-rank baseline times/.test(r3.timing_receipt_gap) &&
+       JSON.stringify(r3.timing_receipt) === JSON.stringify(merged),
+       'one merged time in the receipt -> accepted, receipt kept, gap noted', r3.timing_receipt_gap);
     const noAlign = { ...receipt(false), alignment: null };
     const r4 = (await runLane(BODY, WF_NEG, { 'director:validate': { ...DEFAULTS['director:validate'], timing_receipt: noAlign } })).result;
-    ok(r4.validation_status === 'flagged' && /no alignment method/.test(r4.timing_receipt_gap),
-       'per-rank times without the alignment method -> flagged', r4.timing_receipt_gap);
+    ok(r4.validation_status === 'accepted' && /no alignment method/.test(r4.timing_receipt_gap),
+       'per-rank times without the alignment method -> accepted, gap noted', r4.timing_receipt_gap);
 
     const single1 = { ...benchMR(), baseline_per_case: [{ name: SIG, latency_ms: 0.054764, rank_ms: null, alignment: null }] };
     const nb = await runLane(BODY, WF_NEG, { 'benchmark_engineer': single1,
       'director:validate': { ...DEFAULTS['director:validate'], timing_receipt: null } });
     const b = nb.call('benchmark_engineer').returned;
-    ok(b.reliable === false && /without per-rank timing: baseline case swa_moe_r1_ctx128k has no per-rank times/.test(b.notes),
-       'a Benchmark without per-rank times is marked reliable=false with the reason', b.notes);
-    ok(nb.logs.some((l) => /Benchmark WARNING: 4-GPU job/.test(l)), 'and the lane logs it');
-    ok(nb.result.validation_status === 'flagged' && nb.result.timing_receipt === null,
-       'with no per-rank data anywhere the lane returns flagged and no receipt');
+    ok(b.reliable === true && /uses the merged time; no per-rank times \(rank_ms of 4\) for case\(s\) swa_moe_r1_ctx128k/.test(b.notes),
+       'a Benchmark with only merged times stays reliable, the missing detail noted', b.notes);
+    ok(nb.logs.some((l) => /Benchmark note: 4-GPU job/.test(l)), 'and the lane logs it');
+    ok(nb.result.validation_status === 'accepted' && nb.result.timing_receipt &&
+       nb.result.timing_receipt.cases[SIG].baseline.ms === 0.054764 && nb.result.timing_receipt.cases[SIG].baseline.rank_ms === null,
+       'with only merged times the lane keeps the verdict and returns the merged baseline receipt');
+    const noMerged = { ...benchMR(), baseline_per_case: [{ name: SIG, latency_ms: null, rank_ms: null, alignment: null }] };
+    const nm = await runLane(BODY, WF_NEG, { 'benchmark_engineer': noMerged });
+    ok(nm.call('benchmark_engineer').returned.reliable === false &&
+       /without a merged time: baseline case swa_moe_r1_ctx128k has no merged time/.test(nm.call('benchmark_engineer').returned.notes),
+       'a Benchmark without even a merged time is unreliable');
     // The same stubs on a job that is not UT_MR change nothing: no gate, no flag.
     const plain = await runLane(BODY, TORCHRUN, { ...TORCHRUN_SETUP, 'benchmark_engineer': single1,
       'director:validate': { ...DEFAULTS['director:validate'], timing_receipt: null } });
@@ -560,8 +568,8 @@ const itemsOf = (schema, key) => schema.properties[key].items;
     const noCur = await runLane(BODY, rounds);
     ok(noCur.phases.includes('Optimize') && noCur.calls.some((c) => c.label.startsWith('commit ')),
        'one optimization round commits a candidate');
-    ok(noCur.result.validation_status === 'flagged' && /no per-rank candidate times/.test(noCur.result.timing_receipt_gap),
-       'a receipt without the candidate leg -> flagged', noCur.result.timing_receipt_gap);
+    ok(noCur.result.validation_status === 'accepted' && /no merged candidate time/.test(noCur.result.timing_receipt_gap),
+       'a receipt without the candidate leg -> verdict kept, gap noted', noCur.result.timing_receipt_gap);
     const withCur = await runLane(BODY, rounds, { 'director:validate': { ...DEFAULTS['director:validate'], timing_receipt: receipt(true) } });
     ok(withCur.result.validation_status === 'accepted' && withCur.result.timing_receipt_gap === '' &&
        JSON.stringify(withCur.result.timing_receipt.cases[SIG].current.rank_ms) === JSON.stringify(CAND_RANKS),
@@ -614,12 +622,13 @@ const itemsOf = (schema, key) => schema.properties[key].items;
       ok(['baseline_rank_ms', 'optimized_rank_ms', 'alignment'].every((f) => f in item.properties),
          `${name} per_case rows carry baseline_rank_ms / optimized_rank_ms / alignment`);
       const r = s.properties.timing_receipt;
-      ok(r && ['world_size', 'alignment', 'cases'].every((f) => required(r).includes(f)),
-         `${name} timing_receipt requires world_size, alignment, cases`);
+      ok(r && ['world_size', 'cases'].every((f) => required(r).includes(f)) && 'alignment' in r.properties,
+         `${name} timing_receipt requires world_size, cases (alignment optional)`);
       const caseSchema = r.properties.cases.additionalProperties;
       ok(required(caseSchema).includes('baseline') &&
-         ['baseline', 'current'].every((leg) => ['ms', 'rank_ms'].every((f) => required(caseSchema.properties[leg]).includes(f))),
-         `${name} receipt cases: baseline leg required, every leg carries the merged ms and rank_ms`);
+         ['baseline', 'current'].every((leg) => required(caseSchema.properties[leg]).includes('ms') &&
+           'rank_ms' in caseSchema.properties[leg].properties),
+         `${name} receipt cases: baseline leg required, every leg carries the merged ms (rank_ms optional)`);
     }
     for (const [mr, base] of [['BENCH_SCHEMA_MR', 'BENCH_SCHEMA'], ['REPORT_SCHEMA_MR', 'REPORT_SCHEMA'],
       ['VALIDATE_SCHEMA_MR', 'VALIDATE_SCHEMA']]) {
@@ -628,7 +637,7 @@ const itemsOf = (schema, key) => schema.properties[key].items;
          `${mr} keeps every field and requirement of ${base}`);
       ok(required(X[mr]).every((k) => k in X[mr].properties), `${mr}: required is a subset of properties`);
     }
-    const { rankTimesOk, alignmentOk, benchRankGap, receiptGap, benchReceipt } = X;
+    const { rankTimesOk, alignmentOk, benchRankGap, benchRankNote, receiptGap, benchReceipt } = X;
     ok(rankTimesOk(BASE_RANKS, 4) && !rankTimesOk(BASE_RANKS, 2) && !rankTimesOk([0.05], 4),
        'rank_ms must hold exactly one value per rank');
     for (const v of [[0.05, 0.05, 0.05, 0], [0.05, 0.05, 0.05, NaN], [0.05, 0.05, 0.05, '0.05'], null, 0.05]) {
@@ -638,8 +647,9 @@ const itemsOf = (schema, key) => schema.properties[key].items;
        'alignment must be a non-empty object');
     ok(benchRankGap(benchMR().baseline_per_case, 4) === '' && /no baseline case/.test(benchRankGap([], 4)),
        'a complete Benchmark record passes; an empty one does not');
-    ok(/no alignment method/.test(benchRankGap([{ name: 'a', latency_ms: 0.05, rank_ms: BASE_RANKS, alignment: null }], 4)),
-       'a Benchmark case without alignment is a gap');
+    ok(benchRankGap([{ name: 'a', latency_ms: 0.05, rank_ms: BASE_RANKS, alignment: null }], 4) === '' &&
+       /no alignment method/.test(benchRankNote([{ name: 'a', latency_ms: 0.05, rank_ms: BASE_RANKS, alignment: null }], 4)),
+       'a Benchmark case without alignment is noted, not a gap');
     ok(/no merged time \(latency_ms\)/.test(benchRankGap([{ name: 'a', rank_ms: BASE_RANKS, alignment: ALIGN }], 4)),
        'a Benchmark case without its merged time is a gap');
     ok(receiptGap(receipt(false), 4, false) === '' && receiptGap(receipt(true), 4, true) === '',

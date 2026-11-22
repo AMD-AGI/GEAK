@@ -739,8 +739,9 @@ const VALIDATE_SCHEMA = obj({
 // current: {ms, rank_ms}}}}; an older multi-rank UT's per_rank_us/step_us/alignment map onto it.
 // ---------------------------------------------------------------------------
 const rankArr = { type: 'array', items: { type: 'number' } };
-// One leg of one case: the merged time (per sample the slowest rank, then the median) + each rank's.
-const rankLeg = obj({ ms: { type: 'number' }, rank_ms: rankArr }, ['ms', 'rank_ms']);
+// One leg of one case: the merged time (per sample the slowest rank, then the median) + each rank's
+// when the UT reports them (null when it reports only the merged time).
+const rankLeg = obj({ ms: { type: 'number' }, rank_ms: { type: ['array', 'null'], items: { type: 'number' } } }, ['ms']);
 const timingReceipt = {
   type: ['object', 'null'],
   properties: {
@@ -748,7 +749,7 @@ const timingReceipt = {
     alignment: { type: ['object', 'null'], additionalProperties: true },
     cases: { type: 'object', additionalProperties: obj({ baseline: rankLeg, current: rankLeg }, ['baseline']) },
   },
-  required: ['world_size', 'alignment', 'cases'],
+  required: ['world_size', 'cases'],
   additionalProperties: true,
 };
 const perCaseMR = {
@@ -779,37 +780,56 @@ const REPORT_SCHEMA_MR = obj({ ...REPORT_SCHEMA.properties, per_case: perCaseMR,
   REPORT_SCHEMA.required);
 const VALIDATE_SCHEMA_MR = obj({ ...VALIDATE_SCHEMA.properties, per_case: perCaseMR, timing_receipt: timingReceipt },
   [...VALIDATE_SCHEMA.required, 'timing_receipt']);
-// The consumer check for all three places (Benchmark record, director receipt, lane return): on every
-// timed case a merged time plus `ranks` positive finite per-rank times, and a non-empty alignment
-// object. Each returns '' when complete, else the first gap by name, so the reason reaches the status.
+// The consumer check for all three places (Benchmark record, director receipt, lane return). A merged
+// time on every timed case is required; each rank's time and the alignment method are recorded when
+// the UT reports them, and their absence is a note, not a failure (a hand-written UT may report only
+// the merged, slowest-rank time). benchRankGap / receiptGap return the hard gap ('' when none);
+// benchRankNote / receiptNote name what per-rank detail is missing ('' when complete).
 const timeOk = (x) => typeof x === 'number' && Number.isFinite(x) && x > 0;
 const rankTimesOk = (a, ranks) => Array.isArray(a) && a.length === ranks && a.every(timeOk);
 const alignmentOk = (a) => !!a && typeof a === 'object' && !Array.isArray(a) && Object.keys(a).length > 0;
 const legGap = (leg, ranks, what) => !leg || !rankTimesOk(leg.rank_ms, ranks) ? `no per-rank ${what} times`
   : !timeOk(leg.ms) ? `no merged ${what} time (ms)` : '';
-function benchRankGap(cases, ranks) {
+function benchRankGap(cases) {
   if (!Array.isArray(cases) || !cases.length) return 'no baseline case was recorded';
   for (const c of cases) {
     const name = c && c.name != null ? c.name : '?';
-    if (!c || !rankTimesOk(c.rank_ms, ranks)) return `baseline case ${name} has no per-rank times (rank_ms of ${ranks})`;
-    if (!timeOk(c.latency_ms)) return `baseline case ${name} has no merged time (latency_ms)`;
-    if (!alignmentOk(c.alignment)) return `baseline case ${name} has no alignment method`;
+    if (!c || !timeOk(c.latency_ms)) return `baseline case ${name} has no merged time (latency_ms)`;
   }
   return '';
+}
+function benchRankNote(cases, ranks) {
+  const noRanks = [], noAlign = [];
+  for (const c of Array.isArray(cases) ? cases : []) {
+    const name = c && c.name != null ? c.name : '?';
+    if (!c || !rankTimesOk(c.rank_ms, ranks)) noRanks.push(name);
+    if (!c || !alignmentOk(c.alignment)) noAlign.push(name);
+  }
+  return [noRanks.length ? `no per-rank times (rank_ms of ${ranks}) for case(s) ${noRanks.join(', ')}` : '',
+    noAlign.length ? `no alignment method for case(s) ${noAlign.join(', ')}` : ''].filter(Boolean).join('; ');
 }
 function receiptGap(receipt, ranks, needCurrent) {
   if (!receipt || typeof receipt !== 'object') return 'no timing_receipt';
   if (Number(receipt.world_size) !== ranks) return `timing_receipt world_size is ${receipt.world_size}, not ${ranks}`;
-  if (!alignmentOk(receipt.alignment)) return 'timing_receipt has no alignment method';
   const cases = receipt.cases && typeof receipt.cases === 'object' ? Object.entries(receipt.cases) : [];
   if (!cases.length) return 'timing_receipt has no timed case';
   for (const [sig, c] of cases) {
-    const base = legGap(c && c.baseline, ranks, 'baseline');
-    if (base) return `case ${sig} has ${base}`;
-    const cur = needCurrent ? legGap(c.current || c.candidate, ranks, 'candidate') : '';
-    if (cur) return `case ${sig} has ${cur}`;
+    if (!c || !c.baseline || !timeOk(c.baseline.ms)) return `case ${sig} has no merged baseline time (ms)`;
+    const cur = c.current || c.candidate;
+    if (needCurrent && (!cur || !timeOk(cur.ms))) return `case ${sig} has no merged candidate time (ms)`;
   }
   return '';
+}
+function receiptNote(receipt, ranks, needCurrent) {
+  if (!receipt || typeof receipt !== 'object') return '';
+  const notes = alignmentOk(receipt.alignment) ? [] : ['no alignment method'];
+  const cases = receipt.cases && typeof receipt.cases === 'object' ? Object.entries(receipt.cases) : [];
+  for (const [sig, c] of cases) {
+    if (legGap(c && c.baseline, ranks, 'baseline')) notes.push(`case ${sig}: no per-rank baseline times`);
+    if (needCurrent && legGap(c && (c.current || c.candidate), ranks, 'candidate'))
+      notes.push(`case ${sig}: no per-rank candidate times`);
+  }
+  return notes.join('; ');
 }
 // The Benchmark's complete baseline record in receipt shape: what the lane returns when the director's
 // own receipt is missing or incomplete, so the baseline receipt survives a failed validation.
@@ -817,8 +837,9 @@ function benchReceipt(cases, ranks, source) {
   return {
     world_size: ranks,
     source: `Benchmark baseline_per_case${source ? ` (${source})` : ''}`,
-    alignment: cases[0].alignment,
-    cases: Object.fromEntries(cases.map((c) => [String(c.name), { baseline: { ms: c.latency_ms, rank_ms: c.rank_ms } }])),
+    alignment: cases[0].alignment ?? null,
+    cases: Object.fromEntries(cases.map((c) => [String(c.name),
+      { baseline: { ms: c.latency_ms, rank_ms: c.rank_ms ?? null } }])),
   };
 }
 
@@ -2720,13 +2741,19 @@ if (!bench || !bench.baseline_per_case) {
 }
 const BASELINE_PER_CASE = bench.baseline_per_case;
 const BASELINE_GEOMEAN_MS = bench.baseline_geomean_ms;
-// A multi-rank baseline without per-rank times is one merged number per case: never a reliable baseline.
-const BENCH_RANK_GAP = UT_MR ? benchRankGap(BASELINE_PER_CASE, RANKS) : '';
+// A multi-rank baseline needs a merged time per case; each rank's time and the alignment method are
+// kept when the UT reports them, and their absence is only noted (the merged time is the baseline).
+const BENCH_RANK_GAP = UT_MR ? benchRankGap(BASELINE_PER_CASE) : '';
+const BENCH_RANK_NOTE = UT_MR && !BENCH_RANK_GAP ? benchRankNote(BASELINE_PER_CASE, RANKS) : '';
 if (BENCH_RANK_GAP) {
   bench.reliable = false;
-  bench.notes = `${bench.notes ? `${bench.notes} ` : ''}[lane] multi-GPU baseline without per-rank timing: ` +
+  bench.notes = `${bench.notes ? `${bench.notes} ` : ''}[lane] multi-GPU baseline without a merged time: ` +
     `${BENCH_RANK_GAP}.`;
   log(`Benchmark WARNING: ${RANKS}-GPU job but ${BENCH_RANK_GAP}; baseline marked unreliable.`);
+} else if (BENCH_RANK_NOTE) {
+  bench.notes = `${bench.notes ? `${bench.notes} ` : ''}[lane] multi-GPU baseline uses the merged time; ` +
+    `${BENCH_RANK_NOTE}.`;
+  log(`Benchmark note: ${RANKS}-GPU job, ${BENCH_RANK_NOTE}; merged times used.`);
 }
 log(`Benchmark done. ${bench.num_test_cases || BASELINE_PER_CASE.length} cases, baseline geomean ${BASELINE_GEOMEAN_MS} ms, reliable=${bench.reliable}`);
 
@@ -3963,8 +3990,8 @@ phase('Report');
 const report = await agentT(
   roleAgent('tech_lead', 'report', 'Write the final report and the cumulative final patch.' +
     (UT_MR ? ' Multi-GPU job: copy each case\'s per-rank baseline times and alignment from ' +
-      'BASELINE_PER_CASE (rank_ms, alignment) into its per_case row (baseline_rank_ms, alignment); one ' +
-      'merged time is not the whole result.' : ''), {
+      'BASELINE_PER_CASE (rank_ms, alignment) into its per_case row (baseline_rank_ms, alignment) when ' +
+      'they are there; a case with only the merged time keeps it.' : ''), {
     EVAL_DIR, WORKSPACE: CANONICAL, SKILL_DIR: WORKFLOW_DIR,
     HISTORY: history, FINAL_WINNER: finalWinner, BASELINE_PER_CASE,
     BASELINE_GEOMEAN_MS, CUMULATIVE_SPEEDUP: cumulative,
@@ -3989,22 +4016,27 @@ const validation = await agentT(
   }),
   { phase: 'Validate', label: 'director:validate', schema: UT_MR ? VALIDATE_SCHEMA_MR : VALIDATE_SCHEMA });
 
-// Multi-rank receipt gate (A01). The director owes per-rank times + the alignment method for every
-// timed case: the baseline leg always, the candidate leg once a candidate was produced. A gap flags
-// the result with its reason (a merged time alone is not a multi-rank result). The lane returns the
-// director's receipt, else the Benchmark's complete baseline record, else null.
+// Multi-rank receipt (A01). The director reports the merged time of every timed case (the baseline
+// leg always, the candidate leg once a candidate was produced), plus each rank's time and the
+// alignment method when the UT reports them. Neither an incomplete receipt nor missing per-rank detail
+// changes validation_status: what is missing goes into arbitration_note and timing_receipt_gap. The
+// lane returns the director's receipt when it has the merged times, else the Benchmark's baseline
+// record, else null.
 let TIMING_RECEIPT = null;
 let RECEIPT_GAP = '';
 if (UT_MR) {
   RECEIPT_GAP = validation ? receiptGap(validation.timing_receipt, RANKS, !!finalWinner)
     : 'the director returned no validation';
-  if (validation && RECEIPT_GAP) {
-    validation.validation_status = 'flagged';
+  const note = validation && !RECEIPT_GAP ? receiptNote(validation.timing_receipt, RANKS, !!finalWinner) : '';
+  const missing = [RECEIPT_GAP, note].filter(Boolean).join('; ');
+  if (validation && missing) {
     validation.arbitration_note = `${validation.arbitration_note ? `${validation.arbitration_note} ` : ''}` +
-      `[lane] ${RANKS}-GPU job, flagged: ${RECEIPT_GAP}; one merged time is not a multi-rank result.`;
-    log(`Validate WARNING: ${RANKS}-GPU job but ${RECEIPT_GAP}; validation_status=flagged.`);
+      `[lane] ${RANKS}-GPU job, per-rank receipt incomplete: ${missing}; merged times used.`;
+    log(`Validate note: ${RANKS}-GPU job, ${missing}; validation_status unchanged.`);
   }
-  TIMING_RECEIPT = !RECEIPT_GAP ? validation.timing_receipt
+  if (!RECEIPT_GAP && note) RECEIPT_GAP = note;
+  TIMING_RECEIPT = validation && !receiptGap(validation.timing_receipt, RANKS, !!finalWinner)
+    ? validation.timing_receipt
     : (!BENCH_RANK_GAP ? benchReceipt(BASELINE_PER_CASE, RANKS, bench.rank_timing_source) : null);
 }
 

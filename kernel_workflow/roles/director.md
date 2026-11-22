@@ -442,12 +442,14 @@ no-op. A clean benchmark of the reverted original does not validate the discarde
      `per_rank_us` / 1000, `ms` = `step_us` / 1000, the UT's `candidate` leg as `current`, and
      `alignment` = `timing.alignment` verbatim. The task's own `run/ut_result.json` is the
      extraction-time record, not your measurement.
-   The `baseline` leg is required for every timed case; the `current` leg as well whenever
-   `FINAL_PATCH` is non-empty (record it whenever your run measured it). Also give each `per_case` row
-   its `baseline_rank_ms` / `optimized_rank_ms` and `alignment`. If the UT reports no per-rank times or
-   no alignment method → `validation_status: "flagged"`, `timing_receipt` = the complete part (`null`
-   when a baseline leg is missing), and name what is missing in `arbitration_note`. Never report one
-   merged time as a multi-rank result and never spread one number over the ranks. `timing_basis`
+   - Hand-written UT that reports only a merged time per case (e.g. the slowest rank's): `ms` = that
+     time, `rank_ms` = `null`, `alignment` = `null` unless the UT states one.
+   The merged `ms` of the `baseline` leg is required for every timed case, and of the `current` leg
+   as well whenever `FINAL_PATCH` is non-empty (record it whenever your run measured it). Give each
+   `per_case` row its `baseline_rank_ms` / `optimized_rank_ms` and `alignment` when the UT reports
+   them. Missing per-rank times or alignment do NOT change `validation_status` (decide it by the other
+   checks); write `null` for what the UT does not report and name it in `arbitration_note`. Never
+   spread one merged number over the ranks and never write an alignment the UT did not report. `timing_basis`
    follows the rules of this step (`not_applicable` when `FROZEN_ORACLE` is not `true`).
 7. If `APPLY_TO_ORIGINAL=true` AND status is `accepted`:
    ```bash
