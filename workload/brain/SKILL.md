@@ -103,8 +103,9 @@ Keep provisional search candidates separate from the admitted floor. Schedule fu
 checks and serving comparisons at decision checkpoints; an interim comparison should answer
 a question that can change the search plan. Preserve native adoption criteria, and do not
 reduce search to whatever remains after validating every proposal.
-Reconcile inner and outer execution limits before dispatch; a larger outer allowance
-does not extend an implementation's phase deadline.
+Reconcile nested execution limits and actual checkpoint support before dispatch.
+Price uninterrupted work from scope-matching cost evidence; a larger outer allowance
+does not extend a fixed inner deadline.
 Reallocate from new evidence while preserving explicit task commitments and the configured
 starting route's declared search depth unless evidence supports a better allocation.
 Claims of outperforming another route need matched workload, quality, starting inputs and
