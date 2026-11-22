@@ -53,6 +53,8 @@ preserve the inputs and evidence of in-flight calls.
    and retain asynchronous handles. Dispatch ready independent work on disjoint measurement
    resources as its native delivery permits. Inspect progress, valid measurements and
    remaining budget; a heartbeat alone is insufficient.
+   Confirm steering reached the running method; a changed file is not an acknowledgement.
+   If live updates are unsupported, carry the plan through its next safe native checkpoint.
 4. Read native receipts and `REPORT.md`, including partial reports. State what they answer
    or leave unresolved in the plan's question. Reconcile input versions, observed costs and
    remaining opportunities; record the next bounded action or justified wait/stop in
