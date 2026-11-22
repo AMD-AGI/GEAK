@@ -75,7 +75,10 @@ Keep writable native workspaces and output trees outside input trees that will b
 
 Before replacing a worker, stop new dispatch, let active measurements finish and retain
 the results. Record resource changes and active locations; changed qualification needs
-a separate work root. Scheduler deadlines do not themselves complete a checkpoint.
+a separate work root. Give the supervisor time for in-flight calls and native checkpoints;
+new-work admission and supervision have different deadlines. Verify native recovery can
+join existing workers before renewal; until then monitor those workers directly without
+duplicate dispatch. A scheduler deadline does not itself complete a checkpoint.
 
 ## Starting route and adoption
 
