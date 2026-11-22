@@ -48,8 +48,9 @@ preserve the inputs and evidence of in-flight calls.
    README states the inputs its call needs, and Brain writes them. Reuse qualified
    inputs; investigate missing prerequisites or observed defects within the affected call,
    rather than adding a separate readiness stage to every route.
-3. Bind invocation options to their native prerequisites and actual receipts; similar
-   labels from another module do not prove native preparation ran. Invoke the implementation
+3. Bind invocation options to their native prerequisites and actual receipts. Adapter
+   checks use the actual native argument binding; similar labels from another module
+   do not prove native preparation ran. Invoke the implementation
    and retain asynchronous handles. Dispatch ready independent work on disjoint measurement
    resources as its native delivery permits. Inspect progress, valid measurements and
    remaining budget; a heartbeat alone is insufficient.
