@@ -68,17 +68,17 @@ Wait only for needed inputs/qualification, shared resources or explicit user seq
 do not invent success gates between otherwise independent candidates.
 
 After native materialization or resource isolation, resolve the call's actual output,
-workspace and dependency locations and inspect access from the context that will retain
-evidence or resume it. Record those locations with the continuation; configured paths
-alone do not establish recoverability.
+workspace, dependencies and execution context, including entry/bootstrap settings, and
+inspect access from the context that will retain evidence or resume it. Record these
+with the continuation; configured paths or container metadata alone do not establish recoverability.
 Keep writable native workspaces and output trees outside input trees that will be copied.
 
 Before replacing a worker, stop new dispatch, let active measurements finish and retain
 the results. Record resource changes and active locations; changed qualification needs
 a separate work root. Give the supervisor time for in-flight calls and native checkpoints;
 new-work admission and supervision have different deadlines. Verify native recovery can
-join existing workers before renewal; until then monitor those workers directly without
-duplicate dispatch. A scheduler deadline does not itself complete a checkpoint.
+join existing workers or relaunch retained work before renewal; until then monitor existing
+workers without duplicate dispatch. A scheduler deadline does not itself complete a checkpoint.
 
 ## Starting route and adoption
 
