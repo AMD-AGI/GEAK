@@ -27,6 +27,8 @@ watch-call limit is not the campaign deadline.
 Track each task's planned search depth, observed preparation/search/verification costs and
 next continuation separately from the campaign clock. Call duration or worker credit alone
 does not establish search depth; keep unobserved costs explicit.
+Bind continuation and completion to that declared depth; reconcile idle or unknown credit
+before reducing or ending a task's search.
 
 A user-selected optimization mode is an external file with at most five short, nonempty
 guidance lines. Record its path in `BRIEF.md`. It takes priority over experience and default
