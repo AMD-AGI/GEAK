@@ -845,7 +845,7 @@ class TestParseTorchTrace(_TmpMixin, unittest.TestCase):
 # parse_rocprof_dir
 # --------------------------------------------------------------------------- #
 class TestStepLedger(_TmpMixin, unittest.TestCase):
-    """The unit costs mn.py topn-merge weighs pd_disagg engines by."""
+    """The unit costs mn_traces.py topn-merge weighs pd_disagg engines by."""
 
     def _ledger(self, events):
         _agg, _total, _launches, meta = pp.parse_torch_trace(self._trace_file(events=events))

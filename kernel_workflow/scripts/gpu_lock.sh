@@ -25,21 +25,20 @@ set -euo pipefail
 # defaultable, so it names no ids.
 GPU_SPEC="${1:?Usage: gpu_lock.sh <gpu_id|pool|group:<ids>|pool:<n>:<ids>> <command...>   (ids = comma list of the GPUs THIS run was allocated)}"
 shift
-# Multinode: the pin of the run on this machine (mn.py active-pin), its shared card leases and
-# the run directory's copy of these tools. The pointer test only skips the python start on a
-# machine no multinode run has used. On a node (GEAK_MN_HOP) there is no mn.py: the driver's
-# copy forwarded the command here and handed over the lease directory.
+# Multinode: the pin GEAK_MN_STATE names (mn.py active-pin), its shared card leases and the run
+# directory's copy of these tools. On a node (GEAK_MN_HOP) there is no mn.py: the driver's copy
+# forwarded the command here and handed over the lease directory.
 _MN_PY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../e2e_workflow/scripts/multi_node/mn.py"
 _MN_PIN="" _MN_LEASE_DIR="" _MN_TOOLS=""
 if [ -n "${GEAK_MN_HOP:-}" ]; then
     _MN_LEASE_DIR="${GEAK_MN_LEASE_DIR:-}"
-elif [ -f "$_MN_PY" ] && { [ -n "${GEAK_MN_STATE:-}" ] || [ -f /tmp/geak_mn/state_path ]; }; then
+elif [ -f "$_MN_PY" ] && [ -n "${GEAK_MN_STATE:-}" ]; then
     IFS=$'\t' read -r _MN_PIN _MN_LEASE_DIR _MN_TOOLS < <(python3 "$_MN_PY" active-pin --lease-dir 2>/dev/null) || true
 fi
 # The driver of a multinode run sees no GPU: every command runs on a pinned node, "<engine>:<spec>"
 # (e.g. decode:3, decode:group:0,1) on that engine's machine and a bare spec on the master.
 # Forwarded before anything runs here, to the run directory's copy with the bare spec: the sources
-# are checked once, there. GEAK_MN_STATE is explicit: here the pin may come from the pointer.
+# are checked once, there.
 # group: and pool: start a multi-GPU spec, never an engine.
 if [ -n "$_MN_PIN" ]; then
     if [ -z "$_MN_TOOLS" ]; then
@@ -57,7 +56,7 @@ fi
 case "$GPU_SPEC" in
     group:*|pool:*) ;;
     *:*)
-        echo "ERROR: gpu_lock.sh: '$GPU_SPEC' names an engine, but no multinode run owns this machine." >&2
+        echo "ERROR: gpu_lock.sh: '$GPU_SPEC' names an engine, but GEAK_MN_STATE names no multinode pin." >&2
         exit 2
         ;;
 esac

@@ -43,7 +43,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # as the run directory's copy, whose gpu_lock.sh is its sibling there. On a node (GEAK_MN_HOP) it
 # runs as is.
 _MN_PY="$SCRIPT_DIR/../../e2e_workflow/scripts/multi_node/mn.py"
-if [ -z "${GEAK_MN_HOP:-}" ] && [ -f "$_MN_PY" ] && { [ -n "${GEAK_MN_STATE:-}" ] || [ -f /tmp/geak_mn/state_path ]; }; then
+if [ -z "${GEAK_MN_HOP:-}" ] && [ -f "$_MN_PY" ] && [ -n "${GEAK_MN_STATE:-}" ]; then
     _MN_PIN="" _MN_LEASE_DIR="" _MN_TOOLS=""
     IFS=$'\t' read -r _MN_PIN _MN_LEASE_DIR _MN_TOOLS < <(python3 "$_MN_PY" active-pin --lease-dir 2>/dev/null) || true
     if [ -n "$_MN_PIN" ]; then

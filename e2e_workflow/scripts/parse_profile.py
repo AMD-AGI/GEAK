@@ -460,7 +460,7 @@ IDLE_GAP_STEPS = 10
 
 
 def _step_ledger(pref, dec, phase_us, unspanned=()):
-    """Per-phase GPU time a pd_disagg merge weighs the engines by (mn.py topn-merge), or why there is none.
+    """Per-phase GPU time a pd_disagg merge weighs the engines by (mn_traces.py topn-merge), or why there is none.
 
     Prefill: kernel time inside P spans (an MTP/EAGLE draft's re-read of the same tokens included).
     Decode: every kernel from the first D span to the last that is not under a P span (the draft

@@ -178,20 +178,28 @@ that one directory at the same path. A `multinode` field in the handoff is not r
 MULTI_NODE_STATE=/shared/run1/node_state.json python interface/run_e2e.py handoff.json result.json
 ```
 
-**From Claude Code.** Name the machines in the prompt as a `multinode` block; with no
-`launch_command` on the nodes, GEAK writes the launch commands itself. The driver must see no GPU,
-so on a driver that has GPUs, start Claude with them hidden (`run_e2e.py` does this for the
-orchestrator entry):
+**From Claude Code.** Pick a run name and start Claude with its pin path and the driver's GPUs hidden:
+`GEAK_MN_STATE=<shared_fs>/pins/<run>/mn_state.json` is how every GPU command of the run finds
+the machines, and `mn.py check` refuses a prompt run without it.
 
 ```bash
+GEAK_MN_STATE=/shared/geak/pins/<run>/mn_state.json \
 ROCR_VISIBLE_DEVICES= HIP_VISIBLE_DEVICES= CUDA_VISIBLE_DEVICES= IS_SANDBOX=1 claude --dangerously-skip-permissions
 ```
 
+Then name the machines in the prompt; GEAK writes the launch commands itself. The shared
+filesystem and the eval dir (`/shared/geak/exp/<run>`) follow from the pin path.
+
 ```
-use path_to_GEAK/e2e_workflow to optimize inference for /models/Qwen3-8B-FP8, sglang, ISL/OSL=1024/1024,
-conc=8, tp=4, multinode={"topology": "pd_disagg", "shared_fs": "/shared/geak",
-"nodes": [{"host": "10.0.0.1", "role": "prefill"}, {"host": "10.0.0.2", "role": "decode"}]}
+use path_to_GEAK/e2e_workflow to optimize inference for /models/Qwen3.5-27B-FP8, sglang, ISL/OSL=1024/1024,
+conc=8, prefill on 10.0.0.1 with tp=8 and decode on 10.0.0.2 with tp=8
 ```
+
+Before the Workflow call the main session follows
+[`roles/_fragments/multinode_prompt.md`](e2e_workflow/roles/_fragments/multinode_prompt.md): it
+turns that into a `multinode` block, runs `mn.py check --prompt` on it and passes what the check
+prints. A refusal lists every problem and starts nothing; the workflow refuses a `multinode` block
+without the check's verdict.
 
 See [`e2e_workflow/docs/multi_node.md`](e2e_workflow/docs/multi_node.md) for every field of the
 block (ssh user, key, container prefix), the environment check, and the failure messages.

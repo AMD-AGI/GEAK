@@ -5,13 +5,15 @@ Read this only when `MN_STATE` is in your inputs.
 This run serves ONE instance on `MN_NODES` machines (`SERVING_TOPOLOGY`), pinned in `MN_STATE`.
 bench_e2e.sh adds `BENCH_LAUNCHER=multinode` / `GEAK_MN_STATE` itself and refuses any other launcher
 here. Each machine's TP and cards come from the pin (`MN_TP_BY_ROLE`, when present, is each PD
-engine's TP).
+engine's TP). So the SERVING `GPU` names ONE host's ids and lists fewer ids than `TP` when TP spans
+machines: pass it VERBATIM, never re-derive it from TP.
 
 You and every Bash command you run are on the driver: it sees NO GPU and the nodes have no GEAK code.
 Any card the driver has is not this run's: its rocm-smi/amd-smi/rocminfo on PATH are stubs, never
 call them by absolute path.
 Keep files on the shared fs (`MN_SHARED_FS`, same path on the nodes), not /tmp: a node sees only that
-and its own image. gpu_lock.sh and profile_kernel.sh run on a node (the master for a bare id, that
+and its own image, so an installed package (`/sgl-workspace`, site-packages) is a per-machine copy and
+a kernel edit belongs in the task workspace on the shared fs, never in place. gpu_lock.sh and profile_kernel.sh run on a node (the master for a bare id, that
 engine's machine for `<engine>:<id>`, e.g. `decode:3`). Anything else needing a GPU or a node
 (rocm-smi) goes through the `MN_GPU_EXEC` command from your inputs:
 

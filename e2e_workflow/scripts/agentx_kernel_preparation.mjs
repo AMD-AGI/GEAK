@@ -36,10 +36,10 @@ async function readPreparedDocument(root, delivery, deliveryPath, engines = []) 
   const workloadPath = await within(root, delivery.workload_json);
   const rankingPath = await within(root, delivery.ranking_json);
   const ranking = JSON.parse(await fs.readFile(rankingPath, 'utf8'));
-  // PD: the cross-engine denominator is `mn.py pd-mass --apply`'s (both engines' GPU-time
+  // PD: the cross-engine denominator is `mn_traces.py pd-mass --apply`'s (both engines' GPU-time
   // mass x ranks) -- never one the extraction agent chose, and never a graded axis.
   if (engines.length && (ranking.denominators || {}).rule !== 'gpu_time_mass')
-    throw new Error('PD kernel_ranking.json denominators were not written by `mn.py pd-mass --apply`; ' +
+    throw new Error('PD kernel_ranking.json denominators were not written by `mn_traces.py pd-mass --apply`; ' +
       'run it on the ranking before select_targets.py');
   const output = { head_candidates: [], kernel_candidates: [], config_directions: [],
     profile_workload_json: workloadPath, kernel_ranking_json: rankingPath,
@@ -74,7 +74,10 @@ async function readPreparedDocument(root, delivery, deliveryPath, engines = []) 
       const share = evidence.selection_pct_gpu_time;
       if (!Number.isFinite(share) || share < 0 || share > 100)
         throw new Error('selected kernel has no attributed cost in its saved ranking');
-      const candidate = { ...kernel, short_name: label, entity_kind: 'gpu_kernel',
+      // PD: a kernel traced on both engines is shared, whatever engine its declaration names.
+      const phases = anchor?.share_of_phase_pct || {};
+      const shared = engines.length && phases.PREFILL > 0 && phases.DECODE > 0;
+      const candidate = { ...kernel, ...(shared ? { engine: '' } : {}), short_name: label, entity_kind: 'gpu_kernel',
         target_callable: result.target_callable,
         op_kind: opKind(kernel, result), kernel_extraction: evidence,
         pct_gpu_time: share, source_delivery_required: true };

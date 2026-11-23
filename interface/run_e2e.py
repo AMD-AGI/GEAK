@@ -733,22 +733,15 @@ def _multinode_block(ps_args: dict) -> dict:
 
 
 def _mn_relayed(block: dict) -> dict:
-    """``block`` as the prompt carries it: without launch commands, which stay in the pin ``mn.py check``
-    wrote. The main session's relay of the prompt has dropped their shell quoting and whole fields, and
-    the workflow reads none of them: it serves through the pin."""
-    def bare(n):
-        return {k: v for k, v in n.items() if k != "launch_command"} if isinstance(n, dict) else n
-    out = {**block, "nodes": [bare(n) for n in block.get("nodes") or []], "commands_in_pin": True}
-    if isinstance(block.get("router"), dict):
-        out["router"] = bare(block["router"])
-    return out
+    """``block`` without its launch commands (mn.py relayed)."""
+    return _mn_module().relayed(block)
 
 
 def _multinode_check(ps_args: dict) -> dict:
     """``mn.py check`` on the workflow's block: probes the machines, writes the pin, returns the verdict.
 
-    Run here, not in the workflow: a Workflow script cannot spawn a process. The pointer it
-    writes names this process as the pin's owner, so the pin counts for exactly this run.
+    Run here, not in the workflow: a Workflow script cannot spawn a process. The pin reaches
+    the workflow only as GEAK_MN_STATE in this process's environment (apply_bench_launcher).
     The caller hands over its machines with its own service still up: the check stops it
     (GEAK_MN_TAKEOVER, default 1 here) and every leg relaunches from the pods' commands."""
     block = _multinode_block(ps_args)
@@ -1109,9 +1102,10 @@ def map_args(
         "exp_root": h["exp_root"],
     }
     # PD: a stack accepted on ONE engine seeds that engine alone.
+    pd = _multinode(h).get("topology") == "pd_disagg"
     for src, dst in (("accepted_flags_by_role", "initial_extra_server_args_by_role"),
                      ("accepted_env_by_role", "initial_extra_env_by_role")):
-        by_role = h.get(src)
+        by_role = h.get(src) if pd else None
         if isinstance(by_role, dict):
             seeded = {r: str(by_role.get(r) or "").strip() for r in ("prefill", "decode")}
             if any(seeded.values()):
@@ -1664,12 +1658,13 @@ def apply_bench_client(h: dict) -> str:
     return client
 
 
-def bench_client_host() -> str:
-    """Where the bench client ran: only the backend's own client, which imports the serving
-    framework, runs on rank0 of a multinode run (adapters/launchers/multinode.sh)."""
+def bench_client_host() -> dict:
+    """``result.json``'s ``bench_client_host`` on a multinode run, else {}: only the backend's own
+    client, which imports the serving framework, runs on rank0 (adapters/launchers/multinode.sh)."""
+    if os.environ.get("BENCH_LAUNCHER", "") != "multinode":
+        return {}
     client = os.environ.get("BENCH_CLIENT", "native").strip().lower()
-    multinode = os.environ.get("BENCH_LAUNCHER", "") == "multinode"
-    return "rank0" if client == "native" and multinode else "driver"
+    return {"bench_client_host": "rank0" if client == "native" else "driver"}
 
 
 # metric_basis -> the E2E_METRIC bench_summarize.py measures it under. The two
@@ -2503,8 +2498,8 @@ def apply_bench_launcher(h: dict, backend: str | None = None) -> str:
             raise SystemExit("!!! BENCH_LAUNCHER=multinode needs MULTI_NODE_STATE (the caller's node_state.json)")
     if mn:
         # Every server starts on the pinned nodes (each pod's launch_command, wrapped per node
-        # for magpie). GEAK_MN_STATE is the pin: bench_e2e.sh and gpu_lock.sh read it
-        # through `mn.py active-pin`.
+        # for magpie). GEAK_MN_STATE is the pin: bench_e2e.sh, gpu_lock.sh and
+        # profile_kernel.sh are multinode only through it.
         launcher = "multinode"
         os.environ["GEAK_MN_STATE"] = _mn_spec(h)["state"]
         # This machine drives the nodes and serves nothing: no GPU command may land on a card
@@ -5007,7 +5002,7 @@ def normalize_result(h: dict, wf: dict) -> dict:
         "workload_comparability": workload_comparability,
         # Measurement-protocol provenance so the comparison is self-describing.
         "bench_client": os.environ.get("BENCH_CLIENT", "native"),
-        "bench_client_host": bench_client_host(),
+        **bench_client_host(),
         "bench_protocol": h.get("bench_protocol") or {},
         "baseline_config": {
             "accepted_flags": h.get("accepted_flags", "") or "",
@@ -5308,8 +5303,8 @@ def normalize_result(h: dict, wf: dict) -> dict:
         # client to Hyperloom/Magpie (benchmark_serving.py); "native" => the
         # backend's own client (small cross-harness differences may remain).
         "bench_client": os.environ.get("BENCH_CLIENT", "native"),
-        # "driver" (where GEAK runs, as Hyperloom's rebench) or "rank0" (native on multinode).
-        "bench_client_host": bench_client_host(),
+        # Multinode only: "driver" (where GEAK runs, as Hyperloom's rebench) or "rank0" (native).
+        **bench_client_host(),
         # Measurement protocol forwarded from the handoff, surfaced at TOP LEVEL
         # (not only inside baseline_basis) so a sweep/validated reuse can pin the
         # SAME num_prompts / random_range_ratio / num_warmups / seed the headline

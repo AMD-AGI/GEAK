@@ -1,15 +1,16 @@
-"""Offline checks on a finished multi-node leg: no cluster, no ssh.
+"""Offline checks on a finished multi-node leg: no cluster, no ssh (see ../SKILL.md).
 
-    mn.py trace-gate      validate the per-rank trace set before parsing
-    mn.py topn-merge      fold a pd_disagg run's per-engine Top-Ns into one
-    mn.py pd-mass         rewrite an AgentX pd_disagg ranking on both engines' GPU-time mass
-    mn.py pd-points       plan a fixed-length pd_disagg run's sampling points from its engine logs
+    mn_traces.py trace-gate   validate the per-rank trace set before parsing
+    mn_traces.py topn-merge   fold a pd_disagg run's per-engine Top-Ns into one
+    mn_traces.py pd-mass      rewrite an AgentX pd_disagg ranking on both engines' GPU-time mass
+    mn_traces.py pd-points    plan a fixed-length pd_disagg run's sampling points from its engine logs
 
-mn.py is the entry point for both; this module reads files and writes reports only.
+Reads files and writes reports only; stdlib only.
 """
 from __future__ import annotations
 
 import argparse
+import datetime
 import glob
 import gzip
 import json
@@ -18,12 +19,21 @@ import re
 import subprocess
 import sys
 
-# mn imports this module lazily (its _offline), so importing mn back is no cycle.
-from mn import _utc, _write_json
+
+def _utc() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _write_json(path: str, doc: dict) -> str:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(doc, f, indent=2, sort_keys=True)
+    os.replace(path + ".tmp", path)
+    return path
 
 
 # --------------------------------------------------------------------------
-# TRACE GATE  (mn.py trace-gate)
+# TRACE GATE  (mn_traces.py trace-gate)
 # --------------------------------------------------------------------------
 # Every rank's trace lands in one directory, where an `ls -t | head -1` pick is an
 # NFS flush race. The gate VERIFIES every expected TP rank, both nodes, complete
@@ -288,7 +298,7 @@ def cmd_trace_gate(argv: list) -> int:
 
 
 # --------------------------------------------------------------------------
-# TOPN MERGE  (mn.py topn-merge)
+# TOPN MERGE  (mn_traces.py topn-merge)
 # --------------------------------------------------------------------------
 # Fold the per-engine Top-Ns into the ONE profile_topN.json downstream routes on,
 # as a WEIGHTED UNION: a kernel at 30% of prefill, on an engine that costs 40% of
@@ -378,7 +388,7 @@ def pd_analytic(docs: dict, ranks: dict) -> dict:
 
 
 # --------------------------------------------------------------------------
-# PD MASS  (mn.py pd-mass)
+# PD MASS  (mn_traces.py pd-mass)
 # --------------------------------------------------------------------------
 # AgentX kernel extraction on pd_disagg. coverage_ledger.py's mass is already each
 # engine's GPU time over the whole replay (a point's per-step kernel time times
@@ -449,7 +459,7 @@ def apply_pd_mass(ranking_path: str, mass: dict) -> dict:
 
 
 def cmd_pd_mass(argv: list) -> int:
-    ap = argparse.ArgumentParser(prog="mn.py pd-mass")
+    ap = argparse.ArgumentParser(prog="mn_traces.py pd-mass")
     ap.add_argument("--coverage", action="append", required=True,
                     help="coverage_ledger.py's coverage.json (repeatable: one per engine's ledger)")
     ap.add_argument("--roles", action="append", required=True,
@@ -471,7 +481,7 @@ def cmd_pd_mass(argv: list) -> int:
 
 
 # --------------------------------------------------------------------------
-# PD POINTS  (mn.py pd-points)
+# PD POINTS  (mn_traces.py pd-points)
 # --------------------------------------------------------------------------
 # Fixed-length pd_disagg prices its engines the way AgentX does: the kernel-extract
 # skill's planner picks sampling points from each engine's own baseline log (PREFILL
@@ -511,7 +521,7 @@ def pd_points(engine_logs: dict, skill_root: str, per_phase: int, out_dir: str) 
             raise ValueError(f"{log} has no sglang server-args line with decode_log_interval")
         paths = {k: os.path.join(out_dir, f"{k}_{engine}.json") for k in ("server_info", "observed", "points")}
         _write_json(paths["server_info"], info)
-        for cmd in ([sys.executable, os.path.join(scripts, "observed_workload.py"), "--log", log,
+        for cmd in ([sys.executable, os.path.join(scripts, "observed_workload.py"), "--mode", "multinode", "--log", log,
                      "--server-info", paths["server_info"], "--out", paths["observed"]],
                     [sys.executable, os.path.join(scripts, "plan_sampling_points.py"),
                      "--observed", paths["observed"], "-n", str(2 * per_phase),
@@ -534,7 +544,7 @@ def pd_points(engine_logs: dict, skill_root: str, per_phase: int, out_dir: str) 
 
 
 def cmd_pd_points(argv: list) -> int:
-    ap = argparse.ArgumentParser(prog="mn.py pd-points")
+    ap = argparse.ArgumentParser(prog="mn_traces.py pd-points")
     ap.add_argument("--engine-log", action="append", required=True, metavar="NAME=PATH",
                     help="one engine's server log from the baseline leg (prefill=, decode=)")
     ap.add_argument("--skill-root", required=True, help="the kernel-extract skill directory")
@@ -707,3 +717,22 @@ def cmd_topn_merge(argv: list) -> int:
     if not args.out:
         print(markdown)
     return 0
+
+
+COMMANDS = {
+    "trace-gate": cmd_trace_gate,
+    "topn-merge": cmd_topn_merge,
+    "pd-mass": cmd_pd_mass,
+    "pd-points": cmd_pd_points,
+}
+
+
+def main(argv: list) -> int:
+    if not argv or argv[0] not in COMMANDS:
+        sys.stderr.write("usage: mn_traces.py {%s} [options]\n" % "|".join(COMMANDS))
+        return 2
+    return COMMANDS[argv[0]](argv[1:])
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

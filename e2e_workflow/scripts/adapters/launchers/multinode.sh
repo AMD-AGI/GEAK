@@ -11,7 +11,7 @@
 # caller's provided launch script.
 #
 # Requires the pin the workflow's Setup writes from args.multinode (mn.py check ->
-# mn_state.json, as GEAK_MN_STATE; bench_e2e.sh fills it in from `mn.py active-pin`),
+# mn_state.json, as GEAK_MN_STATE; bench_e2e.sh exports it),
 # so the baseline and candidate legs land on the same hardware.
 #
 # HOST/PORT and the serving lock are set at SOURCE time: bench_e2e.sh reads them
@@ -27,6 +27,8 @@ if [ ! -f "$_MN_DIR/mn.py" ]; then
   echo "    The workflow's Setup writes it from args.multinode (mn.py check)." >&2
   exit 3
 fi
+# The trace checks are the multinode-traces skill, beside scripts/ in the same GEAK tree.
+_MN_TRACES="$_MN_DIR/../../knowledge/multinode_skills/multinode-traces/scripts/mn_traces.py"
 
 # The pin's facts (_MN_HOST/PORT/TOPOLOGY/NNODES/SHARED_FS/LOCK_KEY/PD_ENGINES/LEASES).
 # The client dials the master's cluster IP. pd_disagg: one "role=url" line per engine;
@@ -229,7 +231,7 @@ adapter_probe_after() {
     _role=decode; [ "$1" = "PREFILL" ] && _role=prefill
     _ranks="$(_mn_engine "$_role" tp)"
   fi
-  python3 "$_MN_DIR/mn.py" trace-gate --profile-dir "$2" --expect-ranks "${_ranks:-$TP}" \
+  python3 "$_MN_TRACES" trace-gate --profile-dir "$2" --expect-ranks "${_ranks:-$TP}" \
     --nodes "$_MN_NNODES" \
     ${_role:+--launch-json "${OUT_DIR:-.}/mn_launch.json" --role "$_role"}
 }
@@ -296,7 +298,7 @@ adapter_profile_window() {
   local _launch_json="${OUT_DIR:-.}/mn_launch.json"
   [ "$_MN_TOPOLOGY" = "pd_disagg" ] && [ -f "$_launch_json" ] || _launch_json=""
   PROFILE_DIR="$PROFILE_DIR" TP="$TP" \
-    python3 "$_MN_DIR/mn.py" trace-gate \
+    python3 "$_MN_TRACES" trace-gate \
       --profile-dir "$PROFILE_DIR" --expect-ranks "$_expect" \
       --nodes "$_MN_NNODES" \
       ${_launch_json:+--launch-json "$_launch_json" --window-s "${PROFILE_WINDOW_SEC:-20}"}

@@ -892,8 +892,8 @@ InferenceX checkout is discoverable via `INFERENCEX_PATH`, else `native`) and
 exports `BENCH_CLIENT` + `INFERENCEX_PATH` so every `bench_e2e.sh` the agents run
 inherits it. On one host the profile-round fallback (`PROF=1`) delegates back to the
 backend's native bench; on a multinode run it is a fresh load under the launcher's
-window. The chosen client is echoed in `result.bench_client` (where it ran in
-`result.bench_client_host`: `driver` | `rank0`), and
+window. The chosen client is echoed in `result.bench_client` (on a multinode run,
+where it ran in `result.bench_client_host`: `driver` | `rank0`), and
 the sweep reuse path carries it forward so sweep points use the same client.
 
 ### Server-LAUNCHER adapter (closes the launch-recipe residual)

@@ -80,7 +80,8 @@ on the machines `MULTI_NODE_STATE` names, or a prompt's `args.multinode` block (
 with the same adapter, bench client and acceptance contract as one host; only where the server
 starts and where the client runs change. `scripts/multi_node/mn.py check` probes the machines and
 writes a pin before Setup, and every later leg serves from that pin. See
-[`docs/multi_node.md`](docs/multi_node.md).
+[`docs/multi_node.md`](docs/multi_node.md); a prompt-started run follows
+[`roles/_fragments/multinode_prompt.md`](roles/_fragments/multinode_prompt.md).
 
 ## The three backend dimensions (per spec)
 A kernel's backend can be changed from three places, in increasing cost (knob names are backend-

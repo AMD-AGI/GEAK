@@ -20,7 +20,9 @@ from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS_DIR = os.path.dirname(HERE)
 MN = os.path.join(SCRIPTS_DIR, "multi_node")
+TRACES = os.path.join(os.path.dirname(SCRIPTS_DIR), "knowledge", "multinode_skills", "multinode-traces", "scripts")
 sys.path.insert(0, MN)
+sys.path.insert(0, TRACES)
 
 COLLECTIVE = "ncclDevKernel_AllReduce_Sum_f32_RING_LL(ncclDevKernelArgsStorage)"
 
@@ -330,14 +332,16 @@ class CheckTest(unittest.TestCase):
         self.sent.append((node, args[0]))
         return dict(self.run_reply(node, args[0]))
 
-    def check(self, here=None, argv=()):
+    def check(self, here=None, pin_env=None, argv=()):
         with contextlib.ExitStack() as stack:
             stack.enter_context(fake_ssh(self.handler))
             stack.enter_context(on_machine(*self.here))
             stack.enter_context(mock.patch.object(mn, "HERE", here or self.tmp))
-            stack.enter_context(mock.patch.object(mn, "ACTIVE_PIN", os.path.join(self.tmp, "state_path")))
             stack.enter_context(mock.patch.dict(os.environ, {"GEAK_MN_SPEC": json.dumps({**self.spec, "tp": self.tp}),
                                                              "BENCH_CLIENT": self.client}))
+            os.environ.pop("GEAK_MN_STATE", None)
+            if pin_env is not None:
+                os.environ["GEAK_MN_STATE"] = pin_env
             stack.enter_context(mock.patch.object(
                 mn, "prove_shared", lambda s, nodes: {"per_node": [{"ok": True} for _ in nodes]}))
             stack.enter_context(mock.patch.object(
@@ -347,7 +351,9 @@ class CheckTest(unittest.TestCase):
                 mn, "inferencex_client_error", lambda model: self.ix_models.append(model) or self.ix_error))
             with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
                 rc = mn.cmd_check(list(argv))
-        self.verdict = json.loads(out.getvalue().splitlines()[-1][len(mn.CHECK_TAG):])
+        tagged = {tag: json.loads(ln[len(tag):]) for ln in out.getvalue().splitlines()
+                  for tag in (mn.CHECK_TAG, mn.PROMPT_TAG) if ln.startswith(tag)}
+        self.verdict, self.prompt_args = tagged[mn.CHECK_TAG], tagged.get(mn.PROMPT_TAG)
         return rc, err.getvalue()
 
     def pin(self):
@@ -366,6 +372,74 @@ class CheckTest(unittest.TestCase):
         self.here = ("node-c489/b", ("ens50f0", "10.10.0.32", 24))
         rc, err = self.check()
         self.assertEqual(rc, 0, err)
+
+    def prompt_check(self, pin_env, **spec):
+        """check --prompt as the main session runs it: no state in the spec, the pin is GEAK_MN_STATE."""
+        spec = {"shared_fs": self.tmp, "work_dir": os.path.join(self.tmp, "exp", "r1"), **spec}
+        self.spec = {"nodes": ["10.10.0.166", "10.10.0.32"], **{k: v for k, v in spec.items() if v is not None}}
+        os.makedirs(os.path.join(self.tmp, "exp", "r1"), exist_ok=True)
+        gpu = {"gfx": "gfx942", "target": "unknown", "marketing_name": "AMD Instinct MI300X", "physical_cu_count": 304}
+        self.probes = [{**FC54, "gpu": gpu}, {**C489, "gpu": gpu}]
+        with mock.patch.object(mn, "stage_tools", lambda work_dir: os.path.join(work_dir, ".mn_tools")):
+            return self.check(pin_env=pin_env, argv=["--prompt"])
+
+    def test_prompt_check_pins_at_geak_mn_state_and_prints_the_workflow_args(self):
+        pin = os.path.join(self.tmp, "pins", "r1", "mn_state.json")
+        rc, err = self.prompt_check(pin)
+        self.assertEqual(rc, 0, err)
+        with open(pin, encoding="utf-8") as f:
+            self.assertEqual([n["ip"] for n in json.load(f)["nodes"]], ["10.10.0.166", "10.10.0.32"])
+        self.assertTrue(os.path.isfile(os.path.join(self.tmp, "pins", "r1", "mn_check.json")))
+        a = self.prompt_args
+        self.assertEqual([a["tp"], a["eval_dir"], a["expected_gfx"], a["expected_target"]],
+                         [16, self.spec["work_dir"], "gfx942", "unknown"])
+        self.assertEqual(a["multinode"], {"nodes": ["10.10.0.166", "10.10.0.32"], "shared_fs": self.tmp,
+                                          "state": pin, "commands_in_pin": True})
+        self.assertEqual([a["multinode_check"]["verdict"], a["multinode_check"]["spec"]["state"]], ["ok", pin])
+
+    def test_prompt_check_refuses_without_a_matching_conventional_pin(self):
+        good = os.path.join(self.tmp, "pins", "r1", "mn_state.json")
+        cases = {
+            None: "GEAK_MN_STATE is not set: start Claude with GEAK_MN_STATE=",
+            os.path.join(self.tmp, "mn_state.json"): "is not " + f"{self.tmp}/pins/<run>/mn_state.json",
+            os.path.join(self.tmp, "pins", "r 1", "mn_state.json"): "<run>: letters, digits",
+            os.path.join(self.tmp, "pins", "r1", "pin.json"): "is not " + f"{self.tmp}/pins/<run>/mn_state.json",
+        }
+        for env, shown in cases.items():
+            rc, _ = self.prompt_check(env)
+            self.assertEqual([rc, self.verdict["verdict"], self.prompt_args], [2, "refused", None], env)
+            self.assertIn(shown, self.verdict["problems"][0], env)
+        rc, _ = self.prompt_check(good, state=os.path.join(self.tmp, "pins", "r2", "mn_state.json"))
+        self.assertIn("is not GEAK_MN_STATE=", self.verdict["problems"][0])
+
+    def test_prompt_check_takes_shared_fs_and_eval_dir_from_the_pin_path(self):
+        pin = os.path.join(self.tmp, "pins", "r1", "mn_state.json")
+        rc, err = self.prompt_check(pin, shared_fs=None, work_dir=None)
+        self.assertEqual(rc, 0, err)
+        a = self.prompt_args
+        self.assertEqual([os.path.normpath(a["eval_dir"]), os.path.normpath(a["multinode"]["shared_fs"])],
+                         [os.path.join(self.tmp, "exp", "r1"), os.path.normpath(self.tmp)])
+        rc, _ = self.prompt_check(pin, shared_fs=os.path.join(self.tmp, "exp"), work_dir=None)
+        self.assertIn("is not " + os.path.join(self.tmp, "exp") + "/pins/<run>/mn_state.json",
+                      self.verdict["problems"][0])
+
+    def test_prompt_check_keeps_another_runs_pin_and_reruns_its_own(self):
+        pin = os.path.join(self.tmp, "pins", "r1", "mn_state.json")
+        os.makedirs(os.path.dirname(pin))
+        with open(pin, "w", encoding="utf-8") as f:
+            json.dump({"nodes": [{"ip": "10.9.9.1"}, {"ip": "10.9.9.2"}]}, f)
+        rc, _ = self.prompt_check(pin)
+        self.assertEqual(rc, 2)
+        self.assertIn("already pins other machines (10.9.9.1, 10.9.9.2)", self.verdict["problems"][0])
+        with open(pin, "w", encoding="utf-8") as f:
+            json.dump({"nodes": [{"ip": "10.10.0.32"}, {"ip": "10.10.0.166"}]}, f)
+        rc, err = self.prompt_check(pin)
+        self.assertEqual(rc, 0, err)
+
+    def test_a_check_without_prompt_ignores_geak_mn_state(self):
+        rc, err = self.check(pin_env=os.path.join(self.tmp, "elsewhere.json"))
+        self.assertEqual([rc, self.prompt_args], [0, None], err)
+        self.assertTrue(os.path.isfile(self.spec["state"]))
 
     def test_takeover_stops_the_service_on_every_machine_before_the_probe(self):
         self.provide()
@@ -550,30 +624,24 @@ class CheckTest(unittest.TestCase):
         self.assertEqual([n["node_id"] for n in state["nodes"]], ["node-fc54/b", "node-c489/b"])
         self.assertEqual([(n["tp"], n["gpus"]) for n in state["nodes"]], [(16, 8), (16, 8)])
 
-    def test_a_passed_check_hands_back_the_spec_and_claims_the_machine(self):
-        rc, err = self.check()
+    def test_a_passed_check_hands_back_the_spec_and_marks_nothing_machine_wide(self):
+        with mock.patch.object(mn, "_write_json", wraps=mn._write_json) as written:
+            rc, err = self.check()
         self.assertEqual(rc, 0, err)
         self.assertEqual(self.verdict["verdict"], "ok")
         self.assertEqual(self.verdict["spec"]["state"], self.spec["state"])
         self.assertEqual(self.verdict["spec"]["layout"], [{"tp": 16, "gpus": 8}, {"tp": 16, "gpus": 8}])
-        pointer = json.load(open(os.path.join(self.tmp, "state_path")))
-        self.assertEqual((pointer["state"], pointer["pid"]), (self.spec["state"], os.getppid()))
-        self.assertEqual(pointer["mn_py"], os.path.join(self.tmp, "mn.py"))
         self.assertEqual(json.load(open(os.path.join(self.tmp, "mn_check.json")))["verdict"], "ok")
         self.assertEqual([n["ngpu"] for n in self.pin()["nodes"]], [8, 8])
+        paths = [c.args[0] for c in written.call_args_list]
+        self.assertTrue(paths and all(mn.under(p, self.tmp) for p in paths), paths)
+        self.assertNotIn("GEAK_MN_STATE", os.environ, "the check sets no pin for its caller")
 
-    def test_owner_claude_hands_the_pin_to_the_claude_code_process(self):
-        with mock.patch.object(mn, "claude_ancestor", lambda: 4242):
-            rc, err = self.check(argv=["--owner", "claude"])
+    def test_the_callers_pin_environment_is_not_required(self):
+        rc, err = self.check()
         self.assertEqual(rc, 0, err)
-        self.assertEqual(json.load(open(os.path.join(self.tmp, "state_path")))["pid"], 4242)
-
-    def test_owner_claude_without_one_is_refused(self):
-        with mock.patch.object(mn, "claude_ancestor", lambda: 0):
-            rc, err = self.check(argv=["--owner", "claude"])
-        self.assertEqual(rc, 2)
-        self.assertIn("no Claude Code process above this shell", err)
-        self.assertFalse(os.path.exists(os.path.join(self.tmp, "state_path")))
+        rc, err = self.check(pin_env="/other/mn_state.json")
+        self.assertEqual(rc, 0, err)
 
     def test_one_node_is_a_single_machine_server(self):
         self.spec["nodes"], self.tp = ["10.10.0.166"], 8
@@ -621,7 +689,6 @@ class CheckTest(unittest.TestCase):
         self.assertEqual(report["verdict"], "refused")
         self.assertIn("50000 of 192000 MiB", report["problems"][0])
         self.assertFalse(os.path.exists(self.spec["state"]))
-        self.assertFalse(os.path.exists(os.path.join(self.tmp, "state_path")), "a refusal claims nothing")
 
     def test_a_bound_port_is_refused(self):
         self.probes = [dict(FC54, busy_ports=[30890]), C489]
@@ -734,7 +801,53 @@ class CheckTest(unittest.TestCase):
         rc, err = self.check()
         self.assertEqual(rc, 2)
         self.assertIn("router node-f293: 'vllm-router' is not on PATH in the shell mn.py launches it from", err)
-        self.assertEqual((self.cmds_asked[0], self.cmds_asked["lb"]), (["python3"], ["vllm-router"]))
+        self.assertEqual((self.cmds_asked[0], self.cmds_asked["lb"]),
+                         (["python3", "setsid", "rocm-smi", "ps", "curl"], ["vllm-router", "setsid", "ps", "curl"]))
+
+    def test_a_missing_setsid_is_named_not_reported_as_a_dead_port(self):
+        self.provide()
+        self.not_installed = {"setsid"}
+        rc, err = self.check()
+        self.assertEqual(rc, 2)
+        self.assertIn("'setsid' is not on PATH", err)
+        self.assertNotIn("nothing listening", err)
+        self.assertFalse([s for _n, s in self.sent if "/dev/tcp/" in s], "no port probe runs")
+
+    def test_ip_is_required_only_where_mn_finds_the_nic(self):
+        self.not_installed = {"ip"}
+        rc, err = self.check()
+        self.assertEqual(rc, 2)
+        self.assertIn("'ip' is not on PATH", err)
+        self.assertNotIn("has no interface", err)
+        self.provide()
+        rc, err = self.check()
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("ip", self.cmds_asked[0])
+
+    def test_a_missing_rocm_smi_is_the_one_gpu_problem_reported(self):
+        self.not_installed = {"rocm-smi"}
+        with mock.patch.dict(FC54, ngpu=0, free_vram_mib=None, total_vram_mib=None):
+            rc, err = self.check()
+        self.assertEqual(rc, 2)
+        self.assertIn("'rocm-smi' is not on PATH", err)
+        self.assertNotIn("GPUs, needs", err)
+        self.assertNotIn("MiB free", err)
+
+    def test_rocm_smi_without_a_gpu_line_says_so(self):
+        with mock.patch.dict(FC54, ngpu=0):
+            rc, err = self.check()
+        self.assertEqual(rc, 2)
+        self.assertIn("rocm-smi --showuse printed no 'GPU use (%)' line", err)
+        self.assertNotIn("has 0 GPUs", err)
+
+    def test_a_missing_ps_or_curl_degrades_and_is_pinned(self):
+        self.not_installed = {"ps", "curl"}
+        rc, err = self.check()
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.pin()["degraded"], {mn._short(p["hostname"]): ["ps", "curl"] for p in self.probes})
+        self.not_installed = set()
+        self.assertEqual(self.check()[0], 0)
+        self.assertNotIn("degraded", self.pin())
 
     def test_a_compound_or_path_command_is_not_judged(self):
         self.provide()
@@ -743,10 +856,10 @@ class CheckTest(unittest.TestCase):
             self.assertEqual(mn.plain_argv0(line), "")
         self.assertEqual(mn.plain_argv0("A=1 vllm-router --port 8000"), "vllm-router")
 
-    def test_a_generated_launch_asks_for_no_command(self):
+    def test_a_generated_launch_asks_only_for_the_node_tools(self):
         rc, err = self.check()
         self.assertEqual(rc, 0, err)
-        self.assertEqual(set(map(tuple, self.cmds_asked.values())), {()})
+        self.assertEqual(set(map(tuple, self.cmds_asked.values())), {("setsid", "rocm-smi", "ip", "ps", "curl")})
 
     def one_machine(self, decode_port=8002):
         """1P1D on node-fc54: prefill on cards 0-3 at :8001, decode on 4-7, the router at :8000."""
@@ -794,60 +907,29 @@ class CheckTest(unittest.TestCase):
 class ActivePinTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
-        self.pointer = os.path.join(self.tmp, "state_path")
-        self.patch = mock.patch.object(mn, "ACTIVE_PIN", self.pointer)
-        self.patch.start()
         self.env = mock.patch.dict(os.environ)
         self.env.start()
         os.environ.pop("GEAK_MN_STATE", None)
 
     def tearDown(self):
         self.env.stop()
-        self.patch.stop()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def claim(self, pid, start):
-        with open(self.pointer, "w", encoding="utf-8") as f:
-            json.dump({"state": "/w/mn_state.json", "pid": pid, "start": start, "mn_py": "/w/mn.py"}, f)
-
-    def test_the_pin_counts_while_its_owner_lives(self):
-        self.claim(4242, "777")
-        with mock.patch.object(mn, "_proc_start", lambda pid: "777" if int(pid) == 4242 else ""):
-            self.assertEqual(mn.active_pin(), "/w/mn_state.json")
-
-    def test_a_dead_or_reused_owner_pid_releases_the_machine(self):
-        self.claim(4242, "777")
-        with mock.patch.object(mn, "_proc_start", lambda pid: ""):
-            self.assertEqual(mn.active_pin(), "")
-        with mock.patch.object(mn, "_proc_start", lambda pid: "999"):
-            self.assertEqual(mn.active_pin(), "", "the pid now belongs to another process")
-
-    def test_geak_mn_state_wins_and_no_pointer_is_none(self):
+    def test_geak_mn_state_is_the_only_source(self):
         self.assertEqual(mn.active_pin(), "")
         os.environ["GEAK_MN_STATE"] = "/x/pin.json"
         self.assertEqual(mn.active_pin(), "/x/pin.json")
+        os.environ["GEAK_MN_STATE"] = ""
+        self.assertEqual(mn.active_pin(), "")
 
-    def ancestors(self, procs):
-        """claude_ancestor over a fake /proc: {pid: (comm, ppid, argv)}, starting at the parent 300."""
-        def fake_open(path, mode="r", **kw):
-            pid, name = int(path.split("/")[2]), path.split("/")[3]
-            if pid not in procs:
-                raise FileNotFoundError(path)
-            comm, ppid, argv = procs[pid]
-            if name == "stat":
-                return io.StringIO(f"{pid} ({comm}) S {ppid} 1 1")
-            return io.BytesIO("\0".join(argv).encode() + b"\0")
-        with mock.patch.object(mn.os, "getppid", lambda: 300), mock.patch("builtins.open", fake_open):
-            return mn.claude_ancestor()
-
-    def test_claude_ancestor_is_the_nearest_claude_code_process(self):
-        shell = (("bash", 200, ["/bin/bash", "-c", "source snap; mn.py check"]))
-        self.assertEqual(self.ancestors({300: shell, 200: ("claude", 100, ["claude", "-p"]),
-                                         100: ("python3", 1, ["python3", "run_e2e.py"])}), 200)
-        self.assertEqual(self.ancestors({300: shell, 200: ("node", 1, [
-            "node", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js"])}), 200, "an npm install runs as node")
-        self.assertEqual(self.ancestors({300: shell, 200: ("python3", 1, ["python3", "run_e2e.py"])}), 0)
-        self.assertEqual(self.ancestors({300: shell}), 0, "an unreadable ancestor ends the walk")
+    def test_no_tool_falls_back_to_a_machine_wide_pointer(self):
+        root = os.path.join(SCRIPTS_DIR, os.pardir, os.pardir)
+        for rel in ("e2e_workflow/scripts/multi_node/mn.py", "e2e_workflow/scripts/bench_e2e.sh",
+                    "kernel_workflow/scripts/gpu_lock.sh", "kernel_workflow/scripts/profile_kernel.sh",
+                    "perf_knowledge/expert_skills/skills/gluon_authoring/scripts/gpu_lock.sh"):
+            with open(os.path.join(root, *rel.split("/")), encoding="utf-8") as f:
+                self.assertNotIn("/state_path", f.read(), rel)
+        self.assertFalse(hasattr(mn, "ACTIVE_PIN"))
 
     def test_the_lease_dir_is_the_one_gpu_lock_and_the_leases_share(self):
         pin, leases = os.path.join(self.tmp, "mn_state.json"), os.path.join(self.tmp, ".mn_lease")
@@ -1108,7 +1190,7 @@ def rank_vars(tmp, **over):
               log=os.path.join(tmp, "server.rank1.log"),
               profile_dir=os.path.join(tmp, "prof"), overlay="/ovl", pythonpath="",
               extra_env="SHARED_V=1 SWEPT_V=2",
-              extra_args="--attention-backend dsv4 --page-size 64")
+              extra_args="--attention-backend dsv4 --page-size 64", engine="tp")
     kw.update(over)
     return mn.rank_env_vars(**kw)
 
@@ -1473,9 +1555,8 @@ class DriverSubprocessTest(unittest.TestCase):
                             or first.endswith(("/geak_trace_collector.py`", "/capture_shapes.py`")), first)
         self.assertIn("const MN_PY = `${WORKFLOW_DIR}/scripts/multi_node/mn.py`;", src)
         self.assertNotIn("runMn", src)
-        self.assertIn("let verdict = A.multinode_check;", src)
-        self.assertIn("verdict = await agentMnCheck();", src)
-        self.assertIn("python3 ${MN_PY} check --owner claude", src)
+        self.assertIn("const verdict = A.multinode_check;", src)
+        self.assertNotIn("agentMnCheck", src)
 
     def test_run_e2e_checks_the_machines_before_the_workflow(self):
         # A Workflow script cannot spawn a process, so the check runs in run_e2e.py.
@@ -1495,7 +1576,7 @@ class BenchPinGuardTest(unittest.TestCase):
     def bench(self, **over):
         env = {k: v for k, v in os.environ.items()
                if k not in ("MODEL", "REUSE_SERVER", "BENCH_LAUNCHER", "TP", "GPU", "GEAK_MN_STATE", "GEAK_MN_HOP")}
-        env.update(GEAK_MN_STATE="/nonexistent/pin.json", **over)
+        env.update({"GEAK_MN_STATE": "/nonexistent/pin.json", **over})
         return subprocess.run([BASH, os.path.join(SCRIPTS_DIR, "bench_e2e.sh")], env=env,
                               capture_output=True, text=True, timeout=120)
 
@@ -1526,6 +1607,23 @@ class BenchPinGuardTest(unittest.TestCase):
     def test_reusing_a_server_is_allowed(self):
         proc = self.bench(BENCH_LAUNCHER="native", TP="8", GPU="0,1", REUSE_SERVER="1")
         self.assertNotIn("drives its nodes", proc.stderr)
+
+    def test_without_geak_mn_state_a_bench_is_single_host(self):
+        for launcher in ("native", ""):
+            proc = self.bench(GEAK_MN_STATE="", BENCH_LAUNCHER=launcher, TP="8", GPU="0,1,2,3,4,5,6,7")
+            self.assertNotIn("drives its nodes", proc.stderr)
+            self.assertNotIn("no pinned node set", proc.stderr)
+        proc = self.bench(GEAK_MN_STATE="", BENCH_LAUNCHER="multinode")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("no pinned node set at ''", proc.stderr)
+
+    def test_without_geak_mn_state_gpu_lock_forwards_nothing(self):
+        gpu_lock = os.path.join(SCRIPTS_DIR, os.pardir, os.pardir, "kernel_workflow", "scripts", "gpu_lock.sh")
+        env = {k: v for k, v in os.environ.items() if k not in ("GEAK_MN_STATE", "GEAK_MN_HOP")}
+        proc = subprocess.run([BASH, gpu_lock, "decode:3", "true"], env=env,
+                              capture_output=True, text=True, timeout=60)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("'decode:3' names an engine, but GEAK_MN_STATE names no multinode pin", proc.stderr)
 
 
 @unittest.skipIf(BASH is None or not mn.local_identity(), "bash and a Linux boot_id")
@@ -1871,6 +1969,33 @@ def run_mn(argv):
     return subprocess.CompletedProcess(["mn.py", *argv], rc, out.getvalue(), err.getvalue())
 
 
+def run_traces(argv):
+    """`mn_traces.py <argv>` (the multinode-traces skill), the same way."""
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            rc = mn_traces.main(list(argv))
+        except SystemExit as exc:
+            rc = exc.code if isinstance(exc.code, int) else 1
+    return subprocess.CompletedProcess(["mn_traces.py", *argv], rc, out.getvalue(), err.getvalue())
+
+
+class TraceSkillTest(unittest.TestCase):
+    def test_the_trace_checks_are_a_standalone_skill_and_left_mn_py(self):
+        script = os.path.join(TRACES, "mn_traces.py")
+        proc = subprocess.run([sys.executable, script], capture_output=True, text=True, cwd=tempfile.gettempdir(),
+                              env={k: v for k, v in os.environ.items() if k != "PYTHONPATH"})
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("usage: mn_traces.py {trace-gate|topn-merge|pd-mass|pd-points}", proc.stderr)
+        self.assertFalse({"trace-gate", "topn-merge", "pd-mass", "pd-points"} & set(mn.COMMANDS))
+        self.assertTrue(os.path.isfile(os.path.join(os.path.dirname(TRACES), "SKILL.md")))
+        launcher = open(os.path.join(SCRIPTS_DIR, "adapters", "launchers", "multinode.sh"), encoding="utf-8").read()
+        self.assertEqual(launcher.count('python3 "$_MN_TRACES" trace-gate'), 2)
+        self.assertTrue(os.path.isfile(os.path.normpath(os.path.join(
+            MN, "../../knowledge/multinode_skills/multinode-traces/scripts/mn_traces.py"))),
+            "multinode.sh finds the skill from the pin's mn_dir")
+
+
 COMPUTE = "Cijk_Alik_Bljk_HHS_BH_MT128x128x16"
 
 
@@ -1904,7 +2029,7 @@ def full_set(directory, ranks=range(16), gpus_per_node=8, **kwargs):
 def run_gate(directory, *args):
     if "--nodes" not in args:
         args = ("--nodes", "2", *args)
-    proc = run_mn(
+    proc = run_traces(
         ["trace-gate", "--profile-dir", directory, *args])
     report = {}
     for candidate in (os.path.join(directory, "ranks", "mn_trace_report.json"),
@@ -2257,7 +2382,7 @@ class PdTopnMergeTest(unittest.TestCase):
                 *[a for e in (engines or self.engines()) for a in ("--engine", e)]]
         if roles is not False:
             argv += ["--roles", roles or self.roles()]
-        proc = run_mn(argv)
+        proc = run_traces(argv)
         doc = {}
         if os.path.isfile(out + ".json"):
             with open(out + ".json", encoding="utf-8") as handle:
@@ -2351,7 +2476,7 @@ class PdTopnMergeTest(unittest.TestCase):
 
     def merge_mass(self, coverage, roles=None):
         out = os.path.join(self.tmp, "profile_topN_mass")
-        proc = run_mn(["topn-merge", "--out", out, "--coverage", coverage,
+        proc = run_traces(["topn-merge", "--out", out, "--coverage", coverage,
                        "--roles", roles or self.roles(),
                        *[a for e in self.engines() for a in ("--engine", e)]])
         doc = {}
@@ -2383,7 +2508,7 @@ class PdTopnMergeTest(unittest.TestCase):
                      "cases": [{"dims": [[m, 7168]], "count": 1, "weight": w} for m, w in cases]}]}, handle)
             return f"{role}={path}"
         out = os.path.join(self.tmp, "profile_workload.json")
-        proc = run_mn(["topn-merge", "--coverage", self.coverage(), "--roles", self.roles(),
+        proc = run_traces(["topn-merge", "--coverage", self.coverage(), "--roles", self.roles(),
                        *[a for e in self.engines() for a in ("--engine", e)],
                        "--workload", workload("prefill", 100.0, [(4096, 30e3)]),
                        "--workload", workload("decode", 300.0, [(8, 60e3), (16, 60e3)]),
@@ -2396,7 +2521,7 @@ class PdTopnMergeTest(unittest.TestCase):
         self.assertEqual(sorted(cases), [("decode", 8, "decode", 32000.0), ("decode", 16, "decode", 32000.0),
                                          ("prefill", 4096, "prefill", 72000.0)])
         self.assertEqual({k["engine"]: k["pct_gpu_time"] for k in doc["kernels"]}, {"prefill": 30.0, "decode": 20.0})
-        bad = run_mn(["topn-merge", "--coverage", self.coverage(), "--roles", self.roles(),
+        bad = run_traces(["topn-merge", "--coverage", self.coverage(), "--roles", self.roles(),
                       *[a for e in self.engines() for a in ("--engine", e)],
                       "--workload", workload("decode", 300.0, [(8, 1.0)]), "--workload-out", out + ".x"])
         self.assertEqual(bad.returncode, 2)
@@ -2446,7 +2571,7 @@ class PdPointsTest(unittest.TestCase):
 
     def plan(self, pre, dec):
         out = os.path.join(self.tmp, "points")
-        proc = run_mn(["pd-points", "--skill-root", self.SKILL, "--out-dir", out, "--points-per-phase", "2",
+        proc = run_traces(["pd-points", "--skill-root", self.SKILL, "--out-dir", out, "--points-per-phase", "2",
                        "--engine-log", f"prefill={pre}", "--engine-log", f"decode={dec}"])
         path = os.path.join(out, "sampling_points.json")
         doc = {}
@@ -2522,7 +2647,7 @@ class PdMassTest(unittest.TestCase):
         argv = ["pd-mass", "--roles", roles or self.roles(), "--apply", ranking]
         for c in (coverage or [self.coverage()]):
             argv += ["--coverage", c]
-        proc = run_mn(argv)
+        proc = run_traces(argv)
         with open(ranking, encoding="utf-8") as handle:
             return proc, json.load(handle)
 
@@ -2586,12 +2711,12 @@ class PdMassTest(unittest.TestCase):
         prefill = self.path("roles_p.json", {"roles": [{"role": "prefill", "ranks": 4, "instances": 1}]})
         decode = self.path("roles_d.json", {"roles": [{"role": "decode", "ranks": 8, "instances": 1}]})
         ranking = self.path("kernel_ranking.json", self.RANKING)
-        proc = run_mn(["pd-mass", "--roles", prefill, "--roles", decode, "--apply", ranking,
+        proc = run_traces(["pd-mass", "--roles", prefill, "--roles", decode, "--apply", ranking,
                        "--coverage", self.coverage()])
         self.assertEqual(proc.returncode, 0, proc.stderr)
         with open(ranking, encoding="utf-8") as handle:
             self.assertAlmostEqual(self.rows(json.load(handle))["A"], 100 * 48 / 560, places=3)
-        proc = run_mn(["pd-mass", "--roles", decode, "--roles", decode, "--apply", ranking,
+        proc = run_traces(["pd-mass", "--roles", decode, "--roles", decode, "--apply", ranking,
                        "--coverage", self.coverage()])
         self.assertEqual(proc.returncode, 2)
         self.assertIn("more than one --roles", proc.stderr)
@@ -2831,6 +2956,7 @@ class PdSpanningEngineLaunchTest(unittest.TestCase):
         shims = ":".join(os.path.join(mn.adapters_dir(self.tmp), s) for s in ("iteration_env", "profile_env"))
         for name, role in (("rank0", "prefill"), ("rank1", "decode"), ("rank2", "decode")):
             script = self.rendered(name)
+            self.assertIn(f"export GEAK_MN_ENGINE={role}\n", script, "the capture hooks see a multinode leg")
             self.assertIn(f"export PROFILE_PYTHONPATH={shlex.quote(shims)}", script)
             self.assertIn("export GEAK_ITERATION_LOG_DIR=" + shlex.quote(
                 os.path.join(self.tmp, "iterations", role)), script)
@@ -3352,6 +3478,7 @@ class ProvidedLaunchTest(_PinnedEnv):
             self.assertIn("export EXTRA_SERVER_ARGS='--chunked-prefill-size 4096'", script,
                           "the command owns --port and --tp-size; GEAK's copies are dropped")
             self.assertIn("export EFFECTIVE_SERVER_ARGS_COMPLETE=1", script)
+            self.assertIn(f"export GEAK_MN_ENGINE={('prefill', 'decode')[rank]}\n", script)
             self.assertIn("export PORT=8000", script)
             self.assertIn("export MAX_MODEL_LEN=8192", script)
             self.assertNotIn(MN, script, "the node runs no GEAK file")
@@ -3522,6 +3649,7 @@ class SingleNodeGeneratedLaunchTest(_PinnedEnv):
         script = self.rendered("rank0")
         self.assertNotIn("SYNC_TOKEN_IDS_ACROSS_TP", script)
         self.assertIn("adapter_dist_args 0 1", script)
+        self.assertIn("export GEAK_MN_ENGINE=tp\n", script)
 
     def test_the_rank_records_its_server_pid_on_its_node(self):
         self.assertEqual(self.launch(), 0)
@@ -3976,6 +4104,17 @@ class SupervisorTest(unittest.TestCase):
             self.assertEqual(mn.cmd_supervise([]), 1)
         self.assertEqual(self.verdict()["verdict"], "rank_died")
 
+    def test_a_degraded_pin_is_in_the_watching_record(self):
+        records, real = [], mn.record
+        polls = iter([[healthy(0, serve=0), healthy(1)]] * 2)
+        with mock.patch.object(mn, "load_state", lambda: {**self.STATE, "degraded": {"node1": ["ps"]}}), \
+                mock.patch.object(mn, "record", lambda v, d: records.append((v, d)) or real(v, d)), \
+                mock.patch.object(mn, "engine_health", lambda _s: next(polls)):
+            self.assertEqual(mn.cmd_supervise([]), 1)
+        self.assertEqual(records[0][0], "watching")
+        self.assertEqual(records[0][1]["degraded"], {"node1": ["ps"]})
+        self.assertIn("ranks", records[0][1])
+
     def test_an_unwritable_out_dir_does_not_stop_the_record(self):
         blocker = os.path.join(self.tmp, "file")
         open(blocker, "w").close()
@@ -4069,10 +4208,6 @@ class ActivePinCliTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, True)
-        self.pointer = os.path.join(self.tmp, "state_path")
-        patch = mock.patch.object(mn, "ACTIVE_PIN", self.pointer)
-        patch.start()
-        self.addCleanup(patch.stop)
 
     def test_no_pin_or_a_missing_pin_file_stops_with_a_reason(self):
         with mock.patch.dict(os.environ, {"GEAK_MN_STATE": ""}):
@@ -4163,14 +4298,14 @@ class TraceEdgeTest(unittest.TestCase):
         self.assertEqual(mn_traces.pd_lanes(self.path("bad.json", "{")), [])
 
     def test_topn_merge_refuses_what_it_cannot_merge(self):
-        bad = run_mn(["topn-merge", "--engine", "prefill"])
+        bad = run_traces(["topn-merge", "--engine", "prefill"])
         self.assertEqual(bad.returncode, 2)
         self.assertIn("wants prefill=PATH and decode=PATH", bad.stderr)
-        gone = run_mn(["topn-merge", "--engine", f"prefill={os.path.join(self.tmp, 'nope.json')}"])
+        gone = run_traces(["topn-merge", "--engine", f"prefill={os.path.join(self.tmp, 'nope.json')}"])
         self.assertEqual(gone.returncode, 2)
         self.assertIn("nope.json", gone.stderr)
         idle = self.path("idle.json", {"total_gpu_time_ms": 0, "top_kernels": []})
-        self.assertIn("no --engine for ['prefill']", run_mn(["topn-merge", "--engine", f"decode={idle}"]).stderr)
+        self.assertIn("no --engine for ['prefill']", run_traces(["topn-merge", "--engine", f"decode={idle}"]).stderr)
 
     def test_topn_merge_without_out_prints_the_table(self):
         def topn(name, role, gpu_ms, steps, calls):
@@ -4183,7 +4318,7 @@ class TraceEdgeTest(unittest.TestCase):
                                  "total_ms": gpu_ms, "avg_us": 3333.3, "opt_hint": "tune"}]})
         roles = self.path("roles.json", {"roles": [{"role": "prefill", "ranks": 1, "instances": 1},
                                                    {"role": "decode", "ranks": 1, "instances": 1}]})
-        proc = run_mn(["topn-merge", "--roles", roles,
+        proc = run_traces(["topn-merge", "--roles", roles,
                        "--engine", f"prefill={topn('p.json', 'prefill', 10.0, 2, 1)}",
                        "--engine", f"decode={topn('d.json', 'decode', 90.0, 9, 10)}"])
         self.assertEqual(proc.returncode, 0, proc.stderr)
