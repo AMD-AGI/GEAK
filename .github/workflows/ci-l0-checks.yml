@@ -158,6 +158,8 @@ jobs:
             evo/tests/test_dispatch.py \
             evo/tests/test_workflow.py \
             kernel_workflow/scripts/tests/test_gpu_lease.py \
+            kernel_workflow/scripts/tests/test_stop_lane_work.py \
+            kernel_workflow/scripts/tests/test_read_extraction_baseline.py \
             kernel_workflow/scripts/tests/test_detect_gpu_requirement.py \
             perf_knowledge/expert_skills/_contribute/test_expert_skill_planner_extension.py \
             perf_knowledge/expert_skills/_contribute/test_expert_skill_validation.py \
@@ -213,6 +215,10 @@ jobs:
           bash kernel_workflow/scripts/test_detect_gpu_arch.sh
           bash kernel_workflow/scripts/test_gpu_lock_arch.sh
           python3 e2e_workflow/scripts/tests/test_e2e_lane_defaults.py
+          # A W7900 handoff from run_e2e.py --dry-run through laneArgs() to the lane prompts. It is
+          # here, not in node-regression, because run_e2e.py needs this job's PyYAML.
+          node kernel_workflow/scripts/test_w7900_handoff_contract.js
+          bash kernel_workflow/scripts/test_w7900_vllm_smoke.sh
           # The kernel KB must lint clean and its generated index must match the cards. `lint --cards`
           # now exits non-zero on failure, so this is a gate rather than a printout.
           python3 kernel_workflow/scripts/kb.py --kb-dir kernel_workflow/knowledge/learned lint --cards
@@ -327,6 +333,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2   # the workflow script growth check compares against HEAD^1
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -339,6 +347,15 @@ jobs:
       # Claude Code's workflow tool refuses a script over its size limit before any phase runs.
       - name: workflow script size limit
         run: node e2e_workflow/scripts/test_workflow_script_size.js
+      # Advisory, never fails: a PR that grows the workflow scripts by more than 10 KB net gets a
+      # warning annotation and a size table in the job summary. On a pull_request run HEAD is the
+      # merge commit, so HEAD^1 is the base branch it would merge into.
+      - name: workflow script growth check regression
+        run: node e2e_workflow/scripts/test_check_workflow_growth.js
+      - name: workflow script growth (advisory)
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        run: node e2e_workflow/scripts/check_workflow_growth.js HEAD^1
       - name: Candidate coverage and independent speedup review regression
         run: node --test e2e_workflow/scripts/test_speedup_review.js
       - name: AgentX-only kernel extraction and fixed-load compatibility
@@ -374,12 +391,20 @@ jobs:
       # run_reaper.py fence ahead of Finalize and Validate. No GPU, no model.
       - name: final-phase GPU handover regression
         run: node e2e_workflow/scripts/test_final_phase_gpu_handover.js
+      - name: lane cleanup under a saturated agent queue
+        run: node --test interface/runtime/engine/test_lane_stop.mjs
+      - name: AgentX milestone retries an errored kernel lane once
+        run: node e2e_workflow/scripts/test_milestone_lane_retry.js
       - name: GPU family table (identical in every workflow)
         run: node kernel_workflow/scripts/test_gpu_family_table.js
       - name: gfx1201 fail-closed knowledge regression
         run: node kernel_workflow/scripts/test_rdna4_policy.js
       - name: R9700 E2E identity and knowledge policy
         run: node e2e_workflow/scripts/test_rdna4_e2e_policy.js
+      - name: W7900 / gfx1100 fail-closed lane and bakeoff policy
+        run: node kernel_workflow/scripts/test_rdna3_policy.js
+      - name: W7900 E2E identity and knowledge policy
+        run: node e2e_workflow/scripts/test_rdna3_e2e_policy.js
       - name: caller-pinned eval_dir regression
         run: node e2e_workflow/scripts/test_pinned_eval_dir.js
       # ROUTING-INLINE drift guard (PR #574 review, amd-ethany): the routing model/lane

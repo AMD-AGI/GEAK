@@ -223,11 +223,13 @@ pick_account() {
 
 # Detect the identity bucket used to pick a docker_default.json entry.
 # Returns MI355 (gfx950 / MI35x), MI300 (gfx942/gfx90a / MI30x), R9700 only
-# for the exact validated Radeon AI PRO R9700 product, or gfx1201 when only the
-# ISA is known. A bare gfx1201/RDNA4 override never proves the product.
-# Any other identified ISA has no image policy and is refused.
-# Missing identity keeps the historical MI355 SPUR default unless R9700 was
-# explicitly requested, in which case detection fails closed.
+# for the exact validated Radeon AI PRO R9700 product, gfx1201 when only the
+# ISA is known, or W7900 only for the exact Radeon Pro W7900 on gfx1100.
+# A bare gfx1201/RDNA4 override never proves the product. A gfx1100 without
+# the W7900 product is refused, as is any other identified ISA with no image
+# policy.
+# Missing identity keeps the historical MI355 SPUR default unless R9700 or
+# W7900 was explicitly requested, in which case detection fails closed.
 # resolve_image runs on the compute-node host, before the container starts.
 normalize_gpu_arch() {
   local raw
@@ -237,12 +239,14 @@ normalize_gpu_arch() {
     mi300|gfx942|gfx90a) echo MI300 ;;
     r9700) echo R9700 ;;
     rdna4|gfx1201) echo gfx1201 ;;
+    w7900) echo W7900 ;;
+    gfx1100) echo gfx1100 ;;
     gfx1200)
       echo "E_ARCH_UNVALIDATED: gfx1200 is not validated; refusing R9700 runtime policy" >&2
       return 1
       ;;
     *)
-      echo "E_ARCH_UNSUPPORTED: unsupported GPU arch override '$1' (want MI355|MI300|R9700|RDNA4|gfx950|gfx942|gfx90a|gfx1201)" >&2
+      echo "E_ARCH_UNSUPPORTED: unsupported GPU arch override '$1' (want MI355|MI300|R9700|RDNA4|W7900|gfx950|gfx942|gfx90a|gfx1201|gfx1100)" >&2
       return 1
       ;;
   esac
@@ -252,9 +256,9 @@ detect_gpu_arch() {
   local expected rocminfo_bin gfx target normalized identity parsed requested_target
   expected="$(printf '%s' "${GEAK_EXPECTED_TARGET:-}" | tr '[:upper:]' '[:lower:]')"
   case "$expected" in
-    ""|unknown|r9700) ;;
+    ""|unknown|r9700|w7900) ;;
     *)
-      echo "E_TARGET_UNSUPPORTED: unsupported GEAK_EXPECTED_TARGET '$GEAK_EXPECTED_TARGET' (want r9700|unknown)" >&2
+      echo "E_TARGET_UNSUPPORTED: unsupported GEAK_EXPECTED_TARGET '$GEAK_EXPECTED_TARGET' (want r9700|w7900|unknown)" >&2
       return 1
       ;;
   esac
@@ -265,6 +269,10 @@ detect_gpu_arch() {
       echo "E_ARCH_EXPECTED_MISMATCH: expected R9700 but GPU arch override resolved to $normalized" >&2
       return 1
     fi
+    if [ "$expected" = "w7900" ] && [ "$normalized" != "W7900" ] && [ "$normalized" != "gfx1100" ]; then
+      echo "E_ARCH_EXPECTED_MISMATCH: expected W7900 but GPU arch override resolved to $normalized" >&2
+      return 1
+    fi
     case "$normalized" in
       MI300|MI355)
         echo "$normalized"
@@ -273,6 +281,10 @@ detect_gpu_arch() {
       R9700)
         requested_target=r9700
         normalized=gfx1201
+        ;;
+      W7900)
+        requested_target=w7900
+        normalized=gfx1100
         ;;
     esac
   fi
@@ -304,12 +316,25 @@ detect_gpu_arch() {
     echo "E_TARGET_EXPECTED_MISMATCH: expected exact R9700 but structured rocminfo identity was gfx='${gfx:-missing}' target='${target:-unknown}'" >&2
     return 1
   fi
+  if [ "$requested_target" = "w7900" ] \
+      && { [ "$gfx" != "gfx1100" ] || [ "${target:-unknown}" != "w7900" ]; }; then
+    echo "E_TARGET_EXPECTED_MISMATCH: expected exact W7900 but structured rocminfo identity was gfx='${gfx:-missing}' target='${target:-unknown}'" >&2
+    return 1
+  fi
 
   case "$gfx" in
     gfx950)            echo MI355 ;;
     gfx942|gfx90a)     echo MI300 ;;
     gfx1201)
       if [ "${target:-unknown}" = "r9700" ]; then echo R9700; else echo gfx1201; fi
+      ;;
+    gfx1100)
+      if [ "${target:-unknown}" = "w7900" ]; then
+        echo W7900
+      else
+        echo "E_ARCH_UNVALIDATED: gfx1100 is validated only on the exact Radeon Pro W7900; structured rocminfo identity reported target='${target:-unknown}'" >&2
+        return 1
+      fi
       ;;
     gfx1200)
       echo "E_ARCH_UNVALIDATED: gfx1200 is not validated; refusing R9700 runtime policy" >&2
@@ -347,17 +372,18 @@ except Exception:
 
 def pick(node):
     # node may be a plain image string or an {arch: image, "default": image} dict.
-    # A bare gfx1201 ISA has no validated product image. Exact R9700 may select
-    # only an explicit R9700 mapping; neither may inherit a plain MI image.
+    # A bare gfx1201 ISA has no validated product image. Exact R9700 and W7900
+    # may select only an explicit mapping of their own; none may inherit a
+    # plain MI image.
     if arch == "gfx1201":
         return ""
-    if arch == "R9700" and isinstance(node, str):
+    if arch in ("R9700", "W7900") and isinstance(node, str):
         return ""
     if isinstance(node, str):
         return node
     if isinstance(node, dict):
-        if arch == "R9700":
-            return node.get("R9700") or ""
+        if arch in ("R9700", "W7900"):
+            return node.get(arch) or ""
         return (node.get(arch) or node.get("default")
                 or next((v for v in node.values() if isinstance(v, str)), ""))
     return ""

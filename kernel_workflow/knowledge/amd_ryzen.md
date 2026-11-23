@@ -1,6 +1,7 @@
 # AMD Ryzen AI / Radeon Client Hardware Reference (RDNA) — DETECT THE BOX FIRST
 
-Hardware facts for AMD client parts. Read this when `rocminfo` reports a `gfx11*` arch.
+Hardware facts for AMD client APUs. Read this when `rocminfo` reports a `gfx115x` arch (RDNA 3.5).
+Discrete RDNA3 `gfx1100` (Radeon Pro W7900) uses `amd_rdna3.md` instead.
 
 Currently tabulated: **RDNA 3.5**, `gfx1151` — Radeon 8060S, the integrated GPU in the Strix Halo APU.
 

@@ -123,10 +123,11 @@ def dtype_bytes(name, default=2):
 def load_peaks(peaks_md_path, gfx, product=None):
     """Parse the ```yaml blocks in peaks.md and return the matching section.
 
-    Product-scoped blocks (``product: r9700``) match only when `product` is that
-    identity. A gfx1201 lookup without an R9700 product must not inherit R9700 peaks.
-    ``product="unknown"`` (what gpu_identity reports for every non-R9700 card,
-    MI300/MI355 included) is no product constraint: ISA-keyed blocks still match.
+    Product-scoped blocks (``product: r9700``, ``product: w7900``) match only when
+    `product` is that identity. A gfx1201 lookup without an R9700 product must not
+    inherit R9700 peaks, nor a gfx1100 lookup without W7900 the W7900 peaks.
+    ``product="unknown"`` (what gpu_identity reports for every card except R9700 and
+    W7900, MI300/MI355 included) is no product constraint: ISA-keyed blocks still match.
 
     Returns {"hbm_bw_bytes_s": float, "flops": {dtype: float}, "cu": int, "source": "table",
              "confidence": "high"} or None when the file or the section is absent.
@@ -220,8 +221,13 @@ def is_client_rdna35(gfx):
     return bool(re.fullmatch(r"gfx115\d", str(gfx or "").lower()))
 
 
+def is_discrete_rdna3(gfx):
+    """True for discrete RDNA3 gfx1100, whose numeric peaks exist only for product w7900."""
+    return str(gfx or "").lower() == "gfx1100"
+
+
 def resolve_peaks(peaks_md_path, gfx, device=0, product=None, cu=None):
-    """Resolve tabulated peaks; never derive a numeric roofline for client RDNA.
+    """Resolve tabulated peaks; never derive a numeric roofline for client RDNA or gfx1100.
 
     Navi 48 reports properties that are insufficient to derive WMMA throughput,
     and its GDDR clock interpretation is toolchain-dependent; an RDNA 3.5 APU's
@@ -229,7 +235,9 @@ def resolve_peaks(peaks_md_path, gfx, device=0, product=None, cu=None):
     therefore a hard unknown rather than a low-confidence numeric denominator.
     R9700 peaks require product='r9700'. A gfx115x row also requires ``cu``, the
     physical CU count, to equal the row's: one ISA ships with several CU counts.
-    CDNA5 gfx1250 is in neither family and may derive.
+    CDNA5 gfx1250 is in neither family and may derive. gfx1100 has the same
+    property gap: its peaks require product='w7900', and any other gfx1100 is a
+    hard unknown.
     """
     peaks = load_peaks(peaks_md_path, gfx, product=product)
     # On gfx115x the row holds only for its own whole CU count (40.5 or True is not 40).
@@ -237,7 +245,7 @@ def resolve_peaks(peaks_md_path, gfx, device=0, product=None, cu=None):
         peaks = None
     if peaks:
         return peaks
-    if is_client_rdna4(gfx) or is_client_rdna35(gfx):
+    if is_client_rdna4(gfx) or is_client_rdna35(gfx) or is_discrete_rdna3(gfx):
         return None
     return derive_peaks_from_props(device)
 

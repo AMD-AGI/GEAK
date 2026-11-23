@@ -103,6 +103,7 @@ The mapping is owned by `run_e2e.py:map_args`.
 | `raw_baseline_tput` | Result audit metadata | Pre-change session baseline; never used as the measurement-alignment signal |
 | `orchestrator_best_tput_same_config` | Result alignment metadata | Caller throughput on the accepted config GEAK uses for its baseline |
 | `exp_root` | `exp_root` | Run dir root |
+| `gpu_perf_level` | `gpu_perf_level` | Optional, lower-cased; the operator-declared amdgpu perf level, forwarded to every kernel lane. On the W7900, `profile_standard` (or amd-smi's `stable_std` / `AMDSMI_DEV_PERF_LEVEL_STABLE_STD`) turns on the gfx1100 counter safe set in a lane with profiling on; anything else leaves counters unavailable. Kernel-lane profiling is off by default and an E2E run does not turn it on. Absent => omitted |
 | (derived from `exp_root`) | `tracelens` | Auto-discovered upstream TraceLens artifacts; only non-null paths forwarded; key omitted entirely when none found |
 | `bench_client`, `inferencex_path` | env `BENCH_CLIENT`, `INFERENCEX_PATH` | Exported so every `bench_e2e.sh` call inherits it (not a JS arg) |
 | `bench_protocol.*` | env `RANDOM_RANGE_RATIO`, `NUM_PROMPTS`, `NUM_WARMUPS`, `SEED` | `run_e2e.py:apply_bench_protocol` exports only the provided keys; absent keys keep `bench_e2e.sh` defaults |
