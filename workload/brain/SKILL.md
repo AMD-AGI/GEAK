@@ -63,6 +63,12 @@ preserve the inputs and evidence of in-flight calls.
    stale evidence cannot qualify a replacement. Call termination alone does not rule out
    an untested opportunity.
 
+For a qualified kernel using [Optimize / kernel-skills](../stages/optimize/kernel-skills/SKILL.md),
+delegate the kernel objective and budget to its supervisor through the worker. Pass the
+call's plan and evidence paths in `EXTRA_STEER`. Track the returned handle while other
+work proceeds. Use the cold-verified kernel delivery to decide whether to call Apply
+back and Evaluate on the serving workload.
+
 Act on new evidence while other calls run. An implementation failure leaves a capability
 gap to resolve, not a closed optimization path. Choose bounded repair, another suitable
 implementation, or establish the actual resource/evidence limit. Route defects to their

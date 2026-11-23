@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "geak search decision (one round)",
+  "type": "object",
+  "required": ["round", "strategy", "actions"],
+  "properties": {
+    "round": {"type": "integer", "minimum": 0},
+    "strategy": {"type": "string"},
+    "team": {
+      "type": "object",
+      "description": "This round's role names and dispatch briefs, chosen by the kernel supervisor.",
+      "additionalProperties": {"type": "string", "minLength": 1}
+    },
+    "policy_proposals_used": {"type": "array", "items": {"type": "integer"}},
+    "actions": {"type": "array", "items": {
+      "type": "object",
+      "required": ["op", "why"],
+      "properties": {
+        "op": {"enum": ["mutate", "fresh", "combine", "measure", "investigate", "ship", "custom", "stop"]},
+        "why": {"type": "string", "minLength": 10},
+        "owner": {"type": "string", "description": "Name of this action's executor in team."},
+        "parent": {"type": "string"}, "parents": {"type": "array", "items": {"type": "string"}},
+        "kind": {"enum": ["merge", "dispatch"]}, "cut": {"type": "string"}, "direction": {"type": "string"},
+        "refs": {"type": "array", "items": {"type": "string"}}, "retain": {"enum": ["best", "development"]},
+        "nodes": {"type": "array", "items": {"type": "string"}}, "instrument": {"type": "string"}, "reps": {"type": "integer"},
+        "mode": {"type": "string"}, "question": {"type": "string"}, "node": {"type": "string"},
+        "role": {"type": "string"}, "args": {"type": "object"}, "tags": {"type": "object"},
+        "outcome": {"type": "object", "properties": {
+          "nodes": {"type": "array", "items": {"type": "string"}}, "status": {"type": "string"},
+          "score_delta": {"type": "number"}, "joined_front": {"type": "boolean"}, "shipped": {"type": "boolean"}}}
+      },
+      "allOf": [
+        {"if": {"properties": {"op": {"const": "mutate"}}}, "then": {"required": ["parent", "cut", "direction"]}},
+        {"if": {"properties": {"op": {"const": "fresh"}}}, "then": {"required": ["cut", "direction"]}},
+        {"if": {"properties": {"op": {"const": "combine"}}}, "then": {"required": ["parents", "kind"]}},
+        {"if": {"properties": {"op": {"const": "measure"}}}, "then": {"required": ["nodes"]}},
+        {"if": {"properties": {"op": {"const": "investigate"}}}, "then": {"required": ["mode", "question"]}},
+        {"if": {"properties": {"op": {"const": "ship"}}}, "then": {"required": ["node"]}},
+        {"if": {"properties": {"op": {"const": "custom"}}}, "then": {"required": ["role"]}}
+      ]
+    }}
+  }
+}
