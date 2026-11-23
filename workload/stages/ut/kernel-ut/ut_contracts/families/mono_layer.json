@@ -2,18 +2,18 @@
   "ut_contract_version": 1,
   "family": "mono_layer",
   "op_kind": "collective",
-  "description": "Whole-layer persistent monokernel with in-kernel peer exchanges (sgl-amd-mono: Muse Spark target / draft layer, GLM flash, Kimi ...): ONE launch a layer runs attention over the paged KV cache, o_proj + TP all-reduce, router / top-k, the experts + EP exchange and the next layer's QKV / KV write, pairing with its peer ranks through IPC peer buffers and epoch-tagged mailboxes. Correctness runs through call() and the rank harness; timing is rank_chain (shared/rank_timing.py): every rank times CUDA-graph replays of a chain of distinct layers.",
-  "match": {"kernel": ["muse_spark_layer_|muse_spark_k1_|muse_spark_d(pre|attn|post|mlp)_|muse_spark_draft_layer|_mono_layer|monokernel"], "op": ["MonoRunner|MuseMonoRunner|DraftRunner|mono_layer"]},
+  "description": "Whole-layer persistent monokernel with in-kernel peer exchanges (sgl-amd-mono: Muse Spark target / draft layer, GLM flash, Kimi ...; vLLM DeepSeek-V4.1 --monokernel: K1 + K2 a layer, mHC residual stream): ONE launch a layer runs attention over the paged KV cache, o_proj + TP all-reduce, router / top-k, the experts + EP exchange and the next layer's QKV / KV write, pairing with its peer ranks through IPC peer buffers and epoch-tagged mailboxes. Correctness runs through call() and the rank harness; timing is rank_chain (shared/rank_timing.py): every rank times CUDA-graph replays of a chain of distinct layers.",
+  "match": {"kernel": ["muse_spark_layer_|muse_spark_k1_|muse_spark_d(pre|attn|post|mlp)_|muse_spark_draft_layer|_mono_layer|monokernel|dsv41_mono_(k1|k2|ffn)_"], "op": ["MonoRunner|MuseMonoRunner|DraftRunner|mono_layer|DSV41MonoLayer|MonoDecodeLayer|flydsl_kernels:_run_compiled@DeepseekV4DecoderLayer"]},
   "reference": "oracle:split",
   "oracles": {
     "split": {"path": "split", "overlay": "baseline",
-              "doc": "the same step through the baseline's per-stage launches (target: the runner with use_layer=False; draft: the STAGE=2 runner), every gated output including the KV cache writes and routing ids. A whole-layer launch must reproduce what its stages compute; the candidate and the baseline both have to pass (the baseline is the oracle floor)."},
+              "doc": "the same step through the baseline's per-stage launches (Muse Spark target: the runner with use_layer=False; draft: the STAGE=2 runner; DeepSeek V4.1 target and draft: DSV41MonoLayer has no per-stage mode, so split is the baseline's own deployed K1 + K2 call -- as the Muse draft, whose deployed path is its per-stage path -- and the baseline itself rests on native), every gated output including the KV cache writes and routing ids. A whole-layer launch must reproduce what its stages compute; the candidate and the baseline both have to pass (the baseline is the oracle floor)."},
     "native": {"path": "native", "overlay": "baseline", "controls": false, "cases": "per_width_smallest",
-               "doc": "an implementation that does not share the monokernel's code (target: the per-stage torch references of sgl-amd-mono test/kernels combined over the ranks; draft: the SGLang DFlash modules' own reference), so the whole layer and its split cannot be wrong the same way. Run only on each width's smallest-context random case; it is not a leg of the negative controls.",
+               "doc": "an implementation that does not share the monokernel's code (Muse Spark target: the per-stage torch references of sgl-amd-mono test/kernels combined over the ranks; draft: the SGLang DFlash modules' own reference; DeepSeek V4.1: vLLM's own non-mono decode op chain as vLLM's tests/models/test_dsv41_mono_numerics.py runs it -- mHC seams, the ROCm attention ops, DeepseekV4MoE on the rank's shard at TP 1 -- the TP sums over the ranks), so the whole layer and its split cannot be wrong the same way. Run only on each width's smallest-context random case; it is not a leg of the negative controls.",
                "bounds": {"stream_out": {"kind": "sqnr", "min_db": 20, "delta": {"minus": "stream_in"}},
                           "layer_out": {"kind": "sqnr", "min_db": 20, "delta": {"minus": "stream_in", "along": "launches"}},
                           "attn_out": {"kind": "sqnr", "min_db": 20}, "kv_rows": {"kind": "sqnr", "min_db": 20}},
-               "bounds_doc": "SQNR of the step's CHANGE (stream_out - stream_in; each launch's layer_out minus the stream it entered with), not of the stream: the pass-through residual is N(0,1) and would carry a 26 dB check past a wholly wrong attention or MoE contribution whose rms is under ~5% of it. 20 dB = the layer's contribution right to 10% rms. attn_out (= norm of the stream) checks the norm, not the layer. The thresholds are calibrated at the first GPU floor run (the baseline's own sqnr against native is recorded). Calibration 2026-11-12 (Muse Spark target, TP8/EP8 TPX experts, runs/gpu/W8a, 2 cases x 3 draws, native teacher-forced per launch with near-tie routing aligned): baseline vs native stream_out 27.1-27.6 dB, layer_out 21.8-22.3, attn_out 23.5-24.0, kv_rows >= 75 dB; spread +-0.3 dB. attn_out 26 -> 20: it is the RMS-normed stream and inherits the stream's error, and the library's own TPX test (sgl-amd-mono test_muse_spark_k3.py test_k3_tpx_matches_the_compact_a4_math) admits row cosine >= 0.996 (~21 dB) between this path and the same reference.",
+               "bounds_doc": "SQNR of the step's CHANGE (stream_out - stream_in; each launch's layer_out minus the stream it entered with), not of the stream: the pass-through residual is N(0,1) and would carry a 26 dB check past a wholly wrong attention or MoE contribution whose rms is under ~5% of it. 20 dB = the layer's contribution right to 10% rms. attn_out (= norm of the stream) checks the norm, not the layer. The thresholds are calibrated at the first GPU floor run (the baseline's own sqnr against native is recorded). Calibration 2026-11-12 (Muse Spark target, TP8/EP8 TPX experts, runs/gpu/W8a, 2 cases x 3 draws, native teacher-forced per launch with near-tie routing aligned): baseline vs native stream_out 27.1-27.6 dB, layer_out 21.8-22.3, attn_out 23.5-24.0, kv_rows >= 75 dB; spread +-0.3 dB. attn_out 26 -> 20: it is the RMS-normed stream and inherits the stream's error, and the library's own TPX test (sgl-amd-mono test_muse_spark_k3.py test_k3_tpx_matches_the_compact_a4_math) admits row cosine >= 0.996 (~21 dB) between this path and the same reference. DeepSeek V4.1 (target, draft; native = vLLM's non-mono chain): NOT calibrated yet (2026-11-16, no GPU) -- the 20 dB floors are provisional until the first GPU floor run records the baseline's sqnr against native.",
                "outputs": ["stream_in", "stream_out", "attn_out", "layer_out", "kv_rows"]}
   },
   "axes": {
@@ -24,31 +24,46 @@
     "launches": {"lo": 1, "hi": 64, "doc": "layer launches the harness runs in one step (distinct layers, at least one full-attention and one sliding-window layer where the model has both)"},
     "pools": {"lo": 1, "hi": 2, "doc": "KV pools a launch can write (full and sliding-window); kv_rows/kv_stray are kept per pool"},
     "kv_width": {"lo": 1, "hi": 65536, "doc": "elements of one token's K (or V) row in a pool, decoded to float32"},
-    "topk": {"lo": 1, "hi": 64, "optional": true, "doc": "experts per token (routed_moe only)"}
+    "topk": {"lo": 1, "hi": 64, "optional": true, "doc": "experts per token (routed_moe only)"},
+    "hc": {"lo": 1, "hi": 16, "optional": true, "doc": "copies of the residual stream (stream_layout mhc: DeepSeek V4.1 hc_mult = 4); unused by a flat stream"}
   },
   "attrs": {
     "layer_kind": {"values": ["routed_moe", "dense"], "doc": "routed_moe: the layer routes tokens to experts and exposes ids (Muse Spark target); dense: no router (Muse Spark draft)"},
-    "stream_dtype": {"values": ["float32", "bfloat16"], "doc": "dtype of the residual stream the runner carries between layers"}
+    "stream_dtype": {"values": ["float32", "bfloat16"], "doc": "dtype of the residual stream the runner carries between layers"},
+    "stream_layout": {"values": ["flat", "mhc"], "doc": "flat: the stream is [rows, hidden] (Muse Spark); mhc: manifold-constrained hyper-connections (DeepSeek V4.1): the stream is [rows, hc, hidden] and the seam's mixes travel with it as stream_aux = post (hc) | comb (hc x hc) | pre (hc), f32 -- RankModel.STREAM_SHAPE / STREAM_AUX (mono_harness.py)"}
   },
   "inputs": {
-    "stream": {"shape": ["rows", "hidden"], "dtype": "attr:stream_dtype", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "per_call", "writable": true,
+    "stream": {"shape": {"by": "stream_layout", "cases": {"flat": ["rows", "hidden"], "mhc": ["rows", "hc", "hidden"]}},
+               "dtype": "attr:stream_dtype", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "per_call", "writable": true,
                "doc": "the residual stream entering the layer (replicated over the TP ranks); the launch updates it in place, so call() clones"},
+    "stream_aux": {"shape": ["rows", "hc * (hc + 2)"], "dtype": "float32", "dist": {"kind": "uniform", "lo": 0.0, "hi": 1.0}, "lifetime": "per_call",
+                   "present_when": "stream_layout == 'mhc'",
+                   "doc": "mhc: the previous seam's mixes entering the layer, post [hc] | comb [hc, hc] | pre [hc] packed per row (replicated over the TP ranks). Every later layer gets the kernel's own (Sinkhorn) mixes; uniform [0, 1) exercises the fold's arithmetic, not a trained mix"},
     "attn_input": {"shape": ["rows", "hidden"], "dtype": "bfloat16", "dist": {"kind": "normal", "std": 1.0}, "lifetime": "per_call",
                    "doc": "the layer's attention input (replicated over the TP ranks)"}
   },
   "outputs": {
-    "stream_out": {"shape": ["world", "rows", "hidden"], "dtype": "attr:stream_dtype", "require_finite": true,
+    "stream_out": {"shape": {"by": "stream_layout", "cases": {"flat": ["world", "rows", "hidden"], "mhc": ["world", "rows", "hc", "hidden"]}},
+                   "dtype": "attr:stream_dtype", "require_finite": true,
                    "bound": {"kind": "tolerance", "atol": 0.0078125, "rtol": 0.0078125, "delta": {"minus": "stream_in"}},
                    "doc": "every rank's residual stream after the step -- compare all ranks, not rank 0. Judged on the step's change stream_out - stream_in (the pass-through residual would otherwise dominate the relative term): |dc - dy| <= 1/128 + (1/128 + u)|dy| + 2u|y|, u the stream dtype's roundoff. 1/128: the split and whole-layer paths merge attention partitions in a different order (one bf16 ulp of the contribution)"},
     "attn_out": {"shape": ["world", "rows", "hidden"], "dtype": "bfloat16", "require_finite": true,
                  "bound": {"kind": "tolerance", "atol": 0.0078125, "rtol": 0.0078125},
                  "doc": "every rank's next attention input"},
-    "layer_out": {"shape": ["world", "launches", "rows", "hidden"], "dtype": "float32", "require_finite": true,
+    "layer_out": {"shape": {"by": "stream_layout", "cases": {"flat": ["world", "launches", "rows", "hidden"], "mhc": ["world", "launches", "rows", "hc", "hidden"]}},
+                  "dtype": "float32", "require_finite": true,
                   "bound": {"kind": "tolerance", "atol": 0.0078125, "rtol": 0.0078125, "delta": {"minus": "stream_in", "along": "launches"}},
                   "doc": "the stream / residual after each layer launch of the step: the interface state between launches, which an optimization cannot drop. Judged on each launch's change (layer_out[l] - layer_out[l-1], the first against stream_in)"},
-    "stream_in": {"shape": ["world", "rows", "hidden"], "dtype": "attr:stream_dtype", "require_finite": true,
+    "stream_in": {"shape": {"by": "stream_layout", "cases": {"flat": ["world", "rows", "hidden"], "mhc": ["world", "rows", "hc", "hidden"]}},
+                  "dtype": "attr:stream_dtype", "require_finite": true,
                   "bound": {"kind": "exact"},
                   "doc": "every rank's residual stream entering the step, read back by the harness before the first launch (the in-place stream is cloned first): what stream_out / layer_out are differenced against. Identical on every leg"},
+    "stream_aux_in": {"shape": ["world", "rows", "hc * (hc + 2)"], "dtype": "float32", "require_finite": true,
+                      "bound": {"kind": "exact"}, "present_when": "stream_layout == 'mhc'",
+                      "doc": "mhc: every rank's mixes entering the step, read back by the harness. Identical on every leg"},
+    "stream_aux_out": {"shape": ["world", "launches", "rows", "hc * (hc + 2)"], "dtype": "float32", "require_finite": true,
+                       "bound": {"kind": "tolerance", "atol": 0.0078125, "rtol": 0.0078125}, "present_when": "stream_layout == 'mhc'",
+                       "doc": "mhc: the mixes each layer launch hands the next (its FFN seam's post | comb | pre, fp32 Sinkhorn): interface state between launches, like layer_out"},
     "kv_rows": {"shape": ["world", "launches", "pools", 2, "rows", "kv_width"], "dtype": "float32", "require_finite": true,
                 "bound": {"kind": "tolerance", "atol": 0.015625, "rtol": 0.125, "per_row": true},
                 "max_violation_fraction": 0.0,
@@ -71,9 +86,8 @@
   "call": "A rank harness (references/collective-ut.md) runs the deployed runner's launches on every rank for one step and returns all ranks' outputs stacked; host setup (page tables, cache save/restore, input distribution) is part of call() and therefore must never be what is timed. Timing goes through rank_chain(), not call().",
   "timing": {
     "kind": "rank_chain",
-    "world": 8,
     "chain_length": 8,
-    "doc": "shared/rank_timing.py. cases.rank_chain(rank, world, group, case) builds, OUTSIDE the timed window, a chain of chain_length DISTINCT layers (own weights and KV caches, so weights are L2/MALL-cold as in a ~60-layer step) at the case's rows and context, and exposes step(n) = bootstrap + n chained launches + epoch bump (graph-safe), check() = guard error words, close(). Per-launch ms = (T[step(length)] - T[step(short)]) / (length - short) of CUDA-graph replays, all ranks after a barrier, the bucket = max over ranks. Method of the Muse Spark layer team's frozen bench (bench_worker.target_chain) and sgl-amd-mono test/kernels."
+    "doc": "world = the task's const axis world (the deployment's tp; scaffold_ut.py refuses a task that does not pin it). shared/rank_timing.py. cases.rank_chain(rank, world, group, case) builds, OUTSIDE the timed window, a chain of chain_length DISTINCT layers (own weights and KV caches, so weights are L2/MALL-cold as in a ~60-layer step) at the case's rows and context, and exposes step(n) = bootstrap + n chained launches + epoch bump (graph-safe), check() = guard error words, close(). Per-launch ms = (T[step(length)] - T[step(short)]) / (length - short) of CUDA-graph replays, all ranks after a barrier, the bucket = max over ranks. Method of the Muse Spark layer team's frozen bench (bench_worker.target_chain) and sgl-amd-mono test/kernels."
   },
   "negative_controls": [
     "drop a stage's contribution (the attention's softmax scale, the o_proj all-reduce's peer partials, an expert's routing score): the residual stream moves by ~|stream| on every rank",

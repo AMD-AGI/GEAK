@@ -93,13 +93,17 @@ reason, or a companion of a task with its reason.
       and `source_delivery_required: true`.
   - `scaffold`: `family` (or `family_file`), `target_callable`, the family's const `axes`
     and `attrs`, and `phase_regimes` (`{"DECODE": {"cuda_graph": true}}` when decode is
-    graph-launched).
+    graph-launched). Optional: `bind_module` / `bind_file` (a whole-package bind) and
+    `contract_overrides` (`[{path, value, why}]`).
   - `manifest.cases[]`: a unique `sig`, `regime` (phase or branch), `axes`, and a finite,
     nonnegative `effective_calls`. Also `kind` (`point` or `bucket`) and the evidence it
     came from. `manifest.replay_sigs` lists the graph-phase cases to replay.
   - `server_preimports`, `server_evidence` (`run/server_variants.json`,
     `run/server_calls.json`), `expected_launches` per phase, and
     `compile_variant_waivers` with a reason for each.
+  - Optional `launch_waivers` (`[{pattern, why}]`, expanded over `expected_launches`) and
+    `negative_controls` (`[{leaf, category, find, replace, expect}]`, replacing the scaffold's
+    stubs): a `mono_layer` model's verified sets in `references/mono_models.json`.
 - `blocked_identities[]`: `{kernel, blocker}` for each selected identity no task owns. Examples
   are a device copy, a HIP runtime kernel, or a symbol shared by several collectives.
 - `files`: `{relative path: {"sha256": ...}}` for every file the request ships, under

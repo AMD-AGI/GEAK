@@ -219,9 +219,12 @@ def _validate_delta(doc, name, bound, where="output"):
     if bound["kind"] not in ("tolerance", "sqnr"):
         raise ContractError("%s %s: delta applies to tolerance or sqnr bounds" % (where, name))
     if "along" in d:
-        shape = doc["outputs"][name].get("shape")
-        if not isinstance(shape, list) or d["along"] not in shape:
+        shapes = shape_cases(doc["outputs"][name].get("shape"))
+        if not shapes or any(d["along"] not in sh for sh in shapes):
             raise ContractError("%s %s: delta.along %r is not an axis of the output's shape"
+                                % (where, name, d["along"]))
+        if len({sh.index(d["along"]) for sh in shapes}) > 1:
+            raise ContractError("%s %s: delta.along %r sits at different positions in the shape's cases"
                                 % (where, name, d["along"]))
     if f64_reference(doc):
         raise ContractError("%s %s: delta is for oracle-referenced contracts (no float64 "
@@ -437,6 +440,16 @@ def present(spec, sym):
     return True if when is None else bool(evaluate(when, sym))
 
 
+def shape_cases(shape):
+    """Every axis-name list a `shape` can take: itself, or each case of a `{"by", "cases"}` shape
+    (a list of lists; [] for anything else)."""
+    if isinstance(shape, list):
+        return [shape]
+    if isinstance(shape, dict) and isinstance(shape.get("cases"), dict):
+        return [c for c in shape["cases"].values() if isinstance(c, list)]
+    return []
+
+
 def shape_of(spec, sym):
     """`shape` is a list of axis expressions, or `{"by": <attr>, "cases": {<value>: [...]}}`
     when an attribute changes the layout (`trans_b`: (n, k) or (k, n))."""
@@ -547,6 +560,22 @@ def _lint_leg_env(task_dir, meta):
     for d in (meta.get("ut_contract") or {}).get("process_state_allow") or []:
         if not (isinstance(d, dict) and d.get("prefix") and (d.get("why") or "").strip()):
             errors.append("process_state_allow entries need prefix and why: %r" % (d,))
+    return errors
+
+
+def _lint_launch_waivers(meta):
+    """meta.ut_contract.launch_waivers (ut_driver gate_launches): each entry names a kernel and
+    a phase the server launched it in (meta.expected_launches) and says why the UT never does.
+    A waiver of a kernel the evidence does not expect there waives nothing and goes stale
+    silently; one without a why would let the gate pass on an unexplained gap."""
+    errors = []
+    want = meta.get("expected_launches") or {}
+    for w in (meta.get("ut_contract") or {}).get("launch_waivers") or []:
+        if not (isinstance(w, dict) and w.get("kernel") and w.get("phase") and (w.get("why") or "").strip()):
+            errors.append("launch_waivers entries need kernel, phase and why: %r" % (w,))
+        elif w["kernel"] not in set(want.get(w["phase"]) or []):
+            errors.append("launch_waivers: %s in %s is not an expected launch of that phase "
+                          "(meta.expected_launches): the waiver waives nothing" % (w["kernel"], w["phase"]))
     return errors
 
 
@@ -792,6 +821,7 @@ def lint_task(task_dir):
         errors.append("meta.op_kind %r != contract op_kind %r" % (meta["op_kind"], doc["op_kind"]))
     errors.extend(_lint_rank_chain(task_dir, doc, meta))
     errors.extend(_lint_leg_env(task_dir, meta))
+    errors.extend(_lint_launch_waivers(meta))
 
     cases = manifest.get("cases") or []
     if not cases:
@@ -1674,7 +1704,8 @@ def _delta(spec, d, c, b, ref, cand, base, refs, rows):
     nothing, or the harness returned the input as the output)."""
     torch = _torch()
     minus = d["minus"]
-    axis = spec["shape"].index(d["along"]) if "along" in d else None
+    # the axis's position (_validate_delta: the same in every case of a `{"by", "cases"}` shape)
+    axis = shape_cases(spec["shape"])[0].index(d["along"]) if "along" in d else None
 
     def diff(x, m):
         x, m = x.detach().cpu().to(torch.float64), m.detach().cpu().to(torch.float64)

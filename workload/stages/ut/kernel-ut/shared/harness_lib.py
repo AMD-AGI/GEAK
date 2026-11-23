@@ -13,6 +13,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 
@@ -1118,14 +1119,33 @@ def _kill_process_group(proc, grace=5.0):
 
 
 def gpu_env(gpu):
-    """Pin a leg to one of the GPUs this process may use, by its logical index.
+    """Pin a leg to one of the GPUs this process may use, by its logical index ("0" or "0,1").
 
     HIP_VISIBLE_DEVICES indexes into whatever ROCR_VISIBLE_DEVICES (or the container's device
-    mounts) already exposes, so a logical index is right under both pinning schemes."""
+    mounts) already exposes. When this process is itself pinned with HIP_VISIBLE_DEVICES (a slot
+    lease that pins that way), the logical index is taken within that list instead of replacing it:
+    a leg must never escape its caller's devices (all legs of every slot on physical 0,1 otherwise)."""
     if gpu is None:
         return {}
     g = str(gpu)
+    outer = (os.environ.get("HIP_VISIBLE_DEVICES") or "").strip()
+    if outer:
+        devs = [d.strip() for d in outer.split(",") if d.strip()]
+        try:
+            g = ",".join(devs[int(i)] for i in g.split(","))
+        except (ValueError, IndexError):
+            raise ValueError("gpu_env(%r): logical index outside this process's HIP_VISIBLE_DEVICES=%s"
+                             % (gpu, outer)) from None
     return {"HIP_VISIBLE_DEVICES": g, "CUDA_VISIBLE_DEVICES": g}
+
+
+def leg_cwd(task_dir):
+    """Working directory of a leg process: the task's run/ (else the temp dir), never the task dir.
+    The task dir holds unittest.py; any `python -m` a framework starts inside the leg puts its cwd on
+    sys.path, and that file would shadow the stdlib unittest there (torch imports unittest.mock).
+    Legs take absolute paths only, so the cwd carries no meaning beyond that."""
+    run = os.path.join(task_dir, "run")
+    return run if os.path.isdir(run) else tempfile.gettempdir()
 
 
 def _run_leg(task_dir, overlay, mode, *, bucket="", out="", seed=0, draws=0, timeout=3600,
@@ -1157,7 +1177,7 @@ def _run_leg(task_dir, overlay, mode, *, bucket="", out="", seed=0, draws=0, tim
     # then times against a busy device and reads as a slowdown attributable to nothing.
     started = time.perf_counter()
     p = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                         start_new_session=True)
+                         start_new_session=True, cwd=leg_cwd(task_dir))
     try:
         stdout, stderr = p.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:

@@ -109,14 +109,18 @@ def _hook_stubs(doc):
 
 
 def rank_chain_timing(doc):
-    """meta.timing for a family timed by shared/rank_timing.py, else None. `world` follows the
-    task's pinned world axis (the deployment's rank count), then the family's default."""
+    """meta.timing for a family timed by shared/rank_timing.py, else None. `world` is the task's
+    pinned world axis (the deployment's rank count: TP8 Muse Spark, TP2 DeepSeek V4.1 ...); a
+    family may still state a default, but none is assumed -- a guessed rank count would time a
+    topology the deployment does not run."""
     t = doc.get("timing") or {}
     if t.get("kind") != "rank_chain":
         return None
-    pinned = ((doc.get("task") or {}).get("const_axes") or {}).get("world")
-    return {"kind": "rank_chain", "world": int(pinned or t.get("world", 8)),
-            "chain_length": int(t.get("chain_length", 8))}
+    pinned = ((doc.get("task") or {}).get("const_axes") or {}).get("world") or t.get("world")
+    if not pinned:
+        raise SystemExit("family %s is timed by rank_chain: pin the deployment's rank count "
+                         "(--axis world=<tp>)" % doc.get("family"))
+    return {"kind": "rank_chain", "world": int(pinned), "chain_length": int(t.get("chain_length", 8))}
 
 
 def workload_cases(manifest):
@@ -177,12 +181,23 @@ def mono_sources(doc, meta, name, package):
         return ax[n] if n in ax else default
 
     paths = ("deployed",) + tuple(dict.fromkeys(o["path"] for o in oracles.values()))
+    if attrs.get("stream_layout") == "mhc":
+        # mono_harness STREAM_SHAPE / STREAM_AUX: the [rows, hc, hidden] stream and its packed mixes
+        hc = axis("hc", None)
+        if hc is None:
+            raise SystemExit("stream_layout mhc needs the const axis hc (--axis hc=<hc_mult>)")
+        stream_hooks = ("STREAM_SHAPE = (%d, %s)        # mhc: [rows, hc, hidden] (contract stream_layout)\n"
+                        "    STREAM_AUX = (%d, torch.float32)  # mhc: post (hc) | comb (hc x hc) | pre (hc) a row; "
+                        "launch() takes and returns it\n" % (hc, axis("hidden"), hc * (hc + 2)))
+    else:
+        stream_hooks = "# STREAM_SHAPE / STREAM_AUX: flat stream [rows, HIDDEN] (contract stream_layout flat)\n"
     with open(os.path.join(HERE, "templates", "rank_model.py.tmpl")) as f:
         model = f.read().format(task_name=name, family=doc["family"], target_callable=meta["target_callable"],
                                 world=meta["timing"]["world"], launches=axis("launches"), pools=axis("pools", 2),
                                 hidden=axis("hidden"), kv_width=axis("kv_width"),
                                 topk=(axis("topk") if attrs.get("layer_kind", "routed_moe") == "routed_moe" else None),
                                 stream_dtype=attrs.get("stream_dtype", "float32"), paths=paths,
+                                stream_hooks=stream_hooks,
                                 package=package or "FILL_package")
     return cases, model
 

@@ -194,6 +194,39 @@ class QuickTimingSubsetTest(unittest.TestCase):
         self.assertEqual(sub['omitted_positive_mass'], [])
         self.assertNotIn('subset', full)
 
+class GpuPinningAndLegCwdTest(unittest.TestCase):
+    """gpu_env: a logical index within the caller's own HIP pinning; leg_cwd: never the task dir
+    (it holds unittest.py, which a framework's `python -m` inside a leg would import instead of
+    the stdlib: vLLM's model-registry probe crashed the DS V4.1 native oracle that way)."""
+
+    def env(self, **kv):
+        keys = ('HIP_VISIBLE_DEVICES', 'CUDA_VISIBLE_DEVICES', 'ROCR_VISIBLE_DEVICES')
+        p = patch.dict(os.environ, {}, clear=False)
+        p.start(); self.addCleanup(p.stop)
+        for k in keys:
+            os.environ.pop(k, None)
+        os.environ.update(kv)
+
+    def test_unpinned_and_rocr_pinned_callers_get_the_logical_index(self):
+        self.env()
+        self.assertEqual(H.gpu_env('0,1'), {'HIP_VISIBLE_DEVICES': '0,1', 'CUDA_VISIBLE_DEVICES': '0,1'})
+        self.assertEqual(H.gpu_env(None), {})
+        self.env(ROCR_VISIBLE_DEVICES='4,5')
+        self.assertEqual(H.gpu_env('0,1')['HIP_VISIBLE_DEVICES'], '0,1')
+
+    def test_a_hip_pinned_caller_maps_into_its_own_devices(self):
+        self.env(HIP_VISIBLE_DEVICES='2,3')
+        self.assertEqual(H.gpu_env('0,1')['HIP_VISIBLE_DEVICES'], '2,3')
+        self.assertEqual(H.gpu_env(1)['HIP_VISIBLE_DEVICES'], '3')
+        with self.assertRaises(ValueError):
+            H.gpu_env('2')
+
+    def test_leg_cwd_is_the_run_dir_or_temp_never_the_task_dir(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.assertEqual(H.leg_cwd(root), tempfile.gettempdir())
+            os.makedirs(os.path.join(root, 'run'))
+            self.assertEqual(H.leg_cwd(root), os.path.join(root, 'run'))
+
 class NativeLegTest(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()

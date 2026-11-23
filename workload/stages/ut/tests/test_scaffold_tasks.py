@@ -114,6 +114,19 @@ class ScaffoldTasksTest(unittest.TestCase):
         _, _, problems = S.check_request(str(self.path))
         self.assertTrue(any("override" in p for p in problems), problems)
 
+    def test_launch_waivers_and_controls_need_their_reasons(self):
+        task = self.doc["tasks"][0]
+        for key, bad in (("launch_waivers", [{"pattern": "_f0_", "why": " "}]),
+                         ("launch_waivers", [{"pattern": "(", "why": "x"}]),
+                         ("negative_controls", [{"leaf": "kernel_src/x.py", "category": "kv_slot",
+                                                 "find": "a", "replace": "b", "expect": ""}])):
+            with self.subTest(key=key, bad=bad):
+                task[key] = bad
+                self.path.write_text(json.dumps(self.doc))
+                _, _, problems = S.check_request(str(self.path))
+                self.assertTrue(any(key.replace("_", " ")[:-1] in p for p in problems), problems)
+                task.pop(key)
+
     def test_share_evidence_for_roofline_is_carried_only_when_passed(self):
         selection = self.root / "profile_selection.json"
         selection.write_text(json.dumps({"targets": [{"id": "k", "overall_pct": 12.5}]}))

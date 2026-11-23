@@ -31,6 +31,26 @@ harness needs and what is easy to get subtly wrong (DESIGN 1.5 / 6):
   * rank_chain timing (Chain): a chain of distinct layers through the deployed path, with a
     parity check against call()'s path on the same case;
   * the JIT cache keyed by the bytes of the package this leg resolved (leg_env).
+
+Optional RankModel hooks for a model whose stream or KV cache is not Muse-shaped (absent =
+the behaviour above, unchanged):
+
+  * STREAM_SHAPE (tuple): one row of the residual stream, default (HIDDEN,). DeepSeek V4.1's
+    mHC stream is (hc_mult, HIDDEN) = (4, 5120); stream_in / stream_out / layer_out carry it;
+  * STREAM_AUX ((width, dtype)): a per-row side state that travels with the stream between
+    launches (DeepSeek: the seam's post | comb | pre mixes, packed). launch() then takes and
+    returns it: launch(i, rows, m, fb, stream, x, aux) -> (stream, x, aux); the harness
+    captures it as stream_aux_in / stream_aux_out[launch] (family outputs);
+  * kv_bytes(layer, t, idx) -> int64 [rows, B]: the flat byte offsets (into t viewed as uint8,
+    contiguous) a slot's record owns, for a cache that cannot be indexed by slot on dim 0
+    (DeepSeek fp8_ds_mla: a page holds its records' data rows, then their scale words). The
+    harness poisons those bytes (0x7F), excludes them from kv_stray and gathers them for
+    kv_rows; graph-safe (device ops on idx only);
+  * kv_decode(layer, raw uint8 [rows, B]) -> float32 [rows, KV_WIDTH]: a record's values for
+    kv_rows. Without it kv_rows is byte-level: every byte read as one e4m3 code (the family's
+    kv_rows tolerance is one e4m3 code; B must equal KV_WIDTH);
+  * PACKAGE may be a dotted subpackage (vllm.models.deepseek_v41.amd.mono): it is located
+    without importing its parents (the overlay's finder claims the dotted name in a candidate leg).
 """
 
 import importlib.util
@@ -47,6 +67,11 @@ if __name__ == "__main__":
     # stdlib module torch imports -- drop it from the path first
     _TASK = os.path.dirname(os.path.abspath(__file__))
     sys.path[:] = [p for p in sys.path if os.path.abspath(p or ".") != _TASK]
+    # and leave the task dir as cwd (harness_lib.leg_cwd): a `python -m` subprocess the subject's
+    # framework starts would put the cwd on its sys.path and import the task's unittest.py
+    _CWD0 = os.getcwd()   # relative command-line paths (smoke's @plan.json) resolve against this
+    if os.path.abspath(_CWD0) == _TASK and os.path.isdir(os.path.join(_TASK, "run")):
+        os.chdir(os.path.join(_TASK, "run"))
 
 import torch
 
@@ -67,12 +92,18 @@ def _load_model():
     return mod
 
 
+# kv_stray is counted in chunks of this many bytes (no full-size changed mask on the device)
+_STRAY_CHUNK = 1 << 28
+
 M = _load_model()
 Model = M.RankModel
 NP = int(Model.WORLD)
 LAUNCHES = int(Model.LAUNCHES)
 PATHS = tuple(Model.PATHS)
 DEPLOYED = PATHS[0]
+STREAM_SHAPE = tuple(getattr(Model, "STREAM_SHAPE", None) or (int(Model.HIDDEN),))
+_AUX = getattr(Model, "STREAM_AUX", None)
+AUX_WIDTH, AUX_DTYPE = (int(_AUX[0]), _AUX[1]) if _AUX else (None, None)
 KV_POISON = 0x7F             # e4m3fn NaN
 IDS_POISON = -7
 # shared poison word: 0x7F7F7F7F is a finite fp32 / bf16-pair 3.4e38 (a stale partial a launch
@@ -105,8 +136,12 @@ class _Capture:
 
     def __init__(self, model, rows, dev):
         bufs = model.buffers()
-        self.stream_in = torch.empty(rows, Model.HIDDEN, device=dev, dtype=Model.STREAM_DTYPE)
-        self.layer_out = torch.empty(LAUNCHES, rows, Model.HIDDEN, device=dev, dtype=Model.STREAM_DTYPE)
+        self.stream_in = torch.empty(rows, *STREAM_SHAPE, device=dev, dtype=Model.STREAM_DTYPE)
+        self.layer_out = torch.empty(LAUNCHES, rows, *STREAM_SHAPE, device=dev, dtype=Model.STREAM_DTYPE)
+        self.aux_in = self.aux_out = None
+        if AUX_WIDTH:
+            self.aux_in = torch.empty(rows, AUX_WIDTH, device=dev, dtype=AUX_DTYPE)
+            self.aux_out = torch.empty(LAUNCHES, rows, AUX_WIDTH, device=dev, dtype=AUX_DTYPE)
         self.attn_out = torch.empty(rows, Model.HIDDEN, device=dev, dtype=Model.INPUT_DTYPE)
         self.ids = (torch.full((LAUNCHES, rows, Model.TOP_K), IDS_POISON, device=dev, dtype=torch.int32)
                     if Model.TOP_K and bufs.get("ids") is not None else None)
@@ -132,6 +167,8 @@ class Rank:
         self.caches = self.model.caches
         if len(self.caches) < LAUNCHES:
             raise RuntimeError("RankModel has %d layers' caches, fewer than LAUNCHES=%d" % (len(self.caches), LAUNCHES))
+        if hasattr(self.model, "kv_bytes") and not all(t.is_contiguous() for kv in self.caches for t in kv):
+            raise RuntimeError("RankModel.kv_bytes addresses flat bytes: every cache tensor must be contiguous")
         self.static = None
         self._shared = {}
 
@@ -145,9 +182,12 @@ class Rank:
         specs, kept = self.model.shared_layouts(rows)
         kept = list(kept)
         poisoned = []
+        missing = False
         for name, buf, layout_fn in specs:
             if buf is None:
+                # (yet: a runner may allocate a width's scratch at its first step) -- not cached
                 kept.append({"region": name, "why": "the runner has no such buffer"})
+                missing = True
                 continue
             try:
                 layout = layout_fn()
@@ -165,7 +205,8 @@ class Rank:
                     poisoned.append((buf, off, n, "%s.%s" % (name, rname)))
             if end < buf.numel():
                 kept.append({"region": "%s[%d:%d]" % (name, end, buf.numel()), "why": "outside the layout"})
-        self._shared[rows] = (poisoned, kept)
+        if not missing:
+            self._shared[rows] = (poisoned, kept)
         return poisoned, kept
 
     def poison_shared(self, rows):
@@ -186,7 +227,11 @@ class Rank:
         for layer in self.model.writes(path, i):
             idx = targets[self.model.pool_of(layer)]
             for t in self.caches[layer]:
-                t.view(torch.uint8).index_fill_(0, idx, KV_POISON)
+                flat = self._kv_bytes(layer, t, idx)
+                if flat is None:
+                    t.view(torch.uint8).index_fill_(0, idx, KV_POISON)
+                else:
+                    t.view(torch.uint8).view(-1).index_fill_(0, flat.reshape(-1), KV_POISON)
         bufs = self.model.buffers()
         if bufs.get("ids") is not None:
             bufs["ids"][:rows].fill_(IDS_POISON)
@@ -196,13 +241,24 @@ class Rank:
             for t in _floats((bufs.get("inputs") or {}).values()):
                 t[:rows].fill_(float("nan"))
 
+    def _kv_bytes(self, layer, t, idx):
+        """RankModel.kv_bytes (a record's flat bytes, [rows, B] int64), or None: slots on dim 0."""
+        fn = getattr(self.model, "kv_bytes", None)
+        return None if fn is None else fn(layer, t, idx)
+
     # ------------------------------------------------------------------ one step (graph-safe)
-    def _launches(self, rows, path, m, fb, stream, x, cap):
+    def _launches(self, rows, path, m, fb, stream, x, cap, aux=None):
         mdl = self.model
         cap.stream_in.copy_(stream)
+        if cap.aux_in is not None:
+            cap.aux_in.copy_(aux)
         for i in range(LAUNCHES):
             self._poison_launch(i, path, m, rows)
-            stream, x = mdl.launch(i, rows, m, fb, stream, x)
+            if AUX_WIDTH:
+                stream, x, aux = mdl.launch(i, rows, m, fb, stream, x, aux)
+                cap.aux_out[i].copy_(aux)
+            else:
+                stream, x = mdl.launch(i, rows, m, fb, stream, x)
             cap.layer_out[i].copy_(stream)
             bufs = mdl.buffers()
             if cap.ids is not None:
@@ -237,14 +293,48 @@ class Rank:
             idx = targets[p]
             written = layer < LAUNCHES
             for j, (t, s) in enumerate(zip(kv, kvs)):
-                changed = t.view(torch.uint8) != s.view(torch.uint8)
+                tb, sb = t.view(torch.uint8), s.view(torch.uint8)
+                if not (tb.is_contiguous() and sb.is_contiguous()):
+                    changed = tb != sb    # full-size mask: only for a non-contiguous cache
+                    if written:
+                        flat = self._kv_bytes(layer, t, idx)
+                        if flat is None:
+                            kv_rows[layer, p, j] = t[idx].float().reshape(rows, kvw).cpu()
+                            changed[idx] = False
+                        else:
+                            raw = tb.view(-1)[flat]
+                            dec = getattr(self.model, "kv_decode", None)
+                            val = dec(layer, raw) if dec is not None else raw.view(torch.float8_e4m3fn).float()
+                            kv_rows[layer, p, j] = val.reshape(rows, kvw).cpu()
+                            changed.view(-1)[flat.reshape(-1)] = False
+                    kv_stray[min(layer, LAUNCHES - 1), p] += int(changed.sum())
+                    continue
+                # contiguous: count changed bytes in chunks (no full-size mask), then take back the
+                # written positions' changed bytes -- the same count as masking them out
+                tf, sf = tb.reshape(-1), sb.reshape(-1)
+                n = 0
+                for o in range(0, tf.numel(), _STRAY_CHUNK):
+                    n += int((tf[o:o + _STRAY_CHUNK] != sf[o:o + _STRAY_CHUNK]).sum())
                 if written:
-                    kv_rows[layer, p, j] = t[idx].float().reshape(rows, kvw).cpu()
-                    changed[idx] = False
-                kv_stray[min(layer, LAUNCHES - 1), p] += int(changed.sum())
+                    flat = self._kv_bytes(layer, t, idx)
+                    if flat is None:
+                        kv_rows[layer, p, j] = t[idx].float().reshape(rows, kvw).cpu()
+                        u = torch.unique(torch.as_tensor(idx, device=t.device).reshape(-1))
+                        n -= int((tb[u] != sb[u]).sum())
+                    else:
+                        raw = tf[flat]
+                        dec = getattr(self.model, "kv_decode", None)
+                        val = dec(layer, raw) if dec is not None else raw.view(torch.float8_e4m3fn).float()
+                        kv_rows[layer, p, j] = val.reshape(rows, kvw).cpu()
+                        u = torch.unique(flat.reshape(-1))
+                        n -= int((tf[u] != sf[u]).sum())
+                kv_stray[min(layer, LAUNCHES - 1), p] += n
         out = {"stream_out": cap.layer_out[LAUNCHES - 1].cpu(), "attn_out": cap.attn_out.cpu(),
                "layer_out": cap.layer_out.cpu(), "stream_in": cap.stream_in.cpu(),
                "kv_rows": kv_rows, "kv_stray": kv_stray}
+        if cap.aux_in is not None:
+            out["stream_aux_in"] = cap.aux_in.cpu()
+            out["stream_aux_out"] = cap.aux_out.cpu()
         if Model.TOP_K:
             out["ids"] = (cap.ids.cpu() if cap.ids is not None
                           else torch.full((LAUNCHES, rows, Model.TOP_K), IDS_POISON, dtype=torch.int32))
@@ -253,8 +343,9 @@ class Rank:
         return out
 
     # ------------------------------------------------------------------ eager step
-    def step(self, rows, context, stream, attn_input, path=DEPLOYED):
-        """One step on `path`, every rank in lockstep (the barrier follows the poisoning)."""
+    def step(self, rows, context, stream, attn_input, path=DEPLOYED, aux=None):
+        """One step on `path`, every rank in lockstep (the barrier follows the poisoning). aux: the
+        STREAM_AUX state entering the step (models that declare one)."""
         import torch.distributed as dist
 
         if path not in PATHS:
@@ -269,10 +360,11 @@ class Rank:
         snap = self._snapshot()
         st = stream.to(self.dev).to(Model.STREAM_DTYPE).contiguous().clone()
         x = attn_input.to(self.dev).contiguous().clone()
+        a = _aux_on(aux, self.dev)
         torch.cuda.synchronize(self.dev)
         dist.barrier()
         try:
-            self._launches(rows, path, m, fb, st, x, cap)
+            self._launches(rows, path, m, fb, st, x, cap, a)
             torch.cuda.synchronize(self.dev)
             out = self._collect(rows, m, cap, snap)
         finally:
@@ -282,7 +374,7 @@ class Rank:
         return out
 
     # ------------------------------------------------------------------ graph replay
-    def fill(self, rows, context, stream, attn_input, width, static=None):
+    def fill(self, rows, context, stream, attn_input, width, static=None, aux=None):
         """Copy a case into the static buffers (allocated once, at the first fill), then a
         barrier: no rank may replay into a peer buffer another rank is still poisoning."""
         import torch.distributed as dist
@@ -290,7 +382,7 @@ class Rank:
         s = static if static is not None else self.static
         if s is None:
             s = self.static = _Static(self, rows, width)
-        s.fill(rows, context, stream, attn_input)
+        s.fill(rows, context, stream, attn_input, aux)
         torch.cuda.synchronize(self.dev)
         dist.barrier()
         return s
@@ -320,28 +412,28 @@ class Rank:
         cases = []
         for st in plan:
             rows, context = int(st["rows"]), int(st["context"])
-            stream, x = make_inputs(rows, int(st["seed"]))
-            cases.append((rows, context, stream, x, st["mode"]))
-        refs = [self.step(rows, context, stream, x) for rows, context, stream, x, _ in cases]
+            stream, x, aux = make_inputs(rows, int(st["seed"]), with_aux=True)
+            cases.append((rows, context, stream, x, aux, st["mode"]))
+        refs = [self.step(rows, context, stream, x, DEPLOYED, aux) for rows, context, stream, x, aux, _ in cases]
         statics = {}
-        for rows, context, stream, x, mode in cases:
+        for rows, context, stream, x, aux, mode in cases:
             if mode == "g" and rows not in statics:
                 s = statics[rows] = _Static(self, rows, width_of[rows])
-                self.fill(rows, context, stream, x, None, static=s)
+                self.fill(rows, context, stream, x, None, static=s, aux=aux)
                 s.capture()
                 self._restore_static(s)
         got = []
         try:
-            for rows, context, stream, x, mode in cases:
+            for rows, context, stream, x, aux, mode in cases:
                 if mode == "g":
                     s = statics[rows]
-                    self.fill(rows, context, stream, x, None, static=s)
+                    self.fill(rows, context, stream, x, None, static=s, aux=aux)
                     s.graph.replay()
                     got.append(s.read())
                 elif mode == "s":
-                    got.append(self.step(rows, context, stream, x, PATHS[1]))
+                    got.append(self.step(rows, context, stream, x, PATHS[1], aux))
                 else:
-                    got.append(self.step(rows, context, stream, x))
+                    got.append(self.step(rows, context, stream, x, DEPLOYED, aux))
         finally:
             for s in statics.values():
                 s.release()
@@ -362,12 +454,13 @@ class _Static:
         self.R, self.rows, self.width = rank, rows, width
         self.m = None
         self.cap = _Capture(rank.model, rows, rank.dev)
-        self.stream = torch.empty(rows, Model.HIDDEN, device=rank.dev, dtype=Model.STREAM_DTYPE)
+        self.stream = torch.empty(rows, *STREAM_SHAPE, device=rank.dev, dtype=Model.STREAM_DTYPE)
         self.x = torch.empty(rows, Model.HIDDEN, device=rank.dev, dtype=Model.INPUT_DTYPE)
+        self.aux = torch.empty(rows, AUX_WIDTH, device=rank.dev, dtype=AUX_DTYPE) if AUX_WIDTH else None
         self.snap = None
         self.graph = None
 
-    def fill(self, rows, context, stream, attn_input):
+    def fill(self, rows, context, stream, attn_input, aux=None):
         R = self.R
         torch.cuda.synchronize(R.dev)
         if self.snap is not None:
@@ -388,11 +481,13 @@ class _Static:
         self.snap = R._snapshot()
         self.stream.copy_(stream.to(R.dev))
         self.x.copy_(attn_input.to(R.dev))
+        if self.aux is not None:
+            self.aux.copy_(_aux_on(aux, R.dev))
 
     def run(self):
         # kv_targets is evaluated in the step on the static meta, so a graph replay indexes the
         # slots of whatever case was filled last
-        self.R._launches(self.rows, DEPLOYED, self.m, self.fb, self.stream, self.x, self.cap)
+        self.R._launches(self.rows, DEPLOYED, self.m, self.fb, self.stream, self.x, self.cap, self.aux)
 
     def capture(self):
         s = torch.cuda.Stream()
@@ -422,12 +517,25 @@ class _Static:
             self.snap = None
 
 
-def make_inputs(rows, seed):
-    """An interleave step's own stream and attention input (CPU), from its seed."""
+def make_inputs(rows, seed, with_aux=False):
+    """An interleave step's own stream and attention input (CPU), from its seed; with_aux: and
+    its STREAM_AUX state (uniform [0, 1), as the family's stream_aux input; None without one)."""
     g = torch.Generator(device="cpu").manual_seed(int(seed))
-    stream = torch.randn(rows, Model.HIDDEN, generator=g).to(Model.STREAM_DTYPE)
+    stream = torch.randn(rows, *STREAM_SHAPE, generator=g).to(Model.STREAM_DTYPE)
     x = torch.randn(rows, Model.HIDDEN, generator=g).to(Model.INPUT_DTYPE)
-    return stream, x
+    if not with_aux:
+        return stream, x
+    aux = torch.rand(rows, AUX_WIDTH, generator=g).to(AUX_DTYPE) if AUX_WIDTH else None
+    return stream, x, aux
+
+
+def _aux_on(aux, dev):
+    """The STREAM_AUX operand on `dev` (None for a model without one; required with one)."""
+    if not AUX_WIDTH:
+        return None
+    if aux is None:
+        raise ValueError("RankModel declares STREAM_AUX: the step needs its stream_aux operand")
+    return aux.to(dev).to(AUX_DTYPE).contiguous().clone()
 
 
 # ----------------------------------------------------------------------------- the group
@@ -447,10 +555,40 @@ def _package_root():
     pkg = sys.modules.get(Model.PACKAGE)
     if pkg is not None:
         return list(pkg.__path__)[0]
+    if "." in Model.PACKAGE:
+        return _subpackage_root(Model.PACKAGE)
     spec = importlib.util.find_spec(Model.PACKAGE)
     if spec is None or not spec.submodule_search_locations:
         raise RuntimeError("%s does not resolve to a package on this leg" % Model.PACKAGE)
     return list(spec.submodule_search_locations)[0]
+
+
+def _subpackage_root(name):
+    """A dotted PACKAGE's directory without importing its parents (find_spec of a dotted name
+    imports them, e.g. all of vllm). A meta-path finder that claims the dotted name itself (the
+    candidate overlay's) wins; otherwise the directory under the top-level package's location."""
+    import importlib.machinery as mach
+
+    for finder in sys.meta_path:
+        if finder in (mach.PathFinder, mach.BuiltinImporter, mach.FrozenImporter) or \
+                isinstance(finder, type) and issubclass(finder, (mach.PathFinder, mach.BuiltinImporter, mach.FrozenImporter)):
+            continue   # these search by the name's last part: not a dotted-name claim
+        fs = getattr(finder, "find_spec", None)
+        try:
+            spec = fs(name, None) if fs else None
+        except Exception:  # noqa: BLE001 - a third-party finder that cannot answer
+            spec = None
+        if spec is not None and spec.submodule_search_locations:
+            return list(spec.submodule_search_locations)[0]
+    parts = name.split(".")
+    top = importlib.util.find_spec(parts[0])
+    if top is None or not top.submodule_search_locations:
+        raise RuntimeError("%s does not resolve to a package on this leg" % parts[0])
+    for base in top.submodule_search_locations:
+        d = os.path.join(base, *parts[1:])
+        if os.path.isfile(os.path.join(d, "__init__.py")):
+            return d
+    raise RuntimeError("%s does not resolve to a package on this leg" % name)
 
 
 def source_digest():
@@ -592,12 +730,13 @@ def _stack(outs):
     return {k: torch.stack([o[k] for o in outs]) for k in outs[0]}
 
 
-def call_ranks(rows, context, stream, attn_input, path=DEPLOYED):
+def call_ranks(rows, context, stream, attn_input, path=DEPLOYED, aux=None):
     """One step on all ranks on `path`; every rank's outputs, stacked, on the operands' device."""
     G = group()
     sc, xc = stream.detach().cpu(), attn_input.detach().cpu()
-    G.cmd("step", rows, context, sc, xc, path)
-    mine = G.rank.step(rows, context, sc, xc, path)
+    ac = aux.detach().cpu() if aux is not None else None
+    G.cmd("step", rows, context, sc, xc, path, ac)
+    mine = G.rank.step(rows, context, sc, xc, path, ac)
     outs = G.gather(None)
     outs[0] = mine
     dev = stream.device
@@ -615,10 +754,11 @@ class Replay:
         self.width = width
         self.captured = False
 
-    def fill(self, rows, context, stream, attn_input):
+    def fill(self, rows, context, stream, attn_input, aux=None):
         sc, xc = stream.detach().cpu(), attn_input.detach().cpu()
-        self.G.cmd("fill", rows, context, sc, xc, self.width, self.captured)
-        self.G.rank.fill(rows, context, sc, xc, self.width)
+        ac = aux.detach().cpu() if aux is not None else None
+        self.G.cmd("fill", rows, context, sc, xc, self.width, self.captured, ac)
+        self.G.rank.fill(rows, context, sc, xc, self.width, aux=ac)
 
     def run(self):
         if torch.cuda.is_current_stream_capturing():
@@ -638,7 +778,8 @@ class Replay:
 
 
 # ----------------------------------------------------------------------------- interleave
-GATED = ("stream_out", "attn_out", "layer_out", "stream_in", "kv_rows", "kv_stray", "ids")
+GATED = ("stream_out", "attn_out", "layer_out", "stream_in", "kv_rows", "kv_stray", "ids",
+         "stream_aux_in", "stream_aux_out")
 
 
 def _close(name, ref, got):
@@ -759,16 +900,25 @@ class Chain:
         # the case's operands (cases.make_args): the same ones call() gets for this case
         self.stream0 = args["stream"].to(dev).to(Model.STREAM_DTYPE).contiguous()
         self.x0 = args["attn_input"].to(dev).contiguous()
+        self.aux0 = _aux_on(args.get("stream_aux"), dev)
         self.stream = torch.empty_like(self.stream0)
         self.x = torch.empty_like(self.x0)
+        self.aux = torch.empty_like(self.aux0) if self.aux0 is not None else None
+        self.last = None
         self.parity = None
 
     def step(self, n):
-        self.stream.copy_(self.stream0)          # the launch updates the stream in place
+        self.stream.copy_(self.stream0)          # the launch updates the stream in place (Muse)
         self.x.copy_(self.x0)
-        st, x = self.stream, self.x
+        if self.aux is not None:
+            self.aux.copy_(self.aux0)
+        st, x, aux = self.stream, self.x, self.aux
         for i in range(n):
-            st, x = self.model.launch(i, self.rows, self.meta, self.fb, st, x)
+            if AUX_WIDTH:
+                st, x, aux = self.model.launch(i, self.rows, self.meta, self.fb, st, x, aux)
+            else:
+                st, x = self.model.launch(i, self.rows, self.meta, self.fb, st, x)
+        self.last = st                           # or returns a new one (DeepSeek V4.1)
         self.model.end_step()
 
     def _guard_words(self):
@@ -780,7 +930,8 @@ class Chain:
         """call()'s path once on this case (every rank, collective) against the chain's step(1)."""
         ref = Rank(self.rank, self.dev, self.group)
         try:
-            out = ref.step(self.rows, self.context, self.stream0.cpu(), self.x0.cpu(), DEPLOYED)
+            out = ref.step(self.rows, self.context, self.stream0.cpu(), self.x0.cpu(), DEPLOYED,
+                           self.aux0.cpu() if self.aux0 is not None else None)
         finally:
             torch.cuda.synchronize(self.dev)
             ref.model.close()
@@ -790,7 +941,7 @@ class Chain:
         torch.cuda.synchronize(self.dev)
         self._guard_words()
         s_in = self.stream0.double().cpu()
-        got = self.stream.double().cpu() - s_in
+        got = self.last.double().cpu() - s_in
         want = out["layer_out"][0].double() - s_in
         err = (got - want).abs()
         lim = PARITY_TOL + PARITY_TOL * want.abs()
@@ -836,8 +987,8 @@ def _helper(rank, port):
             out = me.step(*msg[1:])
             dist.gather_object(out, None, dst=0)
         elif op == "fill":
-            rows, context, sc, xc, width, replay = msg[1:]
-            me.fill(rows, context, sc, xc, width)
+            rows, context, sc, xc, width, replay = msg[1:7]
+            me.fill(rows, context, sc, xc, width, aux=msg[7] if len(msg) > 7 else None)
             if replay and graph is not None:
                 graph.replay()
         elif op == "run":
@@ -866,15 +1017,15 @@ def _smoke(argv):
     t0 = time.time()
     G = group()
     print("group+build", round(time.time() - t0, 1), flush=True)
-    st, x = make_inputs(rows, 1)
+    st, x, aux = make_inputs(rows, 1, with_aux=True)
     res = {}
     for path in (DEPLOYED,) + PATHS:
         t = time.time()
-        res.setdefault(path, []).append(call_ranks(rows, context, st, x, path))
+        res.setdefault(path, []).append(call_ranks(rows, context, st, x, path, aux))
         print("step", path, round(time.time() - t, 2), flush=True)
     a, a2 = res[DEPLOYED][0], res[DEPLOYED][1]
-    for other in PATHS[1:]:
-        s = res[other][0]
+    for other in PATHS[1:] or (DEPLOYED,):   # a deployed-only model: its two runs against each other
+        s = res[other][1] if other == DEPLOYED else res[other][0]
         for name in GATED:
             if name not in a:
                 continue
@@ -897,7 +1048,7 @@ def _smoke(argv):
             large = [int(c) for c in argv[5].split(",")]
             plan = interleave_plan(small, large)
         else:
-            plan = [{"seed": 9000 + 7 * k, **s_} for k, s_ in enumerate(json.load(open(argv[3][1:])))]
+            plan = [{"seed": 9000 + 7 * k, **s_} for k, s_ in enumerate(json.load(open(os.path.join(globals().get("_CWD0", ""), argv[3][1:]))))]
         r = run_interleave(plan)
         print("interleave", r["ok"], json.dumps([{k: v for k, v in s_.items() if k != "outputs"} for s_ in r["steps"]]),
               flush=True)
@@ -914,7 +1065,16 @@ if __name__ == "__main__":
             _helper(int(sys.argv[2]), int(sys.argv[3]))
         finally:
             os._exit(0)
+    rc = 1
     try:
         _smoke(sys.argv)
+        rc = 0
+    except BaseException:
+        # print before os._exit (which skips the interpreter's own traceback): a crashed path must
+        # fail the smoke, not exit 0
+        import traceback
+        traceback.print_exc()
     finally:
-        os._exit(0)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(rc)

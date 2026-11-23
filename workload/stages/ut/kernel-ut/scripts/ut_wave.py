@@ -28,6 +28,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -422,13 +423,22 @@ PASS_ENV = ("WORKLOAD_AGENT_ENV_FILE", "WORKLOAD_AGENT_STATE_BASE", "WORKLOAD_AG
             "CLAUDE_BIN", "KERNEL_EXTRACT_NODE", "GEAK_ROOT", "WORKLOAD_ROOT", "SHARED_TOOLS", "HF_HOME")
 
 
+# Cache / scratch locations of the PROFILED server (its node-local dirs, e.g. TRITON_CACHE_DIR or
+# XDG_CACHE_HOME under /mnt/<scratch>/<user>/...): they select no code path, and on another node or
+# for another user they do not exist or are not writable (the first import fails). A lane keeps
+# its own defaults for them.
+_SERVING_SCRATCH = re.compile(r"(_CACHE_(DIR|HOME|ROOT|PATH)|^XDG_CACHE_HOME|^TMPDIR|^TMP|^TEMP)$")
+
+
 def lane_env(serving, extra):
     """What a lane runs under: the deployment's environment from --serving (kernel
-    dispatch reads it -- SGLANG_USE_AITER selects whole code paths), its PYTHONPATH prefix,
-    the runner's credentials pointers, then --env overrides."""
+    dispatch reads it -- SGLANG_USE_AITER selects whole code paths) minus its server's cache /
+    scratch dirs (_SERVING_SCRATCH), its PYTHONPATH prefix, the runner's credentials pointers,
+    then --env overrides."""
     env = {}
     if serving:
-        env.update({k: str(v) for k, v in (serving.get("env") or {}).items()})
+        env.update({k: str(v) for k, v in (serving.get("env") or {}).items()
+                    if not _SERVING_SCRATCH.search(k)})
         if serving.get("pythonpath_prepend"):
             env["PYTHONPATH"] = serving["pythonpath_prepend"]
     env.update({k: os.environ[k] for k in PASS_ENV if os.environ.get(k)})

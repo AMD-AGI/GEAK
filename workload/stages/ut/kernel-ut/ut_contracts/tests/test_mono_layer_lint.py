@@ -2,7 +2,9 @@
 of gated outputs, compare_one's handling of a subject that left a poisoned (non-finite) value where
 the compared-against output is finite, the negative-control gate on such outputs
 (ut_driver.numerical_control_outputs), and `scaffold_ut.py new --family mono_layer` (generic rank
-harness, mono templates, control stubs).
+harness, mono templates, control stubs), the stream layouts / world axis / harness hooks beyond
+Muse Spark, and the DeepSeek-V4.1-Flash models (references/mono_models.json, launch waivers and
+negative controls as scaffold_tasks.py stamps them, the worked examples against the template).
 
 Run: python3 workload/stages/ut/kernel-ut/ut_contracts/tests/test_mono_layer_lint.py
 """
@@ -10,13 +12,16 @@ Run: python3 workload/stages/ut/kernel-ut/ut_contracts/tests/test_mono_layer_lin
 import ast
 import contextlib
 import io
+import importlib.util
 import json
 import math
 import os
+import re
 import shutil
 import sys
 import tempfile
 import types
+import textwrap
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -31,6 +36,7 @@ try:
     import torch
 except ImportError:
     torch = None
+HAVE_TORCH = torch is not None
 
 needs_torch = unittest.skipIf(torch is None, "torch is not installed")
 
@@ -62,7 +68,10 @@ class MonoLayerFamilyTest(unittest.TestCase):
     def test_gated_outputs_and_their_bounds(self):
         out = _family()["outputs"]
         self.assertEqual(set(out), {"stream_out", "attn_out", "layer_out", "stream_in", "kv_rows",
-                                    "kv_stray", "ids"})
+                                    "kv_stray", "ids", "stream_aux_in", "stream_aux_out"})
+        # the mhc stream's mixes (DeepSeek V4.1) exist only for stream_layout mhc
+        for name in ("stream_aux_in", "stream_aux_out"):
+            self.assertEqual(out[name]["present_when"], "stream_layout == 'mhc'", name)
         tol = {"kind": "tolerance", "atol": 1 / 128, "rtol": 1 / 128}
         self.assertEqual(out["attn_out"]["bound"], tol)
         self.assertEqual(out["stream_out"]["bound"], dict(tol, delta={"minus": "stream_in"}))
@@ -721,6 +730,631 @@ class MonoScaffold(unittest.TestCase):
             return set()
 
         self.assertEqual(members(tmpl) - members(ex), set())
+
+
+# --- stream layouts, world axis and harness hooks beyond Muse Spark (DeepSeek-V4.1 mhc) ---
+
+MUSE_AXES = {"hidden": 8192, "world": 8, "launches": 2, "pools": 2, "kv_width": 128, "topk": 8}
+MHC_AXES = {"hidden": 5120, "world": 2, "launches": 2, "pools": 2, "kv_width": 512, "topk": 6, "hc": 4}
+DS_ATTRS = {"layer_kind": "routed_moe", "stream_dtype": "bfloat16", "stream_layout": "mhc"}
+
+
+class StreamLayoutFamilyTest(unittest.TestCase):
+    def setUp(self):
+        self.fam = U.load_family("mono_layer")
+
+    def test_match_covers_the_dsv41_kernels_and_ops(self):
+        import re
+        k = re.compile(self.fam["match"]["kernel"][0])
+        op = re.compile(self.fam["match"]["op"][0])
+        for name in ("aiter::dsv41_mono_k1_s6_tp2_r2_tl0_f1_i0", "aiter::dsv41_mono_k2_s48_tp2_r1_tl0_i0",
+                     "aiter::dsv41_mono_ffn_s6_tp2_tl0", "aiter::muse_spark_layer_s8_q8_w8_n1_x"):
+            self.assertTrue(k.search(name), name)
+        for name in ("DSV41MonoLayer", "MonoDecodeLayer", "MuseMonoRunner"):
+            self.assertTrue(op.search(name), name)
+
+    def test_a_flat_task_keeps_the_muse_shapes(self):
+        doc = U.freeze_task_contract(self.fam, attrs={"layer_kind": "routed_moe", "stream_dtype": "float32"},
+                                     const_axes=MUSE_AXES)
+        self.assertEqual(doc["task"]["attrs"]["stream_layout"], "flat")
+        sym = U.symbols_for(doc, {"rows": 8, "context": 100})
+        got = {n: U.shape_of(o, sym) for n, o in doc["outputs"].items() if U.present(o, sym)}
+        self.assertEqual(got["stream_out"], (8, 8, 8192))
+        self.assertEqual(got["layer_out"], (8, 2, 8, 8192))
+        self.assertNotIn("stream_aux_out", got)
+        ins = {n: U.shape_of(o, sym) for n, o in doc["inputs"].items() if U.present(o, sym)}
+        self.assertEqual(ins, {"stream": (8, 8192), "attn_input": (8, 8192)})
+
+    def test_an_mhc_task_carries_the_hc_stream_and_its_mixes(self):
+        doc = U.freeze_task_contract(self.fam, attrs=DS_ATTRS, const_axes=MHC_AXES)
+        sym = U.symbols_for(doc, {"rows": 6, "context": 4096})
+        got = {n: U.shape_of(o, sym) for n, o in doc["outputs"].items() if U.present(o, sym)}
+        self.assertEqual(got["stream_out"], (2, 6, 4, 5120))
+        self.assertEqual(got["stream_in"], (2, 6, 4, 5120))
+        self.assertEqual(got["layer_out"], (2, 2, 6, 4, 5120))
+        self.assertEqual(got["attn_out"], (2, 6, 5120))
+        self.assertEqual(got["stream_aux_in"], (2, 6, 24))
+        self.assertEqual(got["stream_aux_out"], (2, 2, 6, 24))
+        self.assertEqual(got["kv_rows"], (2, 2, 2, 2, 6, 512))
+        ins = {n: U.shape_of(o, sym) for n, o in doc["inputs"].items() if U.present(o, sym)}
+        self.assertEqual(ins, {"stream": (6, 4, 5120), "stream_aux": (6, 24), "attn_input": (6, 5120)})
+
+    def test_delta_along_reads_a_by_cases_shape(self):
+        bad = json.loads(json.dumps(self.fam))
+        bad["outputs"]["layer_out"]["shape"]["cases"]["mhc"] = ["world", "rows", "launches", "hc", "hidden"]
+        with self.assertRaises(U.ContractError):
+            U.validate_family(bad)          # launches at another position in one case
+        self.assertEqual(U.shape_cases(["a", "b"]), [["a", "b"]])
+        self.assertEqual(len(U.shape_cases(self.fam["outputs"]["layer_out"]["shape"])), 2)
+
+    def test_timing_world_is_not_hard_coded(self):
+        self.assertNotIn("world", self.fam["timing"])
+
+
+@unittest.skipUnless(HAVE_TORCH, "torch")
+class DeltaRuntimeTest(unittest.TestCase):
+    def test_delta_along_launches_of_an_mhc_layer_out(self):
+        import torch
+        fam = U.load_family("mono_layer")
+        spec = fam["outputs"]["layer_out"]
+        s_in = torch.zeros(2, 3, 4, 5)
+        lo = torch.stack([s_in + 1, s_in + 3], dim=1)             # [world, launches, rows, hc, hidden]
+        c, b, _, fail = U._delta(spec, spec["bound"]["delta"], lo, lo, None, {"stream_in": s_in},
+                                 {"stream_in": s_in}, None, None)
+        self.assertIsNone(fail)
+        self.assertTrue(bool((c[:, 0] == 1).all() and (c[:, 1] == 2).all()))
+
+
+def _scaffold_mono(task, axes, attrs=None, extra=()):
+    argv = ["new", "--family", "mono_layer", "--task", task, "--target",
+            "vllm.models.deepseek_v41.amd.mono.runner:DSV41MonoLayer.forward",
+            "--bind-module", "vllm.models.deepseek_v41.amd.mono",
+            "--bind-file", "kernel_src/vllm/models/deepseek_v41/amd/mono/__init__.py"]
+    for k, v in axes.items():
+        argv += ["--axis", "%s=%d" % (k, v)]
+    for k, v in (attrs or {}).items():
+        argv += ["--attr", "%s=%s" % (k, v)]
+    with contextlib.redirect_stdout(io.StringIO()):
+        return scaffold_ut.main(argv + list(extra))
+
+
+class StreamScaffoldTest(unittest.TestCase):
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="mono_dsv41_")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.task = os.path.join(self.root, "dsv41_mono_target_layer")
+
+    def read(self, name):
+        with open(os.path.join(self.task, name)) as f:
+            return f.read()
+
+    def test_mhc_scaffold_declares_the_stream_hooks_and_world_2(self):
+        _scaffold_mono(self.task, MHC_AXES, DS_ATTRS)
+        meta = json.loads(self.read("meta.json"))
+        self.assertEqual(meta["timing"], {"kind": "rank_chain", "world": 2, "chain_length": 8})
+        src = self.read("rank_model.py")
+        compile(src, "rank_model.py", "exec")
+        self.assertIn("STREAM_SHAPE = (4, 5120)", src)
+        self.assertIn("STREAM_AUX = (24, torch.float32)", src)
+        self.assertIn("WORLD = 2 ", src)
+        cases = self.read("cases.py")
+        compile(cases, "cases.py", "exec")
+        self.assertIn('aux=args.get("stream_aux")', cases)
+
+    def test_a_flat_scaffold_declares_no_stream_hooks(self):
+        _scaffold_mono(self.task, MUSE_AXES)
+        src = self.read("rank_model.py")
+        self.assertNotIn("STREAM_SHAPE =", src)
+        self.assertNotIn("STREAM_AUX =", src)
+
+    def test_rank_chain_needs_the_world_axis(self):
+        axes = dict(MHC_AXES)
+        axes.pop("world")
+        with self.assertRaises(SystemExit):
+            _scaffold_mono(self.task, axes, DS_ATTRS)
+
+    def test_mhc_needs_hc(self):
+        axes = dict(MHC_AXES)
+        axes.pop("hc")
+        with self.assertRaises(SystemExit):
+            _scaffold_mono(self.task, axes, DS_ATTRS)
+
+
+# ----------------------------------------------------------------------------- the harness hooks
+FAKE_MODEL = textwrap.dedent('''
+    import torch
+
+    BLOCK, DATA, REC = 4, 6, 8          # a page: BLOCK data rows of DATA bytes, then BLOCK 2-B scales
+
+
+    class RankModel:
+        WORLD = 1
+        LAUNCHES = 1
+        POOLS = 1
+        HIDDEN = 8
+        TOP_K = None
+        KV_WIDTH = 3
+        STREAM_DTYPE = torch.bfloat16
+        INPUT_DTYPE = torch.bfloat16
+        STREAM_SHAPE = (2, 8)
+        STREAM_AUX = (3, torch.float32)
+        PATHS = ("deployed",)
+        PACKAGE = "fakepkg.sub.mono"
+        NOTES = []
+
+        def __init__(self, rank, dev, group, n_layers=None):
+            self.dev = dev
+            self.caches = [(torch.zeros(3, 64, dtype=torch.uint8),)]   # 3 pages of 64 B
+
+        def pool_of(self, layer):
+            return 0
+
+        def writes(self, path, i):
+            return (0,)
+
+        def kv_targets(self, m):
+            return (m["slots"],)
+
+        def kv_bytes(self, layer, t, idx):
+            page, off = idx // BLOCK, idx % BLOCK
+            d0 = page * t.stride(0) + off * DATA
+            s0 = page * t.stride(0) + BLOCK * DATA + off * 2
+            return torch.cat([d0[:, None] + torch.arange(DATA), s0[:, None] + torch.arange(2)], 1)
+
+        def kv_decode(self, layer, raw):
+            return raw[:, :3].float() + raw[:, 6:7].float()
+
+        def buffers(self):
+            return {"ids": None, "produced": {}, "inputs": {}, "diag": {}}
+
+        def launch(self, i, rows, m, fb, stream, x, aux):
+            t = self.caches[0][0]
+            flat = self.kv_bytes(0, t, m["slots"])
+            t.view(-1)[flat.reshape(-1)] = 5        # K1's insert: every byte of the record
+            return stream + 1, x * 2, aux + 0.5      # new tensors, as DSV41MonoLayer.forward
+
+        def end_step(self):
+            pass
+''')
+
+
+@unittest.skipUnless(HAVE_TORCH, "torch")
+class HarnessHooksTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="mono_harness_hooks_")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        shutil.copy2(os.path.join(UTC, "mono_harness.py"), os.path.join(self.dir, "rank_harness.py"))
+        with open(os.path.join(self.dir, "rank_model.py"), "w") as f:
+            f.write(FAKE_MODEL)
+        for name in ("rank_model", "rank_harness_dsv41_test"):
+            sys.modules.pop(name, None)
+        spec = importlib.util.spec_from_file_location("rank_harness_dsv41_test", os.path.join(self.dir, "rank_harness.py"))
+        self.H = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.H)
+        self.addCleanup(sys.modules.pop, "rank_model", None)
+
+    def rank(self):
+        import torch
+        R = object.__new__(self.H.Rank)
+        R.rank, R.dev = 0, torch.device("cpu")
+        R.model = self.H.Model(0, R.dev, None)
+        R.caches = R.model.caches
+        R.static, R._shared = None, {}
+        return R
+
+    def test_stream_shape_and_aux_inputs(self):
+        st, x, aux = self.H.make_inputs(3, 7, with_aux=True)
+        self.assertEqual((tuple(st.shape), tuple(x.shape), tuple(aux.shape)), ((3, 2, 8), (3, 8), (3, 3)))
+        st2, x2 = self.H.make_inputs(3, 7)
+        self.assertTrue(bool((st2 == st).all() and (x2 == x).all()))   # the aux is drawn last
+
+    def test_kv_bytes_poison_collect_and_aux_capture(self):
+        import torch
+        R = self.rank()
+        m = {"slots": torch.tensor([1, 6])}   # page 0 row 1, page 1 row 2
+        cap = self.H._Capture(R.model, 2, R.dev)
+        snap = R._snapshot()
+        R._poison_launch(0, "deployed", m, 2)
+        t = R.caches[0][0]
+        flat = R.model.kv_bytes(0, t, m["slots"])
+        self.assertTrue(bool((t.view(-1)[flat.reshape(-1)] == self.H.KV_POISON).all()))
+        self.assertEqual(int((t != 0).sum()), flat.numel())               # only the records' bytes
+        st, x, aux = self.H.make_inputs(2, 1, with_aux=True)
+        self.H.Rank._launches(R, 2, "deployed", m, None, st, x, cap, aux)
+        out = R._collect(2, m, cap, snap)
+        self.assertEqual(tuple(out["kv_rows"].shape), (1, 1, 2, 2, 3))
+        self.assertTrue(bool((out["kv_rows"][0, 0, 0] == 10).all()))      # decoded: 5 + 5
+        self.assertEqual(int(out["kv_stray"].sum()), 0)
+        self.assertTrue(torch.equal(out["layer_out"][0], (st + 1).to(out["layer_out"].dtype)))   # the returned stream
+        self.assertTrue(torch.equal(out["stream_aux_in"], aux))
+        self.assertTrue(torch.allclose(out["stream_aux_out"][0], aux + 0.5))
+        self.assertEqual(tuple(out["stream_in"].shape), (2, 2, 8))
+
+    def test_a_write_outside_the_record_is_stray(self):
+        import torch
+        R = self.rank()
+        m = {"slots": torch.tensor([1])}
+        cap = self.H._Capture(R.model, 1, R.dev)
+        snap = R._snapshot()
+        st, x, aux = self.H.make_inputs(1, 1, with_aux=True)
+        self.H.Rank._launches(R, 1, "deployed", m, None, st, x, cap, aux)
+        R.caches[0][0].view(-1)[63] = 9                                     # a page's unused tail
+        self.assertEqual(int(R._collect(1, m, cap, snap)["kv_stray"].sum()), 1)
+
+    def test_byte_level_decode_without_kv_decode(self):
+        import torch
+        R = self.rank()
+        R.model.kv_decode = None                 # no decode hook: every byte one e4m3 code
+        self.H.Model.KV_WIDTH = 8
+        self.addCleanup(setattr, self.H.Model, "KV_WIDTH", 3)
+        m = {"slots": torch.tensor([0])}
+        cap = self.H._Capture(R.model, 1, R.dev)
+        snap = R._snapshot()
+        st, x, aux = self.H.make_inputs(1, 1, with_aux=True)
+        self.H.Rank._launches(R, 1, "deployed", m, None, st, x, cap, aux)
+        out = R._collect(1, m, cap, snap)
+        want = torch.tensor([5], dtype=torch.uint8).view(torch.float8_e4m3fn).float()
+        self.assertTrue(bool((out["kv_rows"][0, 0, 0, 0] == want).all()))
+
+    def test_a_missing_aux_operand_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.H._aux_on(None, "cpu")
+
+    def test_dotted_package_resolves_without_importing_its_parents(self):
+        root = os.path.join(self.dir, "site")
+        pkg = os.path.join(root, "fakepkg", "sub", "mono")
+        os.makedirs(pkg)
+        for d in (os.path.join(root, "fakepkg"), os.path.join(root, "fakepkg", "sub"), pkg):
+            with open(os.path.join(d, "__init__.py"), "w") as f:
+                f.write("raise RuntimeError('imported')\n" if d != pkg else "")
+        sys.path.insert(0, root)
+        self.addCleanup(sys.path.remove, root)
+        self.assertEqual(self.H._package_root(), pkg)
+        self.assertNotIn("fakepkg", sys.modules)
+        # an overlay finder that claims the dotted name wins
+        other = os.path.join(self.dir, "overlay", "mono")
+        os.makedirs(other)
+        open(os.path.join(other, "__init__.py"), "w").close()
+
+        class Finder:
+            def find_spec(self, name, path=None, target=None):
+                if name != "fakepkg.sub.mono":
+                    return None
+                return importlib.util.spec_from_file_location(name, os.path.join(other, "__init__.py"),
+                                                              submodule_search_locations=[other])
+
+        f = Finder()
+        sys.meta_path.insert(0, f)
+        self.addCleanup(sys.meta_path.remove, f)
+        self.assertEqual(self.H._package_root(), other)
+
+# --- DeepSeek-V4.1-Flash models (references/mono_models.json dsv41_flash_target / _draft) ---
+
+sys.path.insert(0, os.path.join(SKILL, "scripts"))
+import scaffold_tasks as ST  # noqa: E402
+
+DS_AXES = {"hidden": 5120, "world": 2, "launches": 5, "pools": 2, "kv_width": 512, "topk": 6, "hc": 4}
+DRAFT_AXES = {"hidden": 5120, "world": 2, "launches": 3, "pools": 1, "kv_width": 512, "topk": 3, "hc": 4}
+EXAMPLE = os.path.join(SKILL, "references", "examples", "dsv41_flash_target_rank_model.py")
+DRAFT_EXAMPLE = os.path.join(SKILL, "references", "examples", "dsv41_flash_draft_rank_model.py")
+
+
+def _models():
+    with open(os.path.join(SKILL, "references", "mono_models.json")) as f:
+        return {m["name"]: m for m in json.load(f)["models"]}
+
+
+def _not_exposed_overrides(model):
+    """The contract overrides a request writes for a model's `not_exposed` outputs
+    (mono-layer-ut.md section 0)."""
+    return [{"path": "outputs.%s.present_when" % o, "value": "False",
+             "why": "%s: the runner does not expose %s (%s)" % (model["name"], o, why)}
+            for o, why in sorted((model.get("not_exposed") or {}).items())]
+
+
+ENTRY_OP = "vllm.v1.attention.ops.flydsl_kernels:_run_compiled@DeepseekV4DecoderLayer"
+# the 56 dsv41 mono symbols of the 2026-11-13 TP2 profile (profile/out/mono_classification.json)
+_T_K1 = ("r0_tl0_f0_i0", "r1_tl0_f1_i0", "r1_tl0_f1_i1", "r2_tl0_f0_i1", "r2_tl0_f1_i0", "r2_tl0_f1_i1")
+_T_K2 = ("r0_tl0_i0", "r1_tl0_i0", "r1_tl0_i1", "r2_tl0_i0", "r2_tl0_i1")
+PROFILED = ["_ZN5aiter%ddsv41_mono_k1_s%d_tp2_%sE.kd" % (0, s, v) for s in (6, 12, 24, 48) for v in _T_K1] + \
+           ["_ZN5aiter%ddsv41_mono_k2_s%d_tp2_%sE.kd" % (0, s, v) for s in (6, 12, 24, 48) for v in _T_K2] + \
+           ["_ZN5aiter%ddsv41_mono_k1_s%d_tp2_r0_tl0_f%d_i0_e128_k3_g1_w192E.kd" % (0, s, f)
+            for s in (5, 10, 20, 40) for f in (0, 1)] + \
+           ["_ZN5aiter%ddsv41_mono_k2_s%d_tp2_r0_tl0_i0_e128_k3_g1_w192E.kd" % (0, s) for s in (5, 10, 20, 40)]
+
+
+def _layer_types(path):
+    """A worked example's layer-type constants (module-level tuples of literals / names), read
+    without importing it (it imports torch)."""
+    env = {}
+    with open(path) as f:
+        tree = ast.parse(f.read())
+
+    def val(node):
+        if isinstance(node, ast.Name):
+            return env[node.id]
+        if isinstance(node, ast.Tuple):
+            return tuple(val(e) for e in node.elts)
+        return ast.literal_eval(node)
+
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            tgt = node.targets[0]
+            try:
+                if isinstance(tgt, ast.Tuple) and isinstance(node.value, ast.Tuple):
+                    for n, v in zip(tgt.elts, node.value.elts):
+                        env[n.id] = val(v)
+                elif isinstance(tgt, ast.Name):
+                    env[tgt.id] = val(node.value)
+            except (ValueError, KeyError, AttributeError):
+                continue
+    return env
+
+
+
+class DsModelEntryTest(unittest.TestCase):
+    def test_the_entry(self):
+        m = _models()["dsv41_flash_target"]
+        self.assertEqual(m["attrs"], DS_ATTRS)
+        self.assertEqual(sorted(m["oracles_ready"]), ["native", "split"])   # GPU-verified 2026-11-17
+        self.assertNotIn("oracles_unverified", m)
+        self.assertIn("native oracle floor", m["oracles_verified"])
+        self.assertNotIn("oracles_pending", m)
+        self.assertEqual(m["bind_module"], "vllm.models.deepseek_v41.amd.mono")
+        self.assertEqual(m["entry_ops"], [ENTRY_OP])
+
+    def test_the_entry_matches_the_example(self):
+        for name, path, attrs in (("dsv41_flash_target", EXAMPLE, DS_ATTRS), ("dsv41_flash_draft", DRAFT_EXAMPLE, DS_ATTRS)):
+            m = _models()[name]
+            with open(path) as f:
+                ex = _classdict(f.read(), "RankModel")
+            self.assertEqual(ex["WORLD"], 2)
+            for k, attr in (("hidden", "HIDDEN"), ("launches", "LAUNCHES"), ("pools", "POOLS"),
+                            ("kv_width", "KV_WIDTH"), ("topk", "TOP_K")):
+                self.assertEqual(m["axes"][k], ex[attr], (name, k))
+            self.assertEqual(ex["STREAM_SHAPE"], (m["axes"]["hc"], m["axes"]["hidden"]))
+            self.assertEqual(ex["PACKAGE"], m["bind_module"])
+            self.assertEqual(m["attrs"], attrs)
+            self.assertEqual(ex["PATHS"], ("deployed", "split", "native"))
+            self.assertEqual(set(ex["PATHS"][1:]), set(m["oracles_ready"]) | set(m.get("oracles_unverified") or []))
+            self.assertEqual(m["worked_example"], os.path.relpath(path, SKILL))
+
+    def test_the_config_constants(self):
+        cfg_path = "/shared_nfs/models/DeepSeek-V4.1-Flash/config.json"
+        if not os.path.exists(cfg_path):
+            self.skipTest("model config not mounted")
+        with open(cfg_path) as f:
+            c = json.load(f)["text_config"]
+        m = _models()["dsv41_flash_target"]["axes"]
+        self.assertEqual((m["hidden"], m["topk"], m["hc"]), (c["hidden_size"], c["num_experts_per_tok"], c["hc_mult"]))
+        self.assertEqual(m["kv_width"], c["head_dim"])
+        d = _models()["dsv41_flash_draft"]["axes"]
+        self.assertEqual(d["topk"], c["dspark_num_experts_per_tok"])
+        self.assertEqual(d["launches"], c["num_nextn_predict_layers"])
+        self.assertEqual(c["compress_ratios"][c["num_hidden_layers"]:], [0] * d["launches"])
+        # the target example's layer types stand for served layers of their type
+        types = _layer_types(EXAMPLE)
+        for ratio, fold, index, served in types["LAYER_TYPES"]:
+            self.assertEqual(c["compress_ratios"][served], ratio, served)
+            self.assertEqual(served in c["index_source_layer_ids"], index, served)
+            self.assertEqual(served in c["engram_layer_ids"] or served == 0, not fold, served)
+
+    def test_the_models_name_only_family_oracles_and_outputs(self):
+        fam = _family()
+        for name, m in _models().items():
+            self.assertLessEqual(set(m["oracles_ready"]) | set(m.get("oracles_unverified") or []),
+                                 set(fam["oracles"]), name)
+            self.assertLessEqual(set(m.get("not_exposed") or {}), set(fam["outputs"]), name)
+            for w in m.get("launch_waivers") or []:
+                self.assertTrue(w["why"].strip(), name)
+                re.compile(w["pattern"])
+
+    def test_the_case_axes_evaluate_with_the_serving_args(self):
+        args = {"num_speculative_tokens": "5"}
+        for name, rows in (("dsv41_flash_target", 48), ("dsv41_flash_draft", 40)):
+            expr = _models()[name]["case_axes"]["DECODE"]
+            self.assertEqual(eval(expr["rows"].format(**args), {}, {"shape": 8}), rows, name)
+            self.assertEqual(expr["context"], "context")
+
+    def test_the_patterns_partition_the_profiled_symbols(self):
+        ms = {n: re.compile(m["kernel"]) for n, m in _models().items() if n.startswith("dsv41")}
+        for k in PROFILED:
+            hits = [n for n, r in ms.items() if r.search(k)]
+            self.assertEqual(hits, ["dsv41_flash_draft" if "_e128_k3_" in k else "dsv41_flash_target"], k)
+
+
+class DsOverrideScaffoldTest(unittest.TestCase):
+    def test_the_verified_oracles_stay_in_the_frozen_contract(self):
+        root = tempfile.mkdtemp(prefix="mono_dsv41_")
+        self.addCleanup(shutil.rmtree, root, True)
+        task = os.path.join(root, "dsv41_mono_target_layer")
+        path = os.path.join(root, "ov.json")
+        with open(path, "w") as f:
+            json.dump(_not_exposed_overrides(_models()["dsv41_flash_target"]), f)
+        _scaffold_mono(task, DS_AXES, DS_ATTRS, ("--override", path))
+        doc = U.load_task_contract(task)
+        self.assertEqual(sorted(doc["oracles"]), ["native", "split"])
+        self.assertEqual(doc["reference"], "oracle:split")
+        self.assertEqual([o["path"] for o in doc["task"]["overrides"]], ["outputs.ids.present_when"])
+        sym = U.symbols_for(doc, {"rows": 6, "context": 911})
+        self.assertFalse(U.present(doc["outputs"]["ids"], sym))     # not exposed by the runner
+        self.assertTrue(U.present(doc["outputs"]["stream_aux_out"], sym))
+        with open(os.path.join(task, "rank_model.py")) as f:
+            self.assertEqual(_classdict(f.read(), "RankModel")["PATHS"], ("deployed", "split", "native"))
+
+
+class DsLaunchWaiversTest(unittest.TestCase):
+    def test_the_rules_waive_exactly_the_unreached_build(self):
+        rules = _models()["dsv41_flash_target"]["launch_waivers"]
+        target = [k for k in PROFILED if "_e128_k3_" not in k]
+        out = ST.expand_launch_waivers(rules, {"DECODE": target})
+        self.assertEqual(sorted(w["kernel"] for w in out),
+                         sorted(k for k in target if "_k1_" in k and "_r2_tl0_f0_i1" in k))
+        self.assertEqual(len(out), 4)                       # widths 6, 12, 24, 48
+        self.assertTrue(all(w["phase"] == "DECODE" and w["why"] for w in out))
+        self.assertIsNone(ST.expand_launch_waivers(None, {"DECODE": target}))
+
+    def test_the_example_reaches_every_other_target_build(self):
+        types = _layer_types(EXAMPLE)
+        reach = set()
+        for ratio, fold, index, _ in types["LAYER_TYPES"]:
+            reach.add(("k1", ratio, int(fold), int(index)))
+            reach.add(("k2", ratio, None, int(index)))
+        waived = [re.compile(w["pattern"]) for w in _models()["dsv41_flash_target"]["launch_waivers"]]
+        for k in PROFILED:
+            if "_e128_k3_" in k:
+                continue
+            m = re.search(r"dsv41_mono_(k[12])_s\d+_tp2_r(\d)_tl0_(?:f(\d)_)?i(\d)", k)
+            key = (m.group(1), int(m.group(2)), None if m.group(3) is None else int(m.group(3)), int(m.group(4)))
+            self.assertTrue((key in reach) != any(w.search(k) for w in waived), k)
+        # the chain times only fold-1 layers of the served types, with the call()'s first layer first
+        self.assertTrue(all(t[1] for t in types["CHAIN_PATTERN"]))
+        self.assertTrue(set(types["CHAIN_PATTERN"]) <= set(types["LAYER_TYPES"]))
+
+    def test_the_draft_example_reaches_every_draft_build(self):
+        types = _layer_types(DRAFT_EXAMPLE)
+        folds = {int(t[1]) for t in types["LAYER_TYPES"]}
+        self.assertEqual(folds, {0, 1})
+        self.assertEqual({t[0] for t in types["LAYER_TYPES"]}, {0})
+        for k in PROFILED:
+            if "_e128_k3_" in k:
+                m = re.search(r"_r(\d)_tl0_(?:f(\d)_)?i(\d)_e128_k3_g1_w192", k)
+                self.assertEqual((m.group(1), m.group(3)), ("0", "0"), k)
+                self.assertTrue(m.group(2) is None or int(m.group(2)) in folds, k)
+
+    def test_the_lint_refuses_a_stale_or_unexplained_waiver(self):
+        meta = {"expected_launches": {"DECODE": ["a", "b"]},
+                "ut_contract": {"launch_waivers": [{"kernel": "a", "phase": "DECODE", "why": "x"}]}}
+        self.assertEqual(U._lint_launch_waivers(meta), [])
+        meta["ut_contract"]["launch_waivers"].append({"kernel": "c", "phase": "DECODE", "why": "x"})
+        meta["ut_contract"]["launch_waivers"].append({"kernel": "b", "phase": "DECODE", "why": ""})
+        errs = U._lint_launch_waivers(meta)
+        self.assertEqual(len(errs), 2)
+        self.assertIn("waives nothing", errs[0])
+        self.assertIn("need kernel, phase and why", errs[1])
+
+    def test_stamp_meta_keeps_hand_written_waivers(self):
+        root = tempfile.mkdtemp(prefix="mono_dsv41_meta_")
+        self.addCleanup(shutil.rmtree, root, True)
+        with open(os.path.join(root, "meta.json"), "w") as f:
+            json.dump({"ut_contract": {"launch_waivers": [{"kernel": "h", "phase": "DECODE", "why": "hand"},
+                                                          {"kernel": "a", "phase": "DECODE", "why": "old"}]}}, f)
+        ST.stamp_meta(root, {"expected_launches": {"DECODE": ["a", "h"]},
+                             "launch_waivers": [{"pattern": "^a$", "why": "rule"}]})
+        with open(os.path.join(root, "meta.json")) as f:
+            got = json.load(f)["ut_contract"]["launch_waivers"]
+        self.assertEqual(got, [{"kernel": "h", "phase": "DECODE", "why": "hand"},
+                               {"kernel": "a", "phase": "DECODE", "why": "rule"}])
+
+
+class DsExampleTest(unittest.TestCase):
+    def setUp(self):
+        with open(EXAMPLE) as f:
+            self.src = f.read()
+        with open(DRAFT_EXAMPLE) as f:
+            self.draft = f.read()
+
+    def test_they_implement_the_template_interface_and_the_hooks(self):
+        root = tempfile.mkdtemp(prefix="mono_dsv41_tmpl_")
+        self.addCleanup(shutil.rmtree, root, True)
+        task = os.path.join(root, "t")
+        _scaffold_mono(task, DS_AXES, DS_ATTRS)
+        with open(os.path.join(task, "rank_model.py")) as f:
+            tmpl = ast.parse(f.read())
+
+        def members(tree):
+            for node in tree.body:
+                if isinstance(node, ast.ClassDef) and node.name == "RankModel":
+                    return {st.name for st in node.body if isinstance(st, ast.FunctionDef)} | \
+                           {st.targets[0].id for st in node.body if isinstance(st, ast.Assign)}
+            return set()
+
+        for src in (self.src, self.draft):
+            mine = members(ast.parse(src))
+            self.assertEqual(members(tmpl) - mine, set())
+            self.assertTrue({"kv_bytes", "kv_decode", "STREAM_SHAPE", "STREAM_AUX"} <= mine)
+
+    def test_the_subject_is_imported_inside_methods_only(self):
+        for src in (self.src, self.draft):
+            for node in ast.parse(src).body:
+                if isinstance(node, (ast.Import, ast.ImportFrom)):
+                    names = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""]
+                    self.assertFalse(any(n.startswith("vllm") for n in names), names)
+
+    def test_the_draft_shares_the_target_helpers_verbatim(self):
+        def block(src):
+            return src[src.index("def _mono():"):src.index("class RankModel:")]
+        self.assertEqual(block(self.draft), block(self.src))
+
+    def test_no_attribute_shadows_a_method(self):
+        """An instance attribute named like a method of its class replaces the method on the instance
+        (VllmNative once kept its DeepseekV4MoE as self.moe next to its moe() method)."""
+        for src in (self.src, self.draft):
+            for node in ast.parse(src).body:
+                if not isinstance(node, ast.ClassDef):
+                    continue
+                methods = {f.name for f in node.body if isinstance(f, ast.FunctionDef)}
+                attrs = {t.attr for n in ast.walk(node) if isinstance(n, ast.Assign) for tt in n.targets
+                         for t in (tt.elts if isinstance(tt, ast.Tuple) else [tt])
+                         if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name) and t.value.id == "self"}
+                self.assertEqual(methods & attrs, set(), node.name)
+
+    def test_native_is_vllms_chain(self):
+        """The native path names vLLM's ops (the numerics test's chain) and never the mono package's
+        stages; it is teacher-forced and aligns near ties."""
+        b = self.src[self.src.index("class VllmNative:"):self.src.index("class RankModel:")]
+        for op in ("MHCPreDelayedOp", "rocm_mxfp8_block32_gemm", "fused_q_kv_rmsnorm",
+                   "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert", "triton_sparse_mla_fwd",
+                   "rocm_inverse_rope_mxfp8_rows", "rocm_dsv41_mxfp8_wo_a_bmm", "DeepseekV4MoE",
+                   "process_weights_after_loading", "init_distributed_environment"):
+            self.assertIn(op, b)
+        self.assertNotIn("mono.stages", b.replace("from vllm.models.deepseek_v41.amd.mono.stages import dims", ""))
+        for src in (self.src, self.draft):
+            self.assertIn("self._teacher = (d_res", src)
+            self.assertIn("normed_k = self._kernel_ffn_input(i, rows)", src)
+
+
+class DsModelControlsTest(unittest.TestCase):
+    """The models' GPU-verified negative controls (mono_models.json) and how scaffold_tasks stamps them."""
+
+    def test_every_ds_model_carries_its_verified_controls(self):
+        for name in ("dsv41_flash_target", "dsv41_flash_draft"):
+            cs = _models()[name]["negative_controls"]
+            self.assertEqual(len(cs), 6, name)
+            for c in cs:
+                for k in ("leaf", "category", "find", "replace", "expect"):
+                    self.assertTrue(c[k].strip(), (name, k))
+                self.assertFalse(c["find"].startswith("FILL"), name)
+                self.assertNotEqual(c["find"], c["replace"], name)
+                self.assertTrue(c["leaf"].startswith("kernel_src/vllm/models/deepseek_v41/amd/mono/"), name)
+            self.assertEqual(len({(c["leaf"], c["find"]) for c in cs}), len(cs), name)
+
+    def test_the_draft_controls_reach_its_generic_builds(self):
+        # no tuned build runs in the draft (MonoBuild.tuned: target, ratio 2): its peer_partial must not
+        # sit in the tuned-only reduce_slice_quad, and its row swap must clamp the odd width's last row
+        cs = {c["category"]: c for c in _models()["dsv41_flash_draft"]["negative_controls"]}
+        self.assertNotIn("range_constexpr(1, len(ws))", cs["peer_partial"]["find"])
+        self.assertIn("attn_region_pair", cs["peer_partial"]["find"])
+        swap = [c for c in _models()["dsv41_flash_draft"]["negative_controls"] if "t % 2" in c["replace"]]
+        self.assertEqual(len(swap), 1)
+        self.assertIn("fx.min(", swap[0]["replace"])
+
+    def test_stamp_meta_replaces_the_fill_stubs_and_keeps_hand_written_ones(self):
+        root = tempfile.mkdtemp(prefix="stamp_ctl_")
+        self.addCleanup(shutil.rmtree, root, True)
+        stub = {"leaf": "kernel_src/x.py", "category": "kv_slot", "find": "FILL: one exact, unique source fragment",
+                "replace": "FILL: r", "expect": "FILL: e"}
+        hand = {"leaf": "kernel_src/x.py", "category": "softmax_scale", "find": "a = 1", "replace": "a = 2",
+                "expect": "hand-written"}
+        old = {"leaf": "kernel_src/x.py", "category": "kv_slot", "find": "b = 1", "replace": "b = 3", "expect": "old"}
+        with open(os.path.join(root, "meta.json"), "w") as f:
+            json.dump({"ut_contract": {"negative_controls": [stub, hand, old]}}, f)
+        new = [dict(old, replace="b = 2", expect="new"), {"leaf": "kernel_src/y.py", "category": "peer_partial",
+                                                          "find": "c = 1", "replace": "c = 0", "expect": "e"}]
+        ST.stamp_meta(root, {"negative_controls": new})
+        with open(os.path.join(root, "meta.json")) as f:
+            got = json.load(f)["ut_contract"]["negative_controls"]
+        self.assertEqual(got, [hand] + new)
 
 
 if __name__ == "__main__":

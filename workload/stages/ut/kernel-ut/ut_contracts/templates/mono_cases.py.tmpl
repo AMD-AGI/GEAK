@@ -65,7 +65,8 @@ def _harness():
 def _step(args, path):
     sym = args["_sym"]
     _entry()
-    return _harness().call_ranks(int(sym["rows"]), int(sym["context"]), args["stream"], args["attn_input"], path)
+    return _harness().call_ranks(int(sym["rows"]), int(sym["context"]), args["stream"], args["attn_input"], path,
+                                 aux=args.get("stream_aux"))
 
 
 def call(args):
@@ -174,7 +175,8 @@ def replay_bundle(h, meta, phase):
         if "rep" not in state:
             state["rep"] = R.Replay(width)
         a = case["args"]
-        state["rep"].fill(int(a["_sym"]["rows"]), int(a["_sym"]["context"]), a["stream"], a["attn_input"])
+        state["rep"].fill(int(a["_sym"]["rows"]), int(a["_sym"]["context"]), a["stream"], a["attn_input"],
+                          a.get("stream_aux"))
 
     def run():
         state["rep"].run()

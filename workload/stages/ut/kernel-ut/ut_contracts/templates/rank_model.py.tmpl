@@ -36,7 +36,7 @@ class RankModel:
     KV_WIDTH = {kv_width}             # elements of one token's K (or V) row, decoded to float32
     STREAM_DTYPE = torch.{stream_dtype}
     INPUT_DTYPE = torch.bfloat16
-    # ---- paths: PATHS[0] is the deployed one call() runs; every other entry is an oracle path
+    {stream_hooks}    # ---- paths: PATHS[0] is the deployed one call() runs; every other entry is an oracle path
     # (cases.ORACLES[name] runs the contract oracle whose `path` names it)
     PATHS = {paths!r}
     PACKAGE = {package!r}         # the whole-package bind: its bytes key the JIT cache
@@ -95,7 +95,8 @@ class RankModel:
         raise NotImplementedError("FILL RankModel.bind")
 
     def launch(self, i, rows, m, fb, stream, x):
-        """Launch i of the step exactly as the deployed caller does; return (stream, x)."""
+        """Launch i of the step exactly as the deployed caller does; return (stream, x). With
+        STREAM_AUX: launch(i, rows, m, fb, stream, x, aux) -> (stream, x, aux)."""
         raise NotImplementedError("FILL RankModel.launch")
 
     def end_step(self):
@@ -118,6 +119,10 @@ class RankModel:
     def device_errors(self):
         """A string naming a failed device-side wait (guard / epoch error words), else None."""
         raise NotImplementedError("FILL RankModel.device_errors")
+
+    # Optional (mono_harness.py): kv_bytes(layer, t, idx) -> int64 [rows, B] flat record bytes and
+    # kv_decode(layer, raw) -> float32 [rows, KV_WIDTH], for a cache not indexed by slot on dim 0
+    # (worked example: references/examples/dsv41_flash_target_rank_model.py).
 
     def facts(self):
         """Pool sizes and other facts for run/harness_report.jsonl."""

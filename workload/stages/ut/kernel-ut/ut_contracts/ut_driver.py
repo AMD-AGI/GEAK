@@ -358,7 +358,8 @@ class OracleWorker:
         try:
             self.proc = subprocess.Popen([sys.executable, os.path.join(T.dir, "leg_runner.py"),
                 "--task", T.dir, "--mode", "oracle-worker"], env=env, stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE, stderr=self.log, start_new_session=True)
+                stdout=subprocess.PIPE, stderr=self.log, start_new_session=True,
+                cwd=(getattr(T.h, "leg_cwd", None) or (lambda d: None))(T.dir))
         except BaseException:
             self.log.close()
             raise
