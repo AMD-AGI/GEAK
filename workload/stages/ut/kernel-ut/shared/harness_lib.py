@@ -28,29 +28,7 @@ def sync(torch=None):
         torch.cuda.synchronize()
 
 
-# --------------------------------------------------------------------------- regime-driven synthesis
-# The SINGLE source of truth for building operands in the LIVE serving regime. The #1 cause of
-# "isolated win / e2e loss-or-crash" is a unittest that SYNTHESIZES its inputs with OFFLINE DEFAULTS
-# (DTYPE=bf16, x = 16 // element_size(bf16) = 8, scales = ones) instead of the regime the server
-# actually runs. Synthesis itself is fine (perf is value-independent; the oracle is a high-precision
-# compute over the same synthesized inputs) — but it MUST be DRIVEN BY the parsed regime descriptor
-# (scripts/parse_regime.py output), so operand dtype, quant form, scales, and the paged-KV inner
-# factor `x` all follow online. Everything below derives from element sizes + the parsed regime
-# fields, so a new dtype / quant scheme needs no new branch. Torch-free for the pure derivations
-# (dtype string math), so tests can assert them on a CPU-only / no-torch box.
-
-# element size in BYTES per dtype STRING (no torch needed) — 1-byte types are the quantized/low-precision
-# KV/operand dtypes (fp8*, int8) that need scales and pack x=16 into a 16-byte vector. All fp8 variants
-# are 1 byte regardless of arch, so the layout math (pack_x) is arch-INDEPENDENT.
-_DTYPE_BYTES = {
-    "fp8": 1, "fp8_e4m3": 1, "fp8_e5m2": 1,
-    "fp8_e4m3fnuz": 1, "fp8_e5m2fnuz": 1, "fp8_e4m3fn": 1, "fp8_e5m2fn": 1,
-    "int8": 1, "uint8": 1,
-    "bf16": 2, "bfloat16": 2, "fp16": 2, "float16": 2, "half": 2,
-    "fp32": 4, "float32": 4, "float": 4,
-    "fp64": 8, "float64": 8,
-}
-
+# --------------------------------------------------------------------------- regime dtypes
 # CDNA3 (MI300/MI325, gfx942) + gfx90a use the AMD-only "fnuz" fp8 (no-inf/unsigned-zero). CDNA4
 # (MI355, gfx950) moved to the OCP-standard fp8 (e4m3fn/e5m2), same as NVIDIA. So the fp8 NUMERIC
 # FORMAT is the ONE hardware-specific axis: a bare "fp8"/"fp8_e4m3" must resolve to the arch's variant,
@@ -106,87 +84,6 @@ def regime_dtype(name, torch=None, arch=None):
                 attr = "float8_e4m3fnuz" if use_fnuz else "float8_e4m3fn"
         return getattr(torch, attr, torch.bfloat16)
     return torch.bfloat16
-
-
-def _bytes_of(dtype, torch=None):
-    """Byte width of a dtype given either as a STRING (no torch needed) or a torch dtype."""
-    if isinstance(dtype, str):
-        b = _DTYPE_BYTES.get(dtype.lower())
-        if b:
-            return b
-        torch = torch or _torch()
-        dtype = regime_dtype(dtype, torch)
-    torch = torch or _torch()
-    return torch.tensor([], dtype=dtype).element_size()
-
-
-def pack_x(dtype, pack_bytes=16, torch=None):
-    """GENERAL paged-KV inner-block factor: `pack_bytes // element_size(dtype)`. This is the single
-    computation that replaces every hand-written `x = 16 // element_size(DTYPE)` — and crucially it keys
-    off the KV-CACHE dtype, not the compute dtype. int8/fp8 (1B) -> 16, bf16/fp16 (2B) -> 8,
-    fp32 (4B) -> 4. Works for any dtype string or torch dtype."""
-    return int(pack_bytes) // _bytes_of(dtype, torch)
-
-
-def regime_spec(regime):
-    """Fold the parsed regime (parse_regime.py output) into what a synthesizer needs — PURE, no torch.
-    `auto`/empty KV follows the compute dtype (bf16). A 1-byte KV/operand dtype is treated as quantized
-    (needs scales). Returns:
-      {compute_dtype, kv_dtype, kv_x, kv_quant, quant_method, operand_dtype, needs_scales}."""
-    regime = regime or {}
-    quant = regime.get("quant") or {}
-    qmethod = str(quant.get("method") or "none").lower()
-    quant_on = qmethod not in ("", "none")
-    compute_dtype = "bf16"
-
-    kv_raw = str(regime.get("kv_cache_dtype") or "auto").lower()
-    kv_dtype = compute_dtype if kv_raw in ("auto", "", "none") else kv_raw
-    kv_quant = _DTYPE_BYTES.get(kv_dtype, 2) < 2
-
-    operand_dtype = (quant.get("weight_dtype") or "fp8_e4m3") if quant_on else compute_dtype
-    return {
-        "compute_dtype": compute_dtype,
-        "kv_dtype": kv_dtype,
-        "kv_x": pack_x(kv_dtype),
-        "kv_quant": bool(kv_quant),
-        "quant_method": qmethod,
-        "operand_dtype": operand_dtype,
-        "needs_scales": bool(quant_on or kv_quant),
-    }
-
-
-def synth_kv_cache(num_blocks, num_heads, head_size, block_size, regime, torch=None, seed=0, arch=None):
-    """Build a paged K/V cache in the LIVE regime's KV dtype + layout — the general attention operand
-    builder the crashed kernel needed (no unittest computes the layout by hand again). Uses the vLLM
-    paged layout where the key cache splits head_size by the pack factor `x` (derived from the KV dtype,
-    NOT the compute dtype):
-        key_cache   : [num_blocks, num_heads, head_size // x, block_size, x]
-        value_cache : [num_blocks, num_heads, head_size,      block_size]
-    Real (non-unit) per-tensor k_scale/v_scale are produced when the KV dtype is quantized; scalar 1.0
-    otherwise. Returns {key_cache, value_cache, k_scale, v_scale, x, kv_dtype}."""
-    torch = torch or _torch()
-    spec = regime_spec(regime)
-    dt = regime_dtype(spec["kv_dtype"], torch, arch=arch)
-    x = spec["kv_x"]
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    gen = torch.Generator(device=device).manual_seed(int(seed))
-    k_hp = torch.randn(num_blocks, num_heads, head_size // x, block_size, x,
-                       generator=gen, dtype=torch.float32, device=device) * 0.1
-    v_hp = torch.randn(num_blocks, num_heads, head_size, block_size,
-                       generator=gen, dtype=torch.float32, device=device) * 0.1
-    if spec["kv_quant"]:
-        fmax = float(torch.finfo(dt).max) if dt.is_floating_point else float(torch.iinfo(dt).max)
-        k_scale = (k_hp.abs().amax().clamp_min(1e-8) / fmax).to(torch.float32)
-        v_scale = (v_hp.abs().amax().clamp_min(1e-8) / fmax).to(torch.float32)
-        key_cache = (k_hp / k_scale).clamp(-fmax, fmax).to(dt)
-        value_cache = (v_hp / v_scale).clamp(-fmax, fmax).to(dt)
-    else:
-        k_scale = torch.ones((), dtype=torch.float32, device=device)
-        v_scale = torch.ones((), dtype=torch.float32, device=device)
-        key_cache = k_hp.to(dt)
-        value_cache = v_hp.to(dt)
-    return {"key_cache": key_cache, "value_cache": value_cache,
-            "k_scale": k_scale, "v_scale": v_scale, "x": x, "kv_dtype": spec["kv_dtype"]}
 
 
 # --------------------------------------------------------------------------- (a) timing
@@ -580,7 +477,7 @@ def flatten_outputs(out):
     """Deterministic tensor list from an op's return value: tensor, tuple/list, dict, or nesting.
 
     Attention entries return `(out, lse)`; a bare-tensor assumption does not merely raise here, it
-    makes `correct()` fall into its except and report the candidate INCORRECT — a correct kernel
+    makes the comparison fall into its except and report the candidate INCORRECT — a correct kernel
     rejected for the shape of its return value. Dict order is by sorted key so the two legs pair up."""
     if isinstance(out, dict):
         return [t for k in sorted(out) for t in flatten_outputs(out[k])]
@@ -589,85 +486,6 @@ def flatten_outputs(out):
     if hasattr(out, "shape"):
         return [out]
     return []      # scalars/None carry no tolerance semantics and are not compared
-
-
-def correct(out, ref, tol):
-    """Per-element mixed-tolerance check `|out-ref| <= atol + tol*|ref|`, returns (ok, max_rel_err).
-
-    A multi-tensor return (e.g. attention's `(out, lse)`) is compared component-wise: ALL components
-    must pass, and the reported error is the worst of them. A count mismatch between the two sides is
-    a failure, never a silent comparison of the first component only.
-
-    The absolute floor `atol` exists ONLY to keep near-zero reference elements from blowing up the pure
-    relative term — it is set to the computation's NOISE level `tol * RMS(ref)`, NOT `tol * max(|ref|)`.
-    A max-scaled floor lets a small element of a HIGH-DYNAMIC-RANGE output (attention scores, MoE routing
-    weights, index-decode top-k) drift by `tol*max` in absolute terms — i.e. an unbounded relative error
-    on the small elements the value-parity gate is meant to catch. RMS tracks the bulk magnitude, so for
-    a uniform-magnitude tensor RMS≈max (behavior unchanged) but for a spiky tensor RMS≪max (the floor
-    tightens and the small-element error is no longer masked)."""
-    po, pr = flatten_outputs(out), flatten_outputs(ref)
-    if len(po) != 1 or len(pr) != 1:
-        if not po or len(po) != len(pr):
-            return False, float("inf")
-        ok_all, worst = True, 0.0
-        for o, r in zip(po, pr):
-            ok, err = _correct_one(o, r, tol)
-            ok_all = ok_all and ok
-            worst = max(worst, err)
-        return ok_all, worst
-    return _correct_one(po[0], pr[0], tol)
-
-
-def _correct_one(out, ref, tol):
-    """Element check with EXPLICIT non-finite handling.
-
-    A legitimately non-finite reference element exists in real ops — an attention LSE over an EMPTY
-    KV slice (varlen `cu_seqlens_k=[...,n,n]`) is exactly -inf. Two failure modes are handled here
-    instead of being papered over:
-      * `-inf - -inf = nan`, and `nan <= x` is False, so a bit-identical output used to FAIL;
-      * `RMS(ref)` over a tensor containing an inf is inf, so `atol` became inf and EVERY element
-        passed — a silent false-PASS hole that hid real drift on any output with an inf.
-    Rule: non-finite positions must be IDENTICAL (`-inf` vs `-inf`) to pass — NaN never matches
-    (`nan != nan`), inf-vs-finite never matches — and the tolerance floor is the RMS of the FINITE
-    bulk only."""
-    torch = _torch()
-    try:
-        if tuple(out.shape) != tuple(ref.shape):
-            return False, float("inf")
-        out = out.float()
-        ref = ref.float()
-        atol = tol * ref.pow(2).mean().sqrt().clamp_min(1e-6)   # noise floor = tol * RMS(ref)
-        diff = (out - ref).abs()
-        ok = bool((diff <= (atol + tol * ref.abs())).all())
-        err = diff.div(ref.abs() + atol).max().item()
-        if math.isfinite(err) and math.isfinite(float(atol.item())):
-            return ok, err                                      # all-finite: unchanged behavior
-        return _correct_one_nonfinite(out, ref, tol)
-    except Exception:
-        return False, float("inf")
-
-
-def _correct_one_nonfinite(out, ref, tol):
-    """Slow path for tensors carrying inf/NaN — entered ONLY when the plain path produced a
-    non-finite error or a non-finite tolerance floor."""
-    torch = _torch()
-    try:
-        finite = torch.isfinite(out) & torch.isfinite(ref)
-        # A non-finite position passes only if the two sides are IDENTICAL there (-inf vs -inf, which
-        # `==` reports True and NaN never does). Otherwise it is a real mismatch.
-        if bool(((~finite) & (out != ref)).any()):
-            return False, float("inf")
-        zero = torch.zeros((), device=ref.device, dtype=ref.dtype)
-        ref = torch.where(finite, ref, zero)
-        out = torch.where(finite, out, zero)
-        n = max(1, int(finite.sum().item()))
-        atol = tol * (ref.pow(2).sum() / n).sqrt().clamp_min(1e-6)
-        diff = (out - ref).abs()
-        ok = bool((diff <= (atol + tol * ref.abs())).all())
-        err = diff.div(ref.abs() + atol).max().item()
-        return ok, err
-    except Exception:
-        return False, float("inf")
 
 
 _NO_OUTPUT = object()
@@ -717,59 +535,6 @@ def assert_independent_outputs(call, args_a, args_b, *, first_output=_NO_OUTPUT)
 
 
 # --------------------------------------------------------------------------- (b) Amdahl gate
-def amdahl_ceiling(pct_gpu, isolated_speedup):
-    """Max end-to-end THROUGHPUT delta (%) attributable to speeding up a kernel that is `pct_gpu` of
-    GPU time by `isolated_speedup`x, assuming GPU time is the throughput bottleneck (an OPTIMISTIC
-    upper bound — comm/overlap make the real ceiling lower).
-
-        time_saved_fraction = pct_gpu * (1 - 1/speedup)
-        throughput_ceiling  = 1 / (1 - time_saved_fraction)
-        delta%              = (throughput_ceiling - 1) * 100
-
-    `pct_gpu` accepts either a fraction (0.14) or a percent (14.0) — values > 1 are treated as percent.
-    Returns the ceiling delta in PERCENT (e.g. 5.4 means "at most +5.4% e2e")."""
-    p = float(pct_gpu)
-    if p > 1.0:
-        p /= 100.0
-    p = min(max(p, 0.0), 1.0)
-    if isolated_speedup is None:
-        return 0.0        # no measurement -> no attributable ceiling; same answer as a non-win
-    s = float(isolated_speedup)
-    if s <= 0:
-        return 0.0
-    saved = p * (1.0 - 1.0 / s)
-    saved = min(max(saved, 0.0), 0.999)
-    return (1.0 / (1.0 - saved) - 1.0) * 100.0
-
-
-def amdahl_check(e2e_delta_pct, pct_gpu, isolated_speedup, noise_band_pct=0.5, slack=1.5):
-    """Is an OBSERVED e2e delta physically attributable to this kernel? An observed delta far above
-    the Amdahl ceiling is box drift / measurement error, not the kernel.
-
-    `slack` (default 1.5) allows the observed delta to exceed the optimistic ceiling by up to 50%
-    before we call it implausible, because the ceiling model ignores second-order fusion/scheduling
-    effects and the ceiling itself is only as good as the pct_gpu estimate. Returns a dict:
-      {ceiling_pct, allowed_pct, plausible, verdict, note}
-    verdict ∈ {ok, implausible} — 'implausible' means a downstream e2e comparison must NOT credit this
-    delta to the kernel and should re-measure with an interleaved A/B (and re-check pct_gpu) before
-    accepting. (Helper only: op_bench surfaces the ceiling via `amdahl_ceiling`; this verdict form is
-    available for any e2e check that wants it.)"""
-    ceiling = amdahl_ceiling(pct_gpu, isolated_speedup)
-    allowed = ceiling * float(slack) + float(noise_band_pct)
-    plausible = float(e2e_delta_pct) <= allowed
-    if plausible:
-        note = (f"observed +{float(e2e_delta_pct):.2f}% within Amdahl ceiling "
-                f"(≤ +{ceiling:.2f}% × {slack} slack + {noise_band_pct}% band = {allowed:.2f}%).")
-    else:
-        note = (f"observed +{float(e2e_delta_pct):.2f}% EXCEEDS the Amdahl ceiling for a "
-                f"{float(pct_gpu)} GPU-time kernel at {float(isolated_speedup):.3f}x "
-                f"(ceiling +{ceiling:.2f}%, allowed +{allowed:.2f}%). Not attributable to this kernel — "
-                f"treat as box drift/measurement error: re-measure interleaved and re-verify pct_gpu.")
-    return {"ceiling_pct": round(ceiling, 3), "allowed_pct": round(allowed, 3),
-            "plausible": bool(plausible), "verdict": "ok" if plausible else "implausible",
-            "note": note}
-
-
 # --------------------------------------------------------------------------- (c) serving-weighted PRIMARY metric
 def _analytic_calls_from_meta(meta):
     swm = ((meta or {}).get("workload") or {}).get("serving_weight_model") or {}
@@ -829,75 +594,6 @@ def served_regimes(meta):
     if not sr:
         return set()
     return {str(r).strip().lower() for r in sr if str(r).strip()}
-
-
-def served_buckets(meta):
-    """The M buckets this kernel serves, with measured or analytic call counts.
-
-    Observed weighting sums call mass by (phase, M), preserving phase identity;
-    KV/dispatch distinctions still require the full UT. The fixed-load path
-    below retains its analytic per-wave model and de-duplication by M.
-
-    `op_bench` benched at `max(m_buckets)`, on the premise that the largest bucket carries the
-    GPU-time mass. It does not. Mass = per-launch time x LAUNCHES, and the analytic call model
-    (`serving_weight_model.analytic_calls`) counts prefill = CONC*ceil(ISL/chunk) passes against
-    decode = OSL passes. Neither bucket dominates universally -- prefill runs few large passes,
-    decode runs many small ones -- so a single bucket cannot represent the served mix, and the
-    LARGEST one is routinely the least-served shape.
-
-    Decode's M is the concurrency (snapped to a graph capture size); prefill's is the chunk, or
-    ISL when the server does not chunk. Each is matched to the nearest profiled `m_buckets` entry
-    when one exists, so the bench runs on a shape the profile actually saw.
-
-    Returns [(phase, M, calls), ...] ordered by descending calls, de-duplicated by M. Returns []
-    when meta carries no serving model (offline / unit-test metas), which leaves callers on their
-    previous single-bucket behaviour."""
-    observed = _observed_workload_cases(meta)
-    if observed is not None:
-        served = served_regimes(meta)
-        out = {}
-        for case in observed.values():
-            phase, mass = case["regime"], case["effective_calls"]
-            if (served and phase not in served) or mass == 0:
-                continue
-            m = _int_or_none(case.get("m"))
-            if m is None or m <= 0:
-                raise HarnessIncompleteError(f"Observed case {case['sig']}: missing positive m for op benchmark")
-            key = (phase, m)
-            out[key] = out.get(key, 0.0) + mass
-        return [(phase, m, mass) for (phase, m), mass in
-                sorted(out.items(), key=lambda item: -item[1])]
-    swm = ((meta or {}).get("workload") or {}).get("serving_weight_model") or {}
-    calls = swm.get("analytic_calls") or {}
-    if not calls:
-        return []
-    buckets = [int(b) for b in (meta.get("m_buckets") or [])
-               if str(b).strip().lstrip("-").isdigit()]
-    served = served_regimes(meta)
-    want = {"decode": swm.get("conc"),
-            "prefill": swm.get("prefill_chunk") or swm.get("isl")}
-    out = {}
-    for phase, n in calls.items():
-        ph = str(phase).strip().lower()
-        if served and ph not in served:
-            continue                      # a phase this kernel does not run in carries no weight
-        m, n = want.get(ph), _int_or_none(n)
-        m = _int_or_none(m)
-        if not m or not n or n <= 0:
-            continue
-        if buckets:
-            m = min(buckets, key=lambda b: abs(b - m))
-        prev = out.get(m)
-        if prev is None or n > prev[2]:
-            out[m] = (ph, m, n)
-    return sorted(out.values(), key=lambda t: -t[2])
-
-
-def _int_or_none(x):
-    try:
-        return int(x)
-    except (TypeError, ValueError):
-        return None
 
 
 def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True):
@@ -1062,29 +758,6 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
 
 class HarnessIncompleteError(Exception):
     """Missing or inconsistent evidence prevents harness qualification."""
-
-
-# --------------------------------------------------------------------------- boundary-shape helpers (attn)
-def boundary_decode_seq_lens(geo, ctx_max):
-    """Ragged decode seq_lens that straddle the block_size / partition_size boundaries plus min/max —
-    the set that trips OOB in split/reduce paged-attention paths which a single uniform capture shape
-    (e.g. seq_len=1536) never exercises. `geo` is meta.geometry; `ctx_max` = ISL+OSL."""
-    B = int((geo or {}).get("block_size", 16) or 16)
-    P = int((geo or {}).get("partition_size", 256) or 256)
-    ctx_max = int(ctx_max or 0)
-    cands = {1, B - 1, B, B + 1, P - 1, P, P + 1, 2 * P - 1, 2 * P, ctx_max - 1, ctx_max}
-    return sorted(x for x in cands if 1 <= x <= max(1, ctx_max))
-
-
-def shuffled_block_table(num_seqs, blocks_per_seq, pool_blocks=0, seed=0, torch=None, device="cuda"):
-    """A NON-contiguous (shuffled, padded-pool) block table — the real server's paged layout. A
-    contiguous `arange` table hides indexing/stride bugs that only fault on a real scattered mapping."""
-    torch = torch or _torch()
-    need = int(num_seqs) * int(blocks_per_seq)
-    pool = max(int(pool_blocks or 0), need + 16)
-    g = torch.Generator(device=device).manual_seed(int(seed))
-    perm = torch.randperm(pool, generator=g, device=device)[:need].to(torch.int32)
-    return perm.reshape(int(num_seqs), int(blocks_per_seq))
 
 
 # --------------------------------------------------------------------------- (d) two-leg measurement

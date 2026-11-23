@@ -58,8 +58,6 @@ UNIT_ROUNDOFF = {"float64": 2.0 ** -53, "float32": 2.0 ** -24, "bfloat16": 2.0 *
                  "float16": 2.0 ** -11, "float8_e4m3fn": 2.0 ** -4, "float8_e4m3fnuz": 2.0 ** -4,
                  "float8_e5m2": 2.0 ** -3, "float8_e5m2fnuz": 2.0 ** -3}
 INTEGER_DTYPES = ("int8", "int16", "int32", "int64", "uint8", "bool")
-# Packed or exponent-only dtypes: a tensor of these is compared byte for byte or decoded first.
-PACKED_DTYPES = ("float4_e2m1fn_x2", "float8_e8m0fnu", "uint8")
 
 # Elementwise bound multiples, as in SIKL semantics/_compare.py.
 _SQRT_LENGTH_MULTIPLE = 6.0
@@ -1280,18 +1278,12 @@ def check_input_values(doc, args, sym):
     return not bad, bad
 
 
-def writable_inputs(doc):
-    """Inputs the live entry writes in place (an in-place rotary, a KV cache it fills). `call()`
-    must clone them before invoking the entry, so `inputs_unmodified` still covers them: a
-    call() that forgot the clone corrupts the operands of every later draw and replay."""
-    return tuple(n for n, s in doc["inputs"].items() if s.get("writable"))
-
-
-def inputs_unmodified(call, args, writable=()):
-    """Run `call(args)` once and confirm no input other than `writable` changed. An extracted
-    kernel that writes an operand in place (a residual `add_`, a cache it should only read) makes
-    every later draw of the same buffers wrong, and a graph replay doubly so."""
-    before = input_snapshot({k: v for k, v in args.items() if k not in writable})
+def inputs_unmodified(call, args):
+    """Run `call(args)` once and confirm no input changed. An extracted kernel that writes an
+    operand in place (a residual `add_`, a cache it should only read) makes every later draw of
+    the same buffers wrong, and a graph replay doubly so. `call()` clones what the live entry
+    legitimately writes (a contract input marked `writable`)."""
+    before = input_snapshot(args)
     out = call(args)
     changed = sorted(k for k in before if k not in args or not inputs_equal(before[k], args[k]))
     return not changed, changed, out
