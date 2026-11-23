@@ -277,6 +277,11 @@ def _validate_oracles(doc):
 def _validate_control_categories(doc):
     """`required_control_categories`: the kinds of injected bug a task's negative controls must
     cover, `{"by": <attr>, "cases": {<attr value>: [category, ...]}}` or a plain list."""
+    mins = doc.get("min_controls_per_category")
+    if mins is not None and (not isinstance(mins, dict) or not all(
+            isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool) and v >= 1
+            for k, v in mins.items())):
+        raise ContractError("min_controls_per_category must map a category to an int >= 1")
     req = doc.get("required_control_categories")
     if req is None or isinstance(req, list) and all(isinstance(c, str) for c in req):
         return
@@ -490,6 +495,32 @@ def _lint_rank_chain(task_dir, doc, meta):
         errors.append("cases.py defines no rank_chain(rank, world, group, case)")
     elif "NotImplementedError(\"FILL _Chain" in src:
         errors.append("cases.py rank_chain is still the scaffold's FILL stub")
+    # the template form (scaffold_ut MONO_FAMILIES): rank_chain is the generic rank_harness.Chain,
+    # what is left to write is rank_model.py's RankModel
+    model = os.path.join(task_dir, "rank_model.py")
+    if os.path.exists(model):
+        with open(model) as f:
+            msrc = f.read()
+        stubs = sorted(set(re.findall(r'NotImplementedError\("FILL (RankModel\.[A-Za-z_]+)', msrc)))
+        if stubs:
+            errors.append("rank_model.py RankModel (what call() and rank_chain run) is still the scaffold's FILL stub: %s" % ", ".join(stubs))
+        # rank_harness replays one static step a width: every replay case of a phase shares rows
+        try:
+            with open(os.path.join(task_dir, "run", "ut_cases.json")) as f:
+                man = json.load(f)
+        except (OSError, ValueError):
+            man = {}
+        by_sig = {c.get("sig"): c for c in man.get("cases") or []}
+        widths = {}
+        for sig in man.get("replay_sigs") or []:
+            c = by_sig.get(sig) or {}
+            widths.setdefault(c.get("regime"), set()).add((c.get("axes") or {}).get("rows"))
+        for ph, ws in sorted(widths.items(), key=lambda kv: str(kv[0])):
+            if len(ws) > 1:
+                errors.append("replay_sigs of %s span rows %s: rank_harness captures one graph a width, "
+                              "so a phase's replay cases must share one row count" % (ph, sorted(ws, key=str)))
+    elif "_harness().Chain(" in src:
+        errors.append("cases.py rank_chain uses rank_harness.Chain but the task has no rank_model.py")
     return errors
 
 
@@ -655,6 +686,36 @@ def _lint_package_diff(task_dir, meta, leaves):
             continue
         errors.append("%s is %s relative to the installed package but is neither an editable leaf "
                       "nor in frozen_differs: the candidate overlay carries it" % (path, kind))
+    return errors
+
+
+def _lint_control_categories(doc, controls):
+    """DESIGN 3: when the contract names the kinds of injected bug a task must cover
+    (`required_control_categories`, selected by the task's pinned attrs), every negative control
+    states its `category`, every required category has at least one control, and a category the
+    contract asks for more than once (`min_controls_per_category`, e.g. kv_slot: 3 -- a wrong
+    page, a one-slot shift on a block's last row, the full table used for a sliding layer) has
+    that many. Categories outside the required set are allowed: they document extra coverage."""
+    errors = []
+    if not doc.get("required_control_categories"):
+        return errors
+    try:
+        required = control_categories(doc, (doc.get("task") or {}).get("attrs") or {})
+    except ContractError as e:
+        return [str(e)]
+    seen = {}
+    for c in controls:
+        cat = c.get("category")
+        if not isinstance(cat, str) or not cat.strip():
+            errors.append("negative control on %s (find %r) has no category; the contract requires %s"
+                          % (c.get("leaf"), (c.get("find") or "")[:40], required))
+            continue
+        seen[cat] = seen.get(cat, 0) + 1
+    for cat in required:
+        need = int((doc.get("min_controls_per_category") or {}).get(cat, 1))
+        if seen.get(cat, 0) < need:
+            errors.append("negative controls: category %s has %d control(s), the contract requires %d"
+                          % (cat, seen.get(cat, 0), need))
     return errors
 
 
@@ -839,6 +900,7 @@ def lint_task(task_dir):
             if (not isinstance(probes, list) or any(not isinstance(s, str) for s in probes)
                     or len(set(probes)) != len(probes) or set(probes) - known):
                 errors.append("negative control on %s: probe_sigs must name unique random cases" % leaf)
+    errors.extend(_lint_control_categories(doc, controls))
 
     # The server compiles the kernel after its framework has been imported; a framework can
     # rebind library functions at import (sglang: triton.next_power_of_2), so a leg that never

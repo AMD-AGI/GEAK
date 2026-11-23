@@ -1,20 +1,31 @@
 """CPU tests for the mono_layer contract: oracle references in the family schema, the reduced set
-of gated outputs, and compare_one's handling of a subject that left a poisoned (non-finite)
-value where the compared-against output is finite.
+of gated outputs, compare_one's handling of a subject that left a poisoned (non-finite) value where
+the compared-against output is finite, the negative-control gate on such outputs
+(ut_driver.numerical_control_outputs), and `scaffold_ut.py new --family mono_layer` (generic rank
+harness, mono templates, control stubs).
 
 Run: python3 workload/stages/ut/kernel-ut/ut_contracts/tests/test_mono_layer_lint.py
 """
 
+import ast
+import contextlib
+import io
 import json
 import math
 import os
+import shutil
 import sys
+import tempfile
+import types
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 UTC = os.path.dirname(HERE)
+SKILL = os.path.dirname(UTC)
 sys.path.insert(0, UTC)
+import scaffold_ut  # noqa: E402
 import ut_contract as U  # noqa: E402
+import ut_driver as D  # noqa: E402
 
 try:
     import torch
@@ -186,6 +197,63 @@ class OracleSchemaTest(unittest.TestCase):
             U.control_categories(doc, {})                              # the task pins no layer_kind
         with self.assertRaises(U.ContractError):
             U.control_categories(doc, {"layer_kind": "sparse"})        # a value with no case
+
+    def test_min_controls_per_category_shape(self):
+        self.assertEqual(_family()["min_controls_per_category"], {"kv_slot": 3})
+        self.assertRejects(lambda d: d.__setitem__("min_controls_per_category", {"kv_slot": 0}), ">= 1")
+        self.assertRejects(lambda d: d.__setitem__("min_controls_per_category", ["kv_slot"]), ">= 1")
+        self.assertRejects(lambda d: d.__setitem__("min_controls_per_category", {"kv_slot": True}), ">= 1")
+
+
+def _frozen(layer_kind="routed_moe"):
+    return U.freeze_task_contract(_family(), attrs={"layer_kind": layer_kind, "stream_dtype": "float32"},
+                                  const_axes=TASK_AXES)
+
+
+def _ctl(category, i=0):
+    return {"leaf": "kernel_src/x.py", "find": "f%d" % i, "replace": "r", "expect": "e", "category": category}
+
+
+class ControlCategoryLintTest(unittest.TestCase):
+    """DESIGN 3 / W6: every control names its category; the task's required categories (selected
+    by its pinned layer_kind) are covered, kv_slot three times."""
+
+    FULL = ["softmax_scale", "peer_partial", "kv_slot", "kv_slot", "kv_slot", "routing_ids"]
+
+    def lint(self, cats, layer_kind="routed_moe"):
+        return U._lint_control_categories(_frozen(layer_kind), [_ctl(c, i) for i, c in enumerate(cats)])
+
+    def test_full_routed_moe_set_passes(self):
+        self.assertEqual(self.lint(self.FULL), [])
+
+    def test_extra_categories_are_allowed(self):
+        self.assertEqual(self.lint(self.FULL + ["kv_write_dropped", "residual_gate"]), [])
+
+    def test_missing_category_is_named(self):
+        errs = self.lint([c for c in self.FULL if c != "routing_ids"])
+        self.assertEqual(len(errs), 1)
+        self.assertIn("routing_ids has 0", errs[0])
+
+    def test_kv_slot_needs_three(self):
+        errs = self.lint(["softmax_scale", "peer_partial", "kv_slot", "kv_slot", "routing_ids"])
+        self.assertEqual(len(errs), 1)
+        self.assertIn("kv_slot has 2 control(s), the contract requires 3", errs[0])
+
+    def test_a_control_without_category_is_an_error(self):
+        controls = [_ctl(c, i) for i, c in enumerate(self.FULL)] + [{"leaf": "kernel_src/y.py", "find": "z"}]
+        errs = U._lint_control_categories(_frozen(), controls)
+        self.assertEqual(len(errs), 1)
+        self.assertIn("has no category", errs[0])
+
+    def test_dense_needs_norm_weight_not_routing_ids(self):
+        errs = self.lint(self.FULL, layer_kind="dense")
+        self.assertEqual(len(errs), 1)
+        self.assertIn("norm_weight has 0", errs[0])
+
+    def test_a_family_without_required_categories_is_not_checked(self):
+        doc = _frozen()
+        doc.pop("required_control_categories")
+        self.assertEqual(U._lint_control_categories(doc, [{"leaf": "a", "find": "b"}]), [])
 
 
 @needs_torch
@@ -472,6 +540,187 @@ class MonoOutputsCompareTest(unittest.TestCase):
         res = U.compare_outputs(doc, ref, ref, sym=sym, refs=ref)
         self.assertTrue(res["ok"])
         self.assertNotIn("ids", res["outputs"])
+
+
+# --- negative controls on non-finite outputs (ut_driver.numerical_control_outputs) ---
+
+NF_DOC = {"outputs": {
+    "stream_out": {"shape": ["n"], "dtype": "float32", "require_finite": True,
+                   "bound": {"kind": "tolerance", "atol": 1e-3, "rtol": 1e-3}},
+    "kv_rows": {"shape": ["n"], "dtype": "float32", "require_finite": True,
+                "bound": {"kind": "tolerance", "atol": 1e-3, "rtol": 1e-3}},
+    "ids": {"shape": ["n"], "dtype": "int32", "bound": {"kind": "exact"}}},
+       "compare": {"determinism": "bounded", "max_violation_fraction": 0.0, "element_order": "fixed"}}
+NF_T = types.SimpleNamespace(doc=NF_DOC)
+
+
+@unittest.skipIf(torch is None, "needs torch")
+class NonfiniteControls(unittest.TestCase):
+    def compare(self, sub, ref):
+        return U.compare_outputs(NF_DOC, sub, ref, sym={"n": 4}, refs=ref)
+
+    def base(self):
+        return {"stream_out": torch.ones(4), "kv_rows": torch.ones(4), "ids": torch.arange(4, dtype=torch.int32)}
+
+    def test_a_subject_left_at_the_poison_is_a_rejection_at_infinite_margin(self):
+        sub = self.base()
+        sub["kv_rows"] = torch.tensor([1.0, float("nan"), 1.0, 1.0])
+        res = self.compare(sub, self.base())
+        self.assertEqual(res["outputs"]["kv_rows"]["status"], "subject_nonfinite")
+        counted = D.numerical_control_outputs(NF_T, res["outputs"])
+        self.assertEqual(sorted(counted), ["kv_rows"])
+        self.assertEqual(U.control_margin({"outputs": counted}), float("inf"))
+
+    def test_a_nonfinite_reference_is_not_a_detection(self):
+        ref = self.base()
+        ref["stream_out"] = torch.tensor([float("nan"), 1.0, 1.0, 1.0])
+        res = self.compare(self.base(), ref)
+        self.assertFalse(res["outputs"]["stream_out"]["ok"])
+        self.assertNotEqual(res["outputs"]["stream_out"]["status"], "subject_nonfinite")
+        self.assertEqual(D.numerical_control_outputs(NF_T, res["outputs"]), {})
+
+    def test_numerical_and_exact_rejections_still_count(self):
+        sub = self.base()
+        sub["stream_out"] = torch.tensor([2.0, 1.0, 1.0, 1.0])
+        sub["ids"] = torch.tensor([0, 1, 2, 0], dtype=torch.int32)
+        counted = D.numerical_control_outputs(NF_T, self.compare(sub, self.base())["outputs"])
+        self.assertEqual(sorted(counted), ["ids", "stream_out"])
+
+    def test_a_passing_output_is_never_counted(self):
+        self.assertEqual(D.numerical_control_outputs(NF_T, self.compare(self.base(), self.base())["outputs"]), {})
+
+
+# --- scaffold_ut.py new --family mono_layer ---
+
+AXES = ["hidden=8192", "world=8", "launches=2", "pools=2", "kv_width=128", "topk=8"]
+
+
+def _new(task, *extra):
+    argv = ["new", "--family", "mono_layer", "--task", task, "--target", "pkg.runner:Runner.launch",
+            "--bind-module", "pkg", "--bind-file", "kernel_src/pkg/__init__.py"]
+    for a in AXES:
+        argv += ["--axis", a]
+    with contextlib.redirect_stdout(io.StringIO()):
+        scaffold_ut.main(argv + list(extra))
+
+
+def _classdict(src, cls):
+    """Literal class attributes of `cls` in source `src`."""
+    tree = ast.parse(src)
+    out = {}
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == cls:
+            for st in node.body:
+                if isinstance(st, ast.Assign) and len(st.targets) == 1 and isinstance(st.targets[0], ast.Name):
+                    try:
+                        out[st.targets[0].id] = ast.literal_eval(st.value)
+                    except ValueError:
+                        out[st.targets[0].id] = ast.unparse(st.value)
+    return out
+
+
+class MonoScaffold(unittest.TestCase):
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="mono_scaffold_")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.task = os.path.join(self.root, "mono")
+
+    def read(self, name):
+        with open(os.path.join(self.task, name)) as f:
+            return f.read()
+
+    def test_the_generic_harness_is_copied_byte_for_byte(self):
+        _new(self.task)
+        with open(os.path.join(UTC, "mono_harness.py")) as f:
+            self.assertEqual(self.read("rank_harness.py"), f.read())
+        self.assertFalse(os.path.exists(os.path.join(self.task, "rank_chain.py")))
+
+    def test_rank_model_carries_the_frozen_constants(self):
+        _new(self.task, "--attr", "layer_kind=routed_moe")
+        attrs = _classdict(self.read("rank_model.py"), "RankModel")
+        self.assertEqual((attrs["WORLD"], attrs["LAUNCHES"], attrs["POOLS"], attrs["HIDDEN"], attrs["TOP_K"],
+                          attrs["KV_WIDTH"]), (8, 2, 2, 8192, 8, 128))
+        self.assertEqual(attrs["STREAM_DTYPE"], "torch.float32")
+        self.assertEqual(attrs["PACKAGE"], "pkg")
+        doc = U.load_task_contract(self.task)
+        self.assertEqual(attrs["PATHS"][0], "deployed")
+        self.assertEqual(set(attrs["PATHS"][1:]), {o["path"] for o in doc["oracles"].values()})
+
+    def test_a_dense_layer_has_no_top_k(self):
+        _new(self.task, "--attr", "layer_kind=dense")
+        self.assertIsNone(_classdict(self.read("rank_model.py"), "RankModel")["TOP_K"])
+
+    def test_cases_wire_every_oracle_leg_and_compile(self):
+        _new(self.task)
+        src = self.read("cases.py")
+        ast.parse(src)
+        doc = U.load_task_contract(self.task)
+        for name, o in doc["oracles"].items():
+            self.assertIn("def oracle_%s(args):" % name, src)
+            self.assertIn("return _step(args, %r)" % o["path"], src)
+            self.assertIn("%r: oracle_%s" % (name, name), src)
+        self.assertIn("CHAIN_LENGTH = %d" % doc["timing"]["chain_length"], src)
+        self.assertIn("GRAPH_PHASES = ['DECODE']", src)
+        self.assertNotIn("raise NotImplementedError", src)   # nothing to fill but the call-site docstring
+
+    def test_an_override_that_drops_an_oracle_drops_its_leg(self):
+        ov = os.path.join(self.root, "ov.json")
+        fam = U.load_family("mono_layer")
+        with open(ov, "w") as f:
+            json.dump([{"path": "oracles", "value": {"split": fam["oracles"]["split"]}, "why": "native not yet"}], f)
+        _new(self.task, "--override", ov)
+        src = self.read("cases.py")
+        self.assertIn("ORACLES = {'split': oracle_split}", src)
+        self.assertNotIn("oracle_native", src)
+        self.assertEqual(_classdict(self.read("rank_model.py"), "RankModel")["PATHS"], ("deployed", "split"))
+
+    def test_graph_phases_follow_the_phase_regimes(self):
+        pr = os.path.join(self.root, "pr.json")
+        with open(pr, "w") as f:
+            json.dump({"DECODE": {"cuda_graph": True}, "PREFILL": {"cuda_graph": False}}, f)
+        _new(self.task, "--phase-regimes", pr)
+        self.assertIn("GRAPH_PHASES = ['DECODE']", self.read("cases.py"))
+
+    def test_meta_has_the_leg_env_and_rank_chain_timing(self):
+        _new(self.task)
+        with open(os.path.join(self.task, "meta.json")) as f:
+            meta = json.load(f)
+        self.assertEqual(meta["leg_env"], "rank_harness:leg_env")
+        self.assertEqual(meta["timing"]["kind"], "rank_chain")
+
+    def test_control_stubs_cover_every_required_category(self):
+        _new(self.task, "--attr", "layer_kind=routed_moe")
+        with open(os.path.join(self.task, "meta.json")) as f:
+            controls = json.load(f)["ut_contract"]["negative_controls"]
+        doc = U.load_task_contract(self.task)
+        want = {c: int((doc.get("min_controls_per_category") or {}).get(c, 1))
+                for c in U.control_categories(doc, doc["task"]["attrs"])}
+        got = {}
+        for c in controls:
+            got[c["category"]] = got.get(c["category"], 0) + 1
+        self.assertEqual(got, want)
+        self.assertEqual(got["kv_slot"], 3)
+
+    def test_the_lint_refuses_the_unfilled_stubs(self):
+        _new(self.task)
+        errs = U.lint_task(self.task)["errors"]
+        self.assertTrue(any("FILL" in e or "editable leaf" in e or "not an editable leaf" in e
+                            or "find" in e for e in errs), errs)
+
+    def test_the_worked_example_implements_the_template_interface(self):
+        _new(self.task)
+        tmpl = ast.parse(self.read("rank_model.py"))
+        with open(os.path.join(SKILL, "references", "examples", "muse_spark_target_rank_model.py")) as f:
+            ex = ast.parse(f.read())
+
+        def members(tree):
+            for node in tree.body:
+                if isinstance(node, ast.ClassDef) and node.name == "RankModel":
+                    return {st.name for st in node.body if isinstance(st, ast.FunctionDef)} | \
+                           {st.targets[0].id for st in node.body if isinstance(st, ast.Assign)}
+            return set()
+
+        self.assertEqual(members(tmpl) - members(ex), set())
 
 
 if __name__ == "__main__":

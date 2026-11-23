@@ -900,7 +900,7 @@ def _int_or_none(x):
         return None
 
 
-def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True):
+def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True, subset=False):
     """Centralized PRIMARY-metric weighting for the immutable unittests — replaces the per-kernel
     hand-rolled `_serving_calls`/`weight` blocks so every UT applies the SAME audited rule. Enforces:
 
@@ -934,7 +934,12 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
 
     `per_case`: list of {sig|name, regime, m?, baseline_ms, optimized_ms?|speedup?}. speedup is derived
     from baseline_ms/optimized_ms when both present (preferred), else the passed `speedup` is used.
-    Returns {weighted, geomean, primary, included, dropped_unserved, suspect_identity, per_case, reason}."""
+    Returns {weighted, geomean, primary, included, dropped_unserved, suspect_identity, per_case, reason}.
+
+    `subset=True` (ut_driver --quick-timing ONLY): an observed-workload UT may omit positive-mass cases;
+    the figure is then weighted over the measured cases alone and the result carries `subset: true`,
+    `omitted_positive_mass` (sigs) and `call_mass_coverage` (measured / required effective calls). It is
+    a screening number, never the figure of record: rule (2) above stays absolute for every other caller."""
     served = served_regimes(meta)
     observed = _observed_workload_cases(meta)
     calls_model = _analytic_calls_from_meta(meta)
@@ -980,8 +985,14 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
         required = {sig for sig, case in observed.items()
                     if case["effective_calls"] > 0 and (not served or case["regime"] in served)}
         missing = required - seen
-        if missing:
+        if missing and not subset:
             raise HarnessIncompleteError(f"Observed-workload UT omitted positive-mass cases: {sorted(missing)}")
+        req_mass = sum(observed[s]["effective_calls"] for s in required)
+        subset_info = {"subset": True, "omitted_positive_mass": sorted(missing),
+                       "call_mass_coverage": (sum(observed[s]["effective_calls"] for s in required & seen)
+                                              / req_mass) if req_mass else None} if subset else {}
+    else:
+        subset_info = {"subset": True, "omitted_positive_mass": [], "call_mass_coverage": None} if subset else {}
 
     # assign analytic passes: the largest-M bucket in each regime carries that regime's calls, rest = 1.
     by_reg = {}
@@ -1017,7 +1028,7 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
             r["included"] = False
 
     if not included:
-        return {"weighted": None, "geomean": None, "primary": None, "included": 0,
+        return {"weighted": None, "geomean": None, "primary": None, "included": 0, **subset_info,
                 "dropped_unserved": dropped_unserved, "suspect_identity": suspect, "per_case": rows,
                 "reason": ("no measurable non-identity bucket survived (all identity/zero-weight or "
                            "dropped by served-regimes) — weighted speedup is UNTRUSTED; re-measure "
@@ -1030,7 +1041,7 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
     if geomean:
         spds = [r["speedup"] for r in included]
         gm = math.exp(sum(math.log(s) for s in spds) / len(spds)) if spds else None
-    out = {"weighted": weighted, "geomean": gm, "primary": weighted, "included": len(included),
+    out = {"weighted": weighted, "geomean": gm, "primary": weighted, "included": len(included), **subset_info,
            "dropped_unserved": dropped_unserved, "suspect_identity": suspect, "per_case": rows,
            "reason": ""}
     # Cases labelled with a branch (one UT covering several dispatch branches): one figure per
@@ -1232,7 +1243,7 @@ def _median(xs):
 
 
 def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1.10), gpus=None,
-                 done=None, on_bucket=None, process_mode='batched'):
+                 done=None, on_bucket=None, process_mode='batched', only=None):
     """One immutable-overlay process per side/round/GPU shard by default.
 
     Each side streams all remaining shapes, with identical order on both sides.
@@ -1243,6 +1254,8 @@ def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1
 
     rank_chain retains its specialized per-bucket rank launcher. Returned rows
     label the actual mode, and checkpoints from another mode are never reused.
+
+    `only` (a set of sigs) restricts the sweep to those buckets (ut_driver --quick-timing).
     """
     if process_mode not in ('batched', 'fresh'):
         raise ValueError('process_mode must be batched or fresh')
@@ -1256,7 +1269,8 @@ def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1
 
     if actual != 'batched':
         rows = _measure_fresh_legs(task_dir, meta, timeout=timeout, max_reps=max_reps,
-                                  undecided=undecided, gpus=gpus, done=done, on_bucket=completed)
+                                  undecided=undecided, gpus=gpus, done=done, on_bucket=completed,
+                                  only=only)
         return [dict(r, process_mode=actual) for r in rows]
     task = os.path.abspath(task_dir)
     base, cand = build_candidate_overlay(task, meta)
@@ -1264,6 +1278,8 @@ def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1
     sigs = _run_leg(task, base, 'list', timeout=timeout)['sigs']
     if len(sigs) != len(set(sigs)):
         raise ValueError('duplicate timing case sigs')
+    if only is not None:
+        sigs = [s for s in sigs if s in only]
     todo = [s for s in sigs if s not in done]
     devices = list(gpus or [None])
     from concurrent.futures import ThreadPoolExecutor
@@ -1341,7 +1357,7 @@ def _summarize_pairs(sig, brows, orows):
 
 
 def _measure_fresh_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1.10), gpus=None,
-                 done=None, on_bucket=None):
+                 done=None, on_bucket=None, only=None):
     """`per_case` for `serving_weighted_speedup`, one bucket per FRESH subprocess per leg.
 
     This reference mode restarts for each bucket. Separate overlays/processes
@@ -1375,11 +1391,18 @@ def _measure_fresh_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(
 
     `done` ({sig: row}) are buckets a previous, interrupted run already measured under the same
     task state (the caller keys them); they are returned as they are, not re-timed. `on_bucket(row)`
-    is called after every bucket measured here, so the caller can persist it at once."""
+    is called after every bucket measured here, so the caller can persist it at once.
+
+    `only` (a set of sigs) restricts the sweep to those buckets (ut_driver --quick-timing).
+
+    A rank_chain task (meta.timing.kind) is the exception to one-bucket-per-leg: see
+    `_measure_rank_chain`."""
     task = os.path.abspath(task_dir)
     base, cand = build_candidate_overlay(task, meta)
     assert_legs_differ(task, base, cand, meta)
     sigs = _run_leg(task, base, "list", timeout=timeout)["sigs"]
+    if only is not None:
+        sigs = [s for s in sigs if s in only]
     done = dict(done or {})
     todo = [s for s in sigs if s not in done]
 
@@ -1395,12 +1418,13 @@ def _measure_fresh_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(
     gpus = list(gpus or [])
     world = rank_chain_world(meta)
     if world:
-        # A rank_chain bucket (rank_timing.py) runs one process per rank on `world` devices at
-        # once: buckets go one after another, each leg leased the whole set, never one GPU each.
+        # A rank_chain leg (rank_timing.py) runs one process per rank on `world` devices at
+        # once: each leg is leased the whole set, never one GPU each.
         if gpus and len(gpus) < world:
             raise HarnessIncompleteError("rank_chain timing needs %d GPUs, given %s" % (world, gpus))
         env = gpu_env(",".join(str(g) for g in gpus[:world])) if gpus else None
-        return ordered({sig: measured(sig, timeout, max_reps, undecided, env) for sig in todo})
+        return ordered(_measure_rank_chain(task, base, cand, todo, timeout, max_reps, undecided, env,
+                                           on_bucket))
     if len(gpus) > 1 and len(todo) > 1:
         import queue
         import threading
@@ -1452,10 +1476,51 @@ def _leg_receipt(rows):
                             for r in rows]}
 
 
+class _BucketPairs:
+    """One bucket's B,C pairs so far, the early-exit rule, and the per_case row (see measure_legs)."""
+
+    def __init__(self, sig, undecided):
+        self.sig, self.undecided = sig, undecided
+        self.row, self.bms, self.oms, self.brows, self.orows = None, [], [], [], []
+
+    def add(self, b, o):
+        """Record one pair (leg rows, either may be None = untimable); True when the bucket is done."""
+        if not b or not o:
+            return True
+        if self.row is None:
+            self.row = b
+        self.bms.append(b.get("ms"))
+        self.oms.append(o.get("ms"))
+        self.brows.append(b)
+        self.orows.append(o)
+        good_b, good_o = [x for x in self.bms if x], [y for y in self.oms if y]
+        if not good_b or not good_o:
+            return True                # nothing timable here; more pairs cannot change that
+        lo, hi = self.undecided
+        # decisive already — do not buy resolution we do not need
+        return not (lo <= _median(good_b) / _median(good_o) <= hi)
+
+    def result(self):
+        """The per_case row; None when nothing was timable."""
+        if self.row is None:
+            return None
+        bms, oms, row = self.bms, self.oms, self.row
+        good_b, good_o = [x for x in bms if x], [y for y in oms if y]
+        bm = _median(good_b) if good_b else None
+        om = _median(good_o) if good_o else None
+        pair_sp = [x / y for x, y in zip(bms, oms) if x and y]
+        return {"sig": self.sig, "regime": row.get("regime", ""), "m": row.get("m"),
+                "baseline_ms": bm, "optimized_ms": om,
+                "speedup": (bm / om) if (bm and om) else None,
+                "reps": len(bms),
+                "speedup_spread": ((max(pair_sp) - min(pair_sp)) / _median(pair_sp)
+                                   if len(pair_sp) > 1 else 0.0),
+                "baseline_timing": _leg_receipt(self.brows), "optimized_timing": _leg_receipt(self.orows)}
+
+
 def _measure_bucket(task, base, cand, sig, timeout, max_reps, undecided, env_extra):
     """One bucket's interleaved B,C pairs (see measure_legs); None when nothing was timable."""
-    lo, hi = undecided
-    row, bms, oms, brows, orows = None, [], [], [], []
+    acc = _BucketPairs(sig, undecided)
     for _ in range(max(1, int(max_reps))):
         sides = [('baseline', base), ('candidate', cand)]
         if _ % 2:
@@ -1465,29 +1530,57 @@ def _measure_bucket(task, base, cand, sig, timeout, max_reps, undecided, env_ext
             response = _run_leg(task, overlay, "time", bucket=sig, timeout=timeout, env_extra=env_extra)
             results[side] = _checked_timing_rows(response, [sig], side)
         b, o = results['baseline'], results['candidate']
-        if not b or not o:
+        if acc.add(b[0] if b else None, o[0] if o else None):
             break
-        if row is None:
-            row = b[0]
-        bms.append(b[0].get("ms"))
-        oms.append(o[0].get("ms"))
-        brows.append(b[0])
-        orows.append(o[0])
-        good_b, good_o = [x for x in bms if x], [y for y in oms if y]
-        if not good_b or not good_o:
-            break                      # nothing timable here; more pairs cannot change that
-        if not (lo <= _median(good_b) / _median(good_o) <= hi):
-            break                      # decisive already — do not buy resolution we do not need
-    if row is None:
-        return None
-    good_b, good_o = [x for x in bms if x], [y for y in oms if y]
-    bm = _median(good_b) if good_b else None
-    om = _median(good_o) if good_o else None
-    pair_sp = [x / y for x, y in zip(bms, oms) if x and y]
-    return {"sig": sig, "regime": row.get("regime", ""), "m": row.get("m"),
-            "baseline_ms": bm, "optimized_ms": om,
-            "speedup": (bm / om) if (bm and om) else None,
-            "reps": len(bms),
-            "speedup_spread": ((max(pair_sp) - min(pair_sp)) / _median(pair_sp)
-                               if len(pair_sp) > 1 else 0.0),
-            "baseline_timing": _leg_receipt(brows), "optimized_timing": _leg_receipt(orows)}
+    return acc.result()
+
+
+def _measure_rank_chain(task, base, cand, todo, timeout, max_reps, undecided, env_extra, on_bucket):
+    """rank_chain buckets ({sig: row}): ONE leg per side per rep times every undecided bucket.
+
+    A rank_chain leg is a parent leg_runner plus `world` rank processes that each import torch,
+    initialise the device and the process group, and build the task's model before the first
+    bucket: ~18 s of a ~20 s leg on the Muse Spark target layer (8 ranks, gfx950), against
+    0.2-0.5 s of timed replays. One leg per bucket per side therefore spent ~98% of the timing
+    gate (23 buckets x 3 pairs = 138 legs, 43 min) on start-up. rank_timing.time_buckets runs a
+    leg's buckets back to back on one set of rank processes (~3 s a further bucket) and closes
+    each bucket's chain before the next.
+
+    What one-bucket-per-leg protected is unchanged: the two SIDES never share a process (every
+    leg is still fresh and runs one overlay), every pair is still a B leg and a C leg, and the
+    bucket's number is still the median over pairs, each pair from fresh processes. Two things
+    are new and both cancel effects that sharing a process could add:
+      - the bucket ORDER inside a leg is reshuffled every rep (seeded by the rep, the same order
+        for both sides of a pair), so no bucket always runs first (cold) or after the same one;
+      - the side that runs first ALTERNATES across reps (B,C then C,B ...), so drift within a
+        pair lands on both sides over the reps instead of always on C.
+    The early exit is per bucket, as before: a decided bucket leaves the next rep's legs."""
+    import random
+
+    accs = {s: _BucketPairs(s, undecided) for s in todo}
+    active, rows = list(todo), {}
+
+    def finish(sig):
+        row = accs[sig].result()
+        rows[sig] = row
+        if row and on_bucket:
+            on_bucket(row)
+    for rep in range(max(1, int(max_reps))):
+        if not active:
+            break
+        order = list(active)
+        random.Random(rep).shuffle(order)
+        got = {}
+        for side in ((base, cand) if rep % 2 == 0 else (cand, base)):
+            cases = _run_leg(task, side, "time", sigs=order, timeout=timeout, env_extra=env_extra)["cases"]
+            got[side] = {c.get("sig"): c for c in cases}
+        still = []
+        for sig in active:
+            if accs[sig].add(got[base].get(sig), got[cand].get(sig)):
+                finish(sig)
+            else:
+                still.append(sig)
+        active = still
+    for sig in active:
+        finish(sig)
+    return rows

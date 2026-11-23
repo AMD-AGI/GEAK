@@ -79,3 +79,7 @@ kernel's own multi-rank tests (sgl-amd-mono `test/kernels`) and the layer team's
 per rank, a chain of distinct layers at the case's served rows and context, `step(n)` capturable,
 `check()` reading the guard words. `shared/rank_timing.py` captures and replays it on all ranks
 with fixed counts; the timing gate fails a graph phase that was timed any other way.
+
+Write such a task with [mono-layer-ut.md](mono-layer-ut.md): `scaffold_ut.py new --family mono_layer`
+copies the generic rank harness (`ut_contracts/mono_harness.py` as `rank_harness.py`) and leaves
+one model-specific file, `rank_model.py`; worked examples are in `references/examples/`.

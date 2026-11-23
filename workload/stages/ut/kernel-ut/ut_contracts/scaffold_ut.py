@@ -45,6 +45,10 @@ STAGE_SHARED = os.path.join(os.path.dirname(os.path.dirname(SKILL_ROOT)), "_shar
 SHARED_HELPERS = ("harness_lib.py", "leg_runner.py", "overlay_setup.py", "compile_watch.py",
                   "kernel_source_delivery.mjs", "rank_timing.py")
 CONTRACT_HELPERS = ("ut_contract.py", "reference_f64.py", "ut_driver.py")
+# families whose UT runs through the generic multi-rank harness (mono_harness.py, copied into the
+# task as rank_harness.py) and a task-filled rank_model.py (templates/rank_model.py.tmpl)
+MONO_FAMILIES = ("mono_layer",)
+MONO_HARNESS = ("mono_harness.py", "rank_harness.py")
 
 
 def _kv(items):
@@ -125,6 +129,64 @@ def workload_cases(manifest):
     return out
 
 
+def control_stubs(doc, bind_file):
+    """FILL negative controls: one per required category (min_controls_per_category of them where
+    the family asks for more), each carrying its category; a family without categories gets the
+    single generic stub."""
+    leaf = bind_file or "kernel_src/FILL.py"
+    cats = U.control_categories(doc, (doc.get("task") or {}).get("attrs") or {})
+    mins = doc.get("min_controls_per_category") or {}
+    stub = {"leaf": leaf, "find": "FILL: one exact, unique source fragment",
+            "replace": "FILL: its numerically wrong replacement",
+            "expect": "FILL: the deviation this must produce; see the family's negative_controls"}
+    if not cats:
+        return [stub]
+    out = []
+    for c in cats:
+        for k in range(int(mins.get(c, 1))):
+            out.append(dict(stub, category=c, leaf="FILL: the editable leaf that holds the %s code" % c,
+                            expect="FILL: the outputs a %s bug must break (#%d of %d)" % (c, k + 1, int(mins.get(c, 1)))))
+    return out
+
+
+def graph_phases(meta):
+    """Phases that deploy under a CUDA graph, from meta.phase_regimes or meta.regime."""
+    if meta.get("phase_regimes"):
+        return sorted(p for p, r in meta["phase_regimes"].items() if (r or {}).get("cuda_graph", True))
+    return ["DECODE"] if (meta.get("regime") or {}).get("cuda_graph", True) else []
+
+
+def mono_sources(doc, meta, name, package):
+    """(cases.py, rank_model.py) of a MONO_FAMILIES task."""
+    oracles = doc.get("oracles") or {}
+    defs, names = [], []
+    for oname, o in oracles.items():
+        defs.append('def oracle_%s(args):\n    """Oracle leg `%s` (contract oracles.%s): RankModel path %r on every rank."""\n'
+                    '    return _step(args, %r)\n\n' % (oname, oname, oname, o["path"], o["path"]))
+        names.append("%r: oracle_%s" % (oname, oname))
+    with open(os.path.join(HERE, "templates", "mono_cases.py.tmpl")) as f:
+        cases = f.read().format(task_name=name, family=doc["family"], target_callable=meta["target_callable"],
+                                outputs=", ".join(doc["outputs"]),
+                                oracle_defs="\n".join(defs) if defs else "# the contract declares no oracle legs\n",
+                                oracle_map=", ".join(names), graph_phases=graph_phases(meta),
+                                chain_length=meta["timing"]["chain_length"])
+    ax = (doc.get("task") or {}).get("const_axes") or {}
+    attrs = (doc.get("task") or {}).get("attrs") or {}
+
+    def axis(n, default="None  # FILL"):
+        return ax[n] if n in ax else default
+
+    paths = ("deployed",) + tuple(dict.fromkeys(o["path"] for o in oracles.values()))
+    with open(os.path.join(HERE, "templates", "rank_model.py.tmpl")) as f:
+        model = f.read().format(task_name=name, family=doc["family"], target_callable=meta["target_callable"],
+                                world=meta["timing"]["world"], launches=axis("launches"), pools=axis("pools", 2),
+                                hidden=axis("hidden"), kv_width=axis("kv_width"),
+                                topk=(axis("topk") if attrs.get("layer_kind", "routed_moe") == "routed_moe" else None),
+                                stream_dtype=attrs.get("stream_dtype", "float32"), paths=paths,
+                                package=package or "FILL_package")
+    return cases, model
+
+
 def cmd_list(a):
     for f in sorted(os.listdir(U.FAMILIES_DIR)):
         if f.endswith(".json"):
@@ -166,6 +228,11 @@ def cmd_new(a):
             shutil.copy2(os.path.join(HERE, f), os.path.join(task, f))
             print("copy    %s" % os.path.join(task, f))
 
+    mono = doc["family"] in MONO_FAMILIES
+    if mono and (a.force or not os.path.exists(os.path.join(task, MONO_HARNESS[1]))):
+        shutil.copy2(os.path.join(HERE, MONO_HARNESS[0]), os.path.join(task, MONO_HARNESS[1]))
+        print("copy    %s" % os.path.join(task, MONO_HARNESS[1]))
+
     contract_path = os.path.join(task, "run", "ut_contract.json")
     _write(contract_path, json.dumps(doc, indent=2) + "\n", a.force)
     with open(contract_path) as f:
@@ -199,10 +266,7 @@ def cmd_new(a):
             "family": doc["family"],
             "contract_sha256": U.contract_sha256(doc),
             "editable_leaves": [a.bind_file] if a.bind_file else [],
-            "negative_controls": [{"leaf": a.bind_file or "kernel_src/FILL.py",
-                                   "find": "FILL: one exact, unique source fragment",
-                                   "replace": "FILL: its numerically wrong replacement",
-                                   "expect": "FILL: the deviation this must produce; see the family's negative_controls"}],
+            "negative_controls": control_stubs(doc, a.bind_file),
             "reference_rows": doc.get("reference_rows", 256),
             "replay_tol": 0.02,
             "min_control_margin": 10.0,
@@ -218,7 +282,26 @@ def cmd_new(a):
         # the safe default: it makes the replay gate mandatory until the launch flags say otherwise.
         meta["regime"] = {"cuda_graph": True, "compile": "eager",
                           "note": "FILL from the deployment launch flags (parse_regime.py), or use phase_regimes"}
+    if mono:
+        # the JIT cache directory keyed by the source each leg resolved (rank_harness.leg_env)
+        meta["leg_env"] = "rank_harness:leg_env"
+        meta["rank_harness"] = ("rank_harness.py (generic, never edited) and rank_model.py (the task's "
+                                "RankModel): frozen task sources, outside the candidate overlay")
     _write(os.path.join(task, "meta.json"), json.dumps(meta, indent=2) + "\n", a.force)
+
+    if mono:
+        if timing is None:
+            raise SystemExit("family %s must declare timing.kind rank_chain" % doc["family"])
+        cases, model = mono_sources(doc, meta, name, a.bind_module)
+        _write(os.path.join(task, "cases.py"), cases, a.force)
+        _write(os.path.join(task, "rank_model.py"), model, a.force)
+        with open(os.path.join(HERE, "templates", "unittest.py.tmpl")) as f:
+            _write(os.path.join(task, "unittest.py"), f.read().format(task_name=name, family=doc["family"]), a.force)
+        print("\nnext: fill rank_model.py (RankModel; worked example "
+              "references/examples/muse_spark_target_rank_model.py), the call-site docstring of cases.py, "
+              "run/ut_cases.json and meta negative_controls / evidence (references/mono-layer-ut.md), then "
+              "`scaffold_ut.py sync-meta --task %s` and `python3 ut_contract.py %s`." % (task, task))
+        return 0
 
     stubs, hook_map = _hook_stubs(doc)
     outputs = ", ".join(doc["outputs"])

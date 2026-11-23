@@ -281,12 +281,13 @@ declares `timing.kind: rank_chain`; `scaffold_ut.py new` then writes `meta.timin
 | | correctness gates | timing |
 |---|---|---|
 | entry | `call()` through the task's rank harness (collective-ut.md) | `cases.rank_chain(rank, world, group, case)` |
-| processes | the harness's | `rank_timing.py`: one process per rank, `world` devices per leg, buckets one at a time |
+| processes | the harness's | `rank_timing.py`: one process per rank, `world` devices per leg; a leg times every undecided bucket back to back |
 | what is timed | -- | CUDA-graph replays of a chain of `chain_length` DISTINCT layers minus the bootstrap step, every rank after a barrier, bucket = max over ranks |
 
 The method is the Muse Spark layer team's frozen benchmark (`bench_worker.target_chain`)
 built on sgl-amd-mono `test/kernels` (`test_muse_spark_layer.py`, `test_muse_spark_k3_tp8.py`);
-write `rank_chain` from those, at the manifest's served rows and contexts. Ground truth on
+write `rank_chain` from those, at the manifest's served rows and contexts. Writing the task:
+[mono-layer-ut.md](../references/mono-layer-ut.md) (generic `mono_harness.py` + per-model `rank_model.py`). Ground truth on
 MI355X for the Muse Spark target layer: ~130-180 us a launch at TP8 (rows 8/16).
 
 ## Limits

@@ -268,7 +268,8 @@ def main():
     ap.add_argument("--draws", type=int, default=0)
     ap.add_argument("--sigs", default=None,
                     help="oracle: comma list of random-case sigs to run (a shard); "
-                         "server_calls: call ids to replay")
+                         "server_calls: call ids to replay; time (rank_chain): the buckets "
+                         "to time, in this order, on one set of rank processes")
     ap.add_argument("--target-callable", default="", help="identity probe only; defaults to meta target")
     ap.add_argument("--oracle-path", default="call",
                     help="oracle: `call` (cases.call) or a key of cases.ORACLES")
@@ -448,9 +449,14 @@ def _run(a, task, meta):
             if (meta.get("timing") or {}).get("kind") == "rank_chain" else None
         if rt is not None:
             # Whole-layer monokernel with in-kernel peer exchanges: every rank times its own graph
-            # replays of a chain of layers (rank_timing.py); this process only spawns the ranks.
+            # replays of a chain of layers (rank_timing.py); this process only spawns the ranks,
+            # ONE set for all of this leg's buckets, timed in the order --sigs gives.
             spec = rt.chain_spec(meta)
-            out = [rt.time_bucket(task, c, meta, spec) for c in rt.timed_rows(task, a.bucket)]
+            rows = rt.timed_rows(task, a.bucket)
+            if a.sigs is not None:
+                by_sig = {c["sig"]: c for c in rows}
+                rows = [by_sig[s] for s in a.sigs.split(",") if s in by_sig]
+            out = rt.time_buckets(task, rows, meta, spec)
             print(json.dumps({"cases": out, "identity": _identity(meta["target_callable"])}))
             return
         import gc

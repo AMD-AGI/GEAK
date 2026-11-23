@@ -841,6 +841,55 @@ class MonoOracleCorrectnessTest(unittest.TestCase):
         self.assertEqual(so["status"], "subject_nonfinite")
         self.assertFalse(r["cases"][0]["vs_native"]["cand"]["stream_out"]["ok"])
 
+    def negative_controls(self, controls, **mc):
+        """gate_negative_controls with the controls editing the candidate overlay's fake_impl.py
+        (a leaf outside the task dir only for this fake: the real gate edits kernel_src)."""
+        with open(os.path.join(self.task, "meta.json")) as f:
+            meta = json.load(f)
+        meta["ut_contract"].update(negative_controls=controls, **mc)
+        with open(os.path.join(self.task, "meta.json"), "w") as f:
+            json.dump(meta, f)
+        T = self.task_obj()
+        state = {"scratch": tempfile.mkdtemp(dir=self.tmp)}
+        return self.D.gate_negative_controls(T, self.args(), state)
+
+    def control(self, mutation, **extra):
+        return dict({"leaf": os.path.relpath(os.path.join(self.cand, "fake_impl.py"), self.task),
+                     "find": "MUTATION = {}", "replace": "MUTATION = %r" % (mutation,),
+                     "expect": "stream_out moves", "category": "softmax_scale"}, **extra)
+
+    def test_controls_are_judged_against_the_oracle_legs_too(self):
+        r = self.negative_controls([self.control({"call": "scale"})], min_control_margin=1.0)
+        row = r["controls"][0]
+        self.assertTrue(row["caught"], json.dumps(r, default=str)[:3000])
+        self.assertEqual(row["category"], "softmax_scale")
+        # split and native both run with controls (the family does not opt them out)
+        self.assertIn("oracle:split", row["caught_by"])
+        self.assertIn("baseline", row["caught_by"])
+        first = row["cases"][0]
+        self.assertIn("vs_split", first)
+        self.assertFalse(first["vs_split"])
+        # the report names the outputs that rejected the mutation on each comparison
+        self.assertIn("stream_out", first["rejected_by"]["oracle:split"])
+        self.assertIn("kind", first["rejected_by"]["oracle:split"]["stream_out"])
+        # the mutation never reached the oracle legs nor stayed in the overlay
+        self.assertTrue(row["restored"])
+        with open(os.path.join(self.cand, "fake_impl.py")) as f:
+            self.assertEqual(f.read(), "MUTATION = {}\n")
+
+    def test_an_oracle_that_opts_out_of_controls_is_not_run(self):
+        with open(os.path.join(self.task, "run", "ut_contract.json")) as f:
+            doc = json.load(f)
+        for o in doc["oracles"].values():
+            o["controls"] = False
+        with open(os.path.join(self.task, "run", "ut_contract.json"), "w") as f:
+            json.dump(doc, f)
+        r = self.negative_controls([self.control({"call": "scale"})], min_control_margin=1.0)
+        row = r["controls"][0]
+        self.assertTrue(row["caught"])
+        self.assertEqual(row["caught_by"], ["baseline"])
+        self.assertNotIn("vs_split", row["cases"][0])
+
 
 if __name__ == "__main__":
     unittest.main()
