@@ -13,6 +13,8 @@ availability. Use the selected benchmark's readiness checks when preparing a mea
 Resolve native temporary copies and restores in the actual client and server contexts;
 verify working-location access, capacity, filesystem compatibility and native protocol path limits.
 Retain evidence separately from disposable scratch; shared output storage may not support native runtime temporaries.
+On recovery, requalify required services and transports from the worker's execution
+context; retain their current handles with the workers for monitoring and recovery.
 Carry the configured runner's trust-store dependencies into its worker runtime along
 with credential handles; the image's trust store may differ from the host's.
 After a runner startup failure, test its configured request in the worker runtime
