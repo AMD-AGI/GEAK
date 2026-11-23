@@ -47,7 +47,7 @@ across ranks, gfx950, experimental). Also applies: `native_decode_numerics`. Del
 |---|---|---|
 | tell: the source first, then the baseline leg | sources in a framework package layout, HIP C++ or FlyDSL with its own sync helpers; the baseline leg usually runs the same kernel as extracted (first speedup about 1.0) | an adapter + kernel from an authoring flow with a vendored synchronization runtime, one launch per layer; the baseline leg runs the framework's native layer (first speedup may be below 1.0) |
 | launches per layer | as received (one, or front + tail) — never more | exactly one |
-| levers | most are applied already: use the ranked list in planner step 5 | few applied; order of attack: rebalance → hand-offs → all-reduce → per-stage kernels → placement |
+| levers | most of the table is applied already, yet one critical-path segment usually still takes several stackable moves: start from the ranked list in planner step 5 | few applied; order of attack: rebalance → hand-offs → all-reduce → per-stage kernels → placement |
 | rules ([acceptance.md](references/acceptance.md)) | universal rules | universal + seed-only rules |
 
 ## Mechanism
@@ -69,10 +69,10 @@ across ranks, gfx950, experimental). Also applies: `native_decode_numerics`. Del
 3. **Inventory before ranking — mandatory.** For every lever you are about to propose, write down the marker
    you looked for in the source ("not applied if" below, "already applied if" in the lever table) and what you
    found. A lever whose marker says "applied" is not a candidate. Judge sub-levers one by one.
-4. **Look for an existing trace / timeline switch** before planning instrumentation (HIP: an optional trace
-   pointer in the argument struct plus a stamp helper; FlyDSL: a timeline build); measurement gets a quarter of the round.
+4. **Look for an existing trace / timeline switch** before planning instrumentation (HIP: a trace pointer in the argument struct plus a stamp helper; FlyDSL: a timeline build); measurement gets a quarter of the round.
 5. **Rank by expected verified gain per engineer-hour, not by stage size.** Effects measured on an already tuned
-   kernel outrank a stage's share of the layer; rewriting the heaviest stage's arithmetic is a multi-round project.
+   kernel outrank a stage's share of the layer. A stage the timeline shows compute-bound (instructions per byte, not
+   bytes or waits) is a first-class candidate for an arithmetic or operand-role change, whatever its size.
    **On a deployed kernel with no timeline yet, propose in this order** (each *measured* on an already written
    kernel, [measured_rounds.md](references/measured_rounds.md)):
    1. **Input-independent work in front of the stage's wait, then a wait only for the tiles this workgroup
@@ -95,14 +95,15 @@ across ranks, gfx950, experimental). Also applies: `native_decode_numerics`. Del
      first): noise or a loss in two kernels — memory was saturated; one stage lost 1.5× what the other gained.
    - **Micro-tuning an inner loop** (software-pipelined loads, register double buffers, more tiles per round,
      wider stores) and **spreading a stage over more workgroups** (a chunk per CU, a combine split 4×, helper
-     workgroups): slower, neutral, spills or hot spots — such loops are memory- or dependency-bound.
+     workgroups): slower, neutral, spills or hot spots — those loops were memory- or dependency-bound, not compute-bound.
    - **Placement or an XCD map on its own** (measured only inside bundles; placement variants of a chain-bound
-     stage changed nothing) and **rewriting the heaviest stage's arithmetic** (estimates only, never done).
-6. One direction = one stage; tables shared by stages (task bases, LDS layout, hand-off ranges) go to one direction a round.
-7. **Scale ambition to the budget**: one round = one lever on one stage, ending in a saved, verified patch. A
-   schedule change, merging launches, adding rows or rewriting a stage is a multi-round project: plan it as one.
-8. Evidence = a speedup against the baseline **in the same run**, above twice the noise (about 2%), correctness
-   repeated after synchronization changes. Three rounds under 2–3% is plateau evidence for your role's stop gate.
+     stage changed nothing). Restructuring a stage's arithmetic is NOT in this list: it was never measured here.
+6. One direction = one critical-path segment (a stage with the hand-offs into and out of it); shared tables go to one direction.
+7. **Stack; do not stop at the first gain.** Inside its direction the engineer adds separately verified steps on the same
+   segment until the round ends (independent steps multiplied). Only a schedule change, merging launches or adding rows is a
+   multi-round project. Do not cap the expected gain by this skill's per-lever figures: they are shares of other kernels' stages.
+8. Evidence = a speedup against the baseline **in the same run**, above twice the noise (about 2%). The oracle's gates are the contract:
+   bit-identity with the baseline is not required unless the oracle checks it. Three rounds under 2–3% is plateau evidence.
 
 ### Engineer quick card — first ten minutes (1–3), then every round (4–8)
 1. Read the kernel's header comment and stage list; confirm the class, the applied levers, the task's constraints.
@@ -110,19 +111,18 @@ across ranks, gfx950, experimental). Also applies: `native_decode_numerics`. Del
 3. Run the oracle **exactly as the lane's COMMANDMENT file and the task's `unittest.py` docstring say, holding
    every GPU of the rank group in one lease for the whole command** — no second lease around it, no rank outside it.
 4. Measure inside the time box: per-case table → existing timeline → byte floors (an estimate unless you measured). → [measuring.md](references/measuring.md)
-5. Take one lever, local to one stage or hand-off; before editing, confirm in the source that it is not applied.
+5. One lever at a time, local to one stage or hand-off (confirm in the source it is not applied); when it verifies, save and take the next on the same segment.
 6. Correctness first, then the benchmark. **Always compare against the baseline measured in the same run** —
    never an earlier run, a different GPU group or a figure from this skill. Under twice the noise: no result.
-7. After any synchronization, hand-off or LDS change, **repeat the correctness check several times** (at least
-   three; report the count). The oracle does not check: launch count (kernels per step ÷ layers, after a structural
+7. Correctness once per step while iterating; on the state you finally save, if it changed synchronization, hand-offs or LDS
+   sharing, **repeat it three times** (report the count). The oracle does not check: launch count (kernels per step ÷ layers, after a structural
    change), a hollow kernel (body emptied → correctness must fail), ISA scratch after a prefetch. → [acceptance.md](references/acceptance.md)
 8. **Bank each verified step**: the moment it verifies, re-save the patch your role file asks for (the
    workspace diff). Do not commit inside the workspace unless the role file says so — a commit empties that
    diff. Otherwise revert completely. The number that counts is the lane's verify re-run, not your own.
 
 ## Lever table
-The levers that built the measured MiMo-V2.6-Flash kernels; on a deployed kernel most are applied already (step 3).
-P90 = serving latency (HIP designs, while being built); stage figures = that stage's own time; "bundle" = with other changes.
+The levers that built the measured MiMo-V2.6-Flash kernels (step 3 tells which are applied). P90 = serving latency (HIP designs, while being built); stage figures = that stage's own time; "bundle" = with other changes.
 
 | symptom | lever | measured relative effect | already applied if | ref |
 |---|---|---|---|---|

@@ -2,8 +2,8 @@
 
 In a tuned whole-layer kernel the waves spent about 57% of their time waiting on dependencies, 26%
 issuing loads and under 20% computing (*measured*, FlyDSL reference kernel). Hand-offs are where the time
-is, and where a mistake becomes a hang or a rare wrong answer: after any change here, repeat the
-correctness check several times (section 6).
+is, and where a mistake becomes a hang or a rare wrong answer: the state you finally save after a change
+here gets the correctness check three times (section 6); one run per step is enough while iterating.
 
 ## 1. Per-tile hand-offs instead of stage-wide barriers
 
@@ -189,8 +189,8 @@ compiler put a full memory wait before the next LDS read; gating the o_proj pref
 ## 6. Pitfalls of a persistent kernel (the oracle sees these only sometimes)
 
 - **LDS races after a stage.** A missing barrier at the end of a stage that reuses LDS (or between
-  staging a KV block and the current-token write) shows only now and then. Repeat the correctness check
-  several times, bit-exact, after every synchronization or LDS change, and say how many you ran: a race
+  staging a KV block and the current-token write) shows only now and then. On the state you finally save after a synchronization or LDS change, repeat the
+  correctness check three times and say how many you ran (one run per step while iterating): a race
   that shows once in N runs needs about 3N runs to be caught with 95% confidence.
 - **Spills.** Every lever that holds more state (prefetch, shared weight reads, next-round loads) can
   hit the VGPR cap: check scratch in the ISA. **LDS alignment:** arrays that are not 16-byte aligned cost

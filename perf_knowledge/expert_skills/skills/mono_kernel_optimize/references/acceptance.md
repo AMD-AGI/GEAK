@@ -91,7 +91,7 @@ What it does **not** check — yours to check by hand:
 | launch count; native kernels on the path | kernel-trace census | before banking a structural change |
 | that outputs come from the kernel | hollow test | after touching the adapter / wrapper |
 | unbounded waits | reading; a forced timeout | after any synchronization change |
-| rare races (LDS reuse, a missing barrier) | repeat correctness several times | after any synchronization or LDS change |
+| rare races (LDS reuse, a missing barrier) | repeat correctness three times on the state you save | after a synchronization or LDS change (one run per step while iterating) |
 | tag wrap | read the tag arithmetic; run a wrap test if the task has one | when tags or epochs change |
 | memory: per-call allocations, hidden copies | read the wrapper | when buffers are added |
 | register spills | scratch in the ISA | after every prefetch or state-holding change |

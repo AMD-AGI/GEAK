@@ -127,6 +127,7 @@ Ordered by how often they decided a comparison. "x" is a multiple of the step's 
 
 - Never edit the oracle, its tolerance, its captures or its negative controls to make a candidate pass.
 - With a frozen baseline kernel as oracle, never move the candidate toward a row and away from the baseline: a row explains a rounding point, the baseline defines it.
+- The oracle's gates are the contract, not bit-identity. An invariant is a rounding point, a quant parameter, a layout, a grid or a tie rule. A reformulation in fp32 between two rounding points (accumulation order, a one-pass softmax, operand roles of a GEMM) that still passes the oracle is allowed: do not turn the invariant list into "must stay bitwise equal to the baseline" unless the oracle checks that.
 - Do not apply a row whose "Applies to" does not match the deployment sheet: a 240 rule in a 224 deployment is a bug you introduced.
 - Do not spend the round here when the planned change touches no rounding point, quant parameter, layout, grid or tie rule.
 - Not for activation-only kernels, prefill-only paths or training; the facts are decode-regime facts on gfx942 (gfx950 notes are `source only` unless a row says otherwise).
