@@ -105,8 +105,9 @@ checks and serving comparisons at decision checkpoints; an interim comparison sh
 a question that can change the search plan. Preserve native adoption criteria, and do not
 reduce search to whatever remains after validating every proposal.
 Name the call that owns each full validation before dispatch. If an admitted parent call
-will test the same candidate, use inner full tests only when they change further search;
-otherwise hand over the pending source and evidence. Preserve required independent checks.
+will perform the same full validation of the same candidate, use inner full tests only
+when they change further search; otherwise hand over the pending source and evidence.
+Preserve required independent checks.
 Reconcile nested execution limits and actual checkpoint support before dispatch.
 Price uninterrupted work from scope-matching cost evidence; a larger outer allowance
 does not extend a fixed inner deadline.
