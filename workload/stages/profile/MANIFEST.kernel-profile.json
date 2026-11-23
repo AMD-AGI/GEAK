@@ -5,7 +5,7 @@
     "SKILL.md": "bde693fc777fa7f77028d23833249cbdaf55dcc67a4888aa3f55689957586ac1",
     "references/capture.md": "e1c7d8d3f2ca541853103ae57c701c13ed7ed7aae1391912a33873279cfbb001",
     "references/dynamic-workloads.md": "53c974f61cbe15c08e0d4b5f09a31547343f5f873a3d7737627ae577d0086cc4",
-    "references/pipeline-handoff.md": "057f48277b73d0525df1770cddc7ba2afdee4739239bad9cf7b21fde0f943a80",
+    "references/pipeline-handoff.md": "51fc50b828219a51f69ff39b7b4ff55798d849bf7e67abeaa7b5c703e861ccab",
     "references/sampling.md": "ec4b10ee41a551d81cc42030d01eab0fc98da2fb97b7d46714a160bac2de42a1",
     "references/selection-coverage.md": "1c794251a59740d056c5dbef44691e4d9e6fbe37224254ad3e2561f710d7e5ce",
     "references/setup.md": "f1f930798820cfb36008330f1617cc158535f53d6e9c213a7a770ba31a89d018",
@@ -13,7 +13,7 @@
     "scripts/adjacency.py": "1f0b3bc55de0da26311833f8fe970459cb926f5d5beb50bdd9f1601cef1d1ffe",
     "scripts/build_ranking.py": "730c36153acca485682d6f0b4d1c5de5886c9609fe8db1ce758f7b9215bef61f",
     "scripts/coverage_ledger.py": "9e53038470c001b14170637975a0f0fa8a08efb5caf27f4401f6e4787ebe2b9b",
-    "scripts/important_shapes.py": "e24452f39a6f31cb7e094d563c3b4d7a9fc6193cc287b1e6294e1f91553dfbc8",
+    "scripts/important_shapes.py": "25b9bc320940aa3861cc770ce3c073d3d923e4079bb943f409a6ce4ae005c5b9",
     "scripts/kernel_shapes.py": "58c966ad9c68eb15d02b56ad509df7a742fc6b7e5126347593cf45fb323abd39",
     "scripts/observed_workload.py": "babfce3367f04ecc828a14268d09167a4ee9426b2d1cbaed1eb530796ab0b54c",
     "scripts/plan_points.py": "984ceb3f39c75ad77fce1ad1e5f881b6ba752d25680fc252eb60082c0f2deed7",
@@ -34,9 +34,9 @@
     "tests/test_vllm_profile.py": "3cb2f9e62283fca3a6ce45dd26e8e3eea49b740a9fe78f2633395527b19e4cfb"
   },
   "modified_from_origin": false,
-  "note": "One config's kernel profile: sampling (plan_points.py, optional --reuse-capture), capture, census, ranking, selection; delivers kernels.json via stages/profile/finalize.py. c28 regression: preserve sampling-partition ownership in 2D bands; stable band IDs prevent colliding case IDs when owners share a cell. Planner validation and shared lock fixes are in brain/tools and stages/_shared. vLLM 0.33 (MiniMax-M3.1-Flash, TP4, DSpark, DBO): frontend traces kept out of ranks, engine-log server_info, valid eager prefix, multi-point eager windows, serial windows for DBO prefill, overlapped copies billed by exposed time, ROCclr runtime kernels as memory, amd_kernels entries as operators. Task boundaries and the UT request are the brain's (brain/README.md); brain/tools was removed. Request references point at the UT request contract. PR 643 records important shapes and per-case launch evidence.",
+  "note": "One config's kernel profile: sampling (plan_points.py, optional --reuse-capture), capture, census, ranking, selection; delivers kernels.json via stages/profile/finalize.py. c28 regression: preserve sampling-partition ownership in 2D bands; stable band IDs prevent colliding case IDs when owners share a cell. Planner validation and shared lock fixes are in brain/tools and stages/_shared. vLLM 0.33 (MiniMax-M3.1-Flash, TP4, DSpark, DBO): frontend traces kept out of ranks, engine-log server_info, valid eager prefix, multi-point eager windows, serial windows for DBO prefill, overlapped copies billed by exposed time, ROCclr runtime kernels as memory, amd_kernels entries as operators. Task boundaries and the UT request are the brain's (brain/README.md); brain/tools was removed. Request references point at the UT request contract. PR 643 records important shapes and per-case launch evidence. Keep important-cell planning cheap as in c6ec399.",
   "origin": "AMD-AGI/GEAK refactor/profile-ut-split: profile half of kernel-extract",
   "skill": "kernel-profile",
   "stage": "profile",
-  "tree_sha256": "4265630f788a1f87f6856f22752aa26b3f2d7bf54fb2f75fb16c59a9996f727c"
+  "tree_sha256": "049fe460704011c0b6d6959eb4c180f116093004b244105b3877fc2b2a49e2e6"
 }

@@ -167,6 +167,14 @@ class OracleSchemaTest(unittest.TestCase):
         self.assertRejects(lambda d: d["outputs"]["kv_rows"].__setitem__("require_finite", "yes"),
                            "require_finite")
 
+    def test_delta_axis_must_exist_in_each_layout(self):
+        doc = _family()
+        layer = doc["outputs"]["layer_out"]
+        layer["shape"] = {"by": "layer_kind", "cases": {
+            "dense": layer["shape"], "routed_moe": ["world", "rows", "hidden"]}}
+        with self.assertRaisesRegex(U.ContractError, "delta.along.*launches"):
+            U.validate_family(doc)
+
     def test_optional_if_not_produced_shape(self):
         self.assertRejects(lambda d: d["outputs"]["ids"].__setitem__("optional_if_not_produced", {}),
                            "poison")
@@ -325,6 +333,18 @@ class MonoOutputsCompareTest(unittest.TestCase):
         res = self._cmp()
         self.assertTrue(res["ok"], res)
         self.assertEqual(set(res["outputs"]), set(self.ref))
+
+    def test_delta_uses_axis_position_of_selected_layout(self):
+        layer = self.doc["outputs"]["layer_out"]
+        layer["shape"] = {"by": "layer_kind", "cases": {
+            "dense": layer["shape"], "routed_moe": ["world", "rows", "launches", "hidden"]}}
+        U.validate_family(self.doc)
+        self.ref["layer_out"] = self.ref["layer_out"].transpose(1, 2)
+        self.assertTrue(self._cmp()["ok"])
+
+        def skip_second_launch(t):
+            t[:, :, 1] = t[:, :, 0]
+        self.assertFalse(self._cmp(layer_out=skip_second_launch)["outputs"]["layer_out"]["ok"])
 
     def test_one_kv_row_out_of_bound_fails(self):
         def bump(t):
