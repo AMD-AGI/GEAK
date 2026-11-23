@@ -1,12 +1,52 @@
 # Measured rounds: what paid, what did not, what is left
 
-The only measured evidence behind this skill. Three whole-layer decode kernels for MiMo-V2.6-Flash on
-MI300X with four tensor-parallel ranks: two HIP C++ kernels written independently (design A, design B)
-and one FlyDSL kernel that a GEAK kernel lane then optimized for four rounds. All figures are ratios or
-shares. Use them to **rank** candidates for a similar layer (MoE with FP4 experts, sliding-window and
-global attention layers); they are not predictions for your kernel, and the oracle still decides.
+Two sets of measured evidence, all as ratios or shares. They **rank** candidates; none is a prediction for
+another kernel, and the oracle still decides.
 
-## How the three kernels are organised
+- *Measured in kernel lanes (two deployed kernels)*: GEAK kernel-lane runs, one round each, on two deployed
+  vLLM mono kernels (HIP C++ for MiMo-V2.6-Flash, FlyDSL for DeepSeek-V4.1), every result independently
+  re-measured and passing the oracle. This is the skill's main use case; it is the next section.
+- *Measured while the kernels were being built*: three whole-layer decode kernels for MiMo-V2.6-Flash on MI300X
+  with four tensor-parallel ranks — two HIP C++ kernels written independently (design A, design B) and one FlyDSL
+  kernel that a GEAK kernel lane then optimized for four rounds. Everything after the next section.
+
+## One round on a deployed kernel (kernel lanes)
+
+**Deployed HIP kernel, MiMo-V2.6-Flash** (one launch per layer, tagged hand-offs; timed case: a single-row
+sliding-window + MoE layer). Four independent one-round lane runs reached a verified 1.11×, 1.11×, 1.15× and
+1.19×. Every run worked on the same critical-path segment, the attention chain between the QKV hand-off and
+o_proj. Effects are incremental on the layer.
+
+| step | effect on the layer | kept in |
+|---|---|---|
+| attention units moved onto workgroups that own no other stage's tiles (they had shared two o_proj tiles, which then started their weight loads last and were the last all-reduce tile) | +2.0% to +3.4% alone; +6.6% together with a branch-free rounding helper | 4 of 4 runs |
+| everything that does not depend on the awaited hand-off done before the poll — not only the loads but the operand preparation: K fp8 → bf16 conversion into the MFMA operands, V-transpose slabs staged in LDS, cos / sin, sinks, masks, slot and address math; only the current token is patched after the poll | the largest single step: +7.0% in one run; +6.4% in another (with the barriers after the poll cut from 4 to 1); +1.4% then +1.8% in a third (loads first, conversion later) | 4 of 4 runs |
+| a leaner path after the poll: one softmax pass per wave, back-to-back MFMA chains, a single P·V accumulation, branch-free rounding, fewer barriers, a merged insert pass, the KV store deferred until the output is published | +2.5% to +3.7% | 4 of 4 runs |
+| LDS layout against bank conflicts on a hot gather (padded rows, skewed slabs) | +1.1% to +2.0% | 3 of 4 runs |
+| relaxed memory ordering on the end-of-launch completion counter (acquire fence only in the step's last workgroup) | +1.2% | 1 run |
+| a bundle: fast top-k, prologue rounding, the next layer's QKV weights prefetched during the idle tail | +4.6% (not separated) | 1 run |
+
+| dead end in those runs | result |
+|---|---|
+| changing how or when a launch reads its epoch at entry (three variants) | 0.986× to 0.998×; 1 run |
+| issuing the second expert weights earlier (five variants) | 0.974× to 0.997×; 2 runs |
+| an XCD-local tile map on its own | 1.003×, noise; 1 run |
+| instruction-cache warm-up and load-order variants in the attention loop | 0.984× to 0.996×; 1 run |
+| pipelined polls | 0.995×; 1 run |
+| replicating a hop's published output for its readers; more instruction-level parallelism in o_proj | noise; 1 run each |
+
+**Deployed FlyDSL kernel, DeepSeek-V4.1** (two launches per layer). The expert GEMVs were compute-bound — the
+timeline showed about 20 scalar-vector instructions per MFMA — and were restructured by transposing the MFMA
+operand roles: activations / picks as the A operand, converted FP4 weights as B, one scale factor and one FMA per
+lane per K block. Result: 1.10× of the layer in two runs; 1.03× in a run that restricted itself to an exact,
+baseline-bitwise formulation and to the first GEMV only. Dead ends in every run that tried them: deeper prefetch of
+the same stage's weights (0.996×), prefetching the next round's weights (0.987× to 0.992×), a barrier-locked round.
+
+**How the rounds were run.** Runs that stacked four or five separately verified steps on one segment reached
+1.11× to 1.19×. A run that planned "pure schedule, baseline-bitwise, expected 1.03–1.07×" and re-ran correctness
+four or five times per variant ended at 1.05× on the same segment.
+
+## How the three built kernels are organised
 
 Common to all: one resident workgroup per CU (grid = CU count; launch bounds and LDS sized so one
 workgroup fills a CU); every workgroup runs the stages in a fixed order and waits only on earlier
@@ -104,7 +144,7 @@ against a *different* baseline (the fastest native configuration with multi-toke
 do not compare it with A and B; its figures were never re-measured independently, and one accuracy run at concurrency 8
 took about 1.4× as long as native — a concurrency-1 gain does not carry over to wider steps for free.
 
-## On an already written kernel: the lane's moves by mechanism
+## The built FlyDSL kernel's lane rounds, by mechanism
 
 Every figure is a change in that stage's own time on the FlyDSL kernel; most rows are bundles.
 
@@ -148,16 +188,12 @@ every workgroup, the FlyDSL kernel measured that form 2.2× slower. Measure.
 | 4 | early KV fetch for global-attention workgroups that also run a QKV tile | about 2.5% at the longest context |
 | 5 | split straggler QKV tiles along K | not estimated |
 
-## Reading
+## Reading (the built kernels)
 
-- The largest step in both HIP designs was taking concurrent (multi-row) decode steps into the kernel;
-  the 1-row path had plateaued at about two thirds of native latency.
-- After that: reading K once at long context (−15%), memory-layout fixes for scales with placement
-  (−12%). Early-issue tweaks were at most 2–3% each on P90, even when a standalone bench improved.
-- The fixed-order 256-thread design with rows as columns reached the better result in fewer rounds
-  (7 against 13) than the two-sided design.
-- On an already tuned kernel the remaining time sits in the expert stages and in dependency waits;
-  earlier tuning of that kernel kept one change in five.
-- Plateau rule used: stop after three consecutive rounds each under 2–3% better than the best so far.
-- Save every verified step at once: work that was finished but not yet integrated when the next round
-  started was lost for that round.
+- The largest step in both HIP designs was taking concurrent (multi-row) decode steps into the kernel; the 1-row
+  path had plateaued at about two thirds of native latency. After that: K read once at long context (−15%) and
+  scale-layout fixes with placement (−12%); early-issue tweaks were at most 2–3% each on P90.
+- The fixed-order 256-thread design with rows as columns reached the better result in fewer rounds (7 against 13).
+- On the tuned FlyDSL kernel the remaining time sat in the expert stages and in dependency waits; earlier tuning of
+  that kernel kept one change in five. Plateau rule used: three consecutive rounds each under 2–3% better.
+- Save every verified step at once: finished work not yet integrated when the next round started was lost for it.

@@ -34,20 +34,24 @@ every lever and above every figure in this skill.
 | 1 | Correctness passes on every rank under the tolerance as given. Never loosen the tolerance | it is calibrated against the native path's own error and against negative controls; a looser one hides drift that later forks outputs | the oracle; repeated after any synchronization or LDS change |
 | 2 | No more launches per layer per rank than the baseline, and no native-layer kernels beyond those the baseline's own path runs | splitting back into several kernels, or returning to the native path for eligible widths, gives a "speedup" of about 1 plus noise — and is no longer a mono kernel | kernel trace: kernels per decode step per rank ÷ layers, and their names |
 | 3 | The outputs come from the kernel; the host side (adapter / wrapper) computes nothing new | work moved to the host disappears from the kernel's time and breaks graph replay | hollow test: with the kernel body emptied, correctness must fail |
-| 4 | Never remove a bound (deadline, error report) from a wait; a new wait uses the kernel's existing wait helper, never a bare spin loop | an unbounded wait turns a lost publish or a dead peer into a hung GPU, and the unit test does not see it | read every wait you touched; a forced timeout must trap, not hang |
+| 4 | Never remove a bound (deadline, error report) from a wait; a new wait uses the kernel's existing wait helper, never a bare spin loop | an unbounded wait turns a lost publish or a dead peer into a hung GPU, and the unit test does not see it | read every wait you touched; a forced timeout ends in the deadline error inside the deadline — it never hangs and never continues on stale data |
 | 5 | The launch tag comes from device memory; nothing that changes per step is passed from the host; every argument is a fixed pointer | graph replay re-issues the same arguments; a host step counter yields stale tags on replay | the oracle's graph-replay cases; the launcher's argument list |
 | 6 | The choice between kernel and native path is identical on every rank, made from data all ranks share (shape, dtype, flags) | a rank on the other path leaves its peers waiting until the deadline | read the dispatch condition |
 | 7 | The all-reduce stays an fp32 sum in rank order on every rank | it is what keeps the ranks bit-identical | rank agreement in the oracle |
 | 8 | No per-call allocation other than the outputs. No additional or re-laid-out copy of weights or scales when the task states a memory limit, unless it replaces the original in place with no extra bytes or the task statement itself allows that kind of copy (then its bytes are stated against the limit); where memory is left open, a repack is made once, keyed by the weight's data pointer, with its bytes stated | per-call allocation breaks graph capture; every extra copy is memory taken from the KV cache | read the task statement and the wrapper; state extra bytes in your notes |
 | 9 | No host synchronization on the steady decode path | a host sync inside the captured step stalls capture or serializes the step | read the wrapper for value reads, device syncs, branches on device scalars |
-| 10 | The speedup that counts comes from an independent re-run (the lane's verify step): baseline and candidate timed in the same run, in a clean copy with a fresh build / JIT cache | an engineer's own number can come from a stale cache, a different GPU group or a lucky sample | the lane's verify step; a gap above about 10% between your number and the re-run is a warning (noise is about 2%) |
+| 10 | The speedup that counts comes from an independent re-run (the lane's verify step): baseline and candidate timed in the same run, in a clean copy with a fresh build / JIT cache | an engineer's own number can come from a stale cache, a different GPU group or a lucky sample | the lane's verify step; a gap above about 10% between your number and the re-run is a warning (run-to-run noise was about 2% in one harness; measure the A/A band of your own oracle) |
 | 11 | The timeline / profiling build is never the installed kernel | acceptance applies to what is installed | name and argument list of the installed launcher |
+| 12 | ISA scratch 0 and VGPR / LDS inside the caps (for a deployed kernel: not above the baseline's) | a spill turns a win into a loss, and values parked in the accumulator file cost issue slots without showing as scratch | register counts, scratch size and the number of accumulator moves in the ISA, after every prefetch or state-holding change |
 
 Notes. Rule 2 means "not more than the baseline": a deployed kernel with a front launch and a tail
 launch stays legal with two, and a partial kernel keeps the framework's attention kernels. Rule 4 is one
 rule for every kernel: keep each bound the baseline has; give a new wait the existing helper; if the
 kernel's waits have no deadline at all, adding them is a separate, declared change, not part of a speed
-patch. The lane itself records a round winner only above its minimum improvement (2% by default).
+patch. The lane itself records a round winner only above its minimum improvement (2% by default) and
+its engineer role saves a patch as soon as it beats the incumbent: do both exactly as the role files
+say. "Above twice the A/A band of this task's oracle" is what counts as evidence in your notes; it is
+not a threshold for saving a patch — the verify re-run decides.
 
 ## Rules only for shape (b), a freshly fused seed
 
@@ -94,8 +98,8 @@ What it does **not** check — yours to check by hand:
 | rare races (LDS reuse, a missing barrier) | repeat correctness three times on the state you save | after a synchronization or LDS change (one run per step while iterating) |
 | tag wrap | read the tag arithmetic; run a wrap test if the task has one | when tags or epochs change |
 | memory: per-call allocations, hidden copies | read the wrapper | when buffers are added |
-| register spills | scratch in the ISA | after every prefetch or state-holding change |
-| serving-side behaviour: capture modes, a KV cache re-allocated after start-up, a host watchdog | not a lane matter: `apply_mono_kernel_to_framework` | at delivery |
+| register spills (rule 12) | scratch and accumulator moves in the ISA | after every prefetch or state-holding change |
+| serving-side behaviour: capture modes, a KV cache re-allocated after start-up, a host watchdog | not a lane matter. First delivery of a kernel behind its switch: `apply_mono_kernel_to_framework`. A deployed kernel changed by a lane: the e2e workflow's overlay re-integration and throughput gate (new kernel against old, switch on in both) | at delivery |
 
 Serving-integration facts an optimization must keep (do not "simplify" them away):
 

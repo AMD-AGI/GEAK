@@ -33,7 +33,7 @@ Applicability test — all three lines must be true, judged from the task direct
    FFN / MoE stages, or everything from the attention output on) as one persistent launch per rank, or a small
    fixed number of launches, with the tensor-parallel all-reduce **inside** the kernel.
 2. The task's `unittest.py` starts **more than one rank** (one process per GPU) and needs several GPUs.
-3. The lane `mode` is `optimize`: an existing kernel is the starting point.
+3. An existing device kernel for the layer is the starting point (as received, or a seed an authoring step already committed), whatever the lane `mode`.
 
 If any line is false, this skill does not apply — stop reading.
 
@@ -54,56 +54,54 @@ across ranks, gfx950, experimental). Also applies: `native_decode_numerics`. Del
 - Decode is memory-bound, not FLOP-bound: each weight byte is read once per step, so layer time ≈ ramps + bytes ÷
   marginal stream rate + hand-off latency (*measured*: an in-kernel 64 MB stream reached 58% of the 5.325 TB/s peak).
 - In a tuned kernel waves spent about 57% of their time waiting on dependencies, 26% issuing loads, under 20% computing
-  (*measured*): what pays is a shorter path from a producer's publish to its consumer's first work, not faster arithmetic.
+  (*measured*): what pays first is a shorter path from a producer's publish to its consumer's first work. "Tuned" is not "nothing left": one critical-path
+  segment still gave 1.1× or more in one round on two deployed kernels — four or five stacked steps on one, one operand-role restructuring on the other (*measured in kernel lanes*).
 - Safety comes from structure: resident workgroups, acyclic waits, one path on every rank, device-epoch tags, a rank-order fp32 all-reduce.
 
 ## Procedure
 ### Planner quick card (tech lead) — first ten minutes, in order
-1. **The task's constraints rank above every lever.** Read the task statement, the COMMANDMENT and the
-   `unittest.py` docstring: memory footprint, graph safety, no host-side win, tolerance, case weights, what is
-   timed, the GPUs of the rank group (one lease holds them all). Under a stated memory limit an additional or
-   re-laid-out copy of weights or scales is out, unless it replaces the original or the task statement allows it.
-2. **Classify the structure.** Layer class: full one-launch · dual launch (front + tail) · partial from the
-   attention output · multi-launch layer · multi-layer per launch (outside this lever set). Schedule: every
-   workgroup runs every stage · per-stage task tables · two wave groups. Rows. Shape. → [kernel_structures.md](references/kernel_structures.md)
-3. **Inventory before ranking — mandatory.** For every lever you are about to propose, write down the marker
-   you looked for in the source ("not applied if" below, "already applied if" in the lever table) and what you
-   found. A lever whose marker says "applied" is not a candidate. Judge sub-levers one by one.
+1. **The task's constraints rank above every lever.** Read the task statement, the COMMANDMENT and the `unittest.py` docstring: memory
+   footprint, graph safety, no host-side win, tolerance, case weights, what is timed, the GPUs of the rank group (one lease holds them all).
+   Under a stated memory limit an additional or re-laid-out copy of weights or scales is out, unless it replaces the original or the task statement allows it.
+2. **Classify the structure.** Layer class: full one-launch · dual launch (front + tail) · partial from the attention output · multi-launch layer · multi-layer per
+   launch (outside this lever set). Schedule: every workgroup runs every stage · per-stage task tables · two wave groups. Rows. Shape. → [kernel_structures.md](references/kernel_structures.md)
+3. **Inventory before ranking — mandatory.** For every lever you are about to propose, write down the marker you looked for in the source ("not applied if" below,
+   "already applied if" in the lever table) and what you found. A lever whose marker says "applied" is not a candidate. Judge sub-levers one by one.
 4. **Look for an existing trace / timeline switch** before planning instrumentation (HIP: a trace pointer in the argument struct plus a stamp helper; FlyDSL: a timeline build); measurement gets a quarter of the round.
-5. **Rank by expected verified gain per engineer-hour, not by stage size.** Effects measured on an already tuned
-   kernel outrank a stage's share of the layer. A stage the timeline shows compute-bound (instructions per byte, not
-   bytes or waits) is a first-class candidate for an arithmetic or operand-role change, whatever its size.
-   **On a deployed kernel with no timeline yet, propose in this order** (each *measured* on an already written
-   kernel, [measured_rounds.md](references/measured_rounds.md)):
-   1. **Input-independent work in front of the stage's wait, then a wait only for the tiles this workgroup
-      consumes**: the stage's own weight, table, scale and K/V loads and small inputs staged in LDS go first;
-      the wait is per request and head, or per tile. Sliding-window attention stage −52%, long-context
-      attention stage −16% (bundles with 2). Not applied if a stage polls its input tags before its first
-      load, or its wait covers every task of the previous stage.
-   2. **Less work after the wait**: one LDS exchange instead of a multi-round merge; a small trailing stage fused
-      into its producer's epilogue (down + final sum stages −36%); a batched combine (−5.7% of the layer, with
-      the query staged in LDS). Not applied if a merge loop holds a barrier per round or a stage only sums.
-   3. **Small inputs staged once in LDS, LDS arrays 16-byte aligned.** Gate/up stage −19% (activation in LDS,
-      with the same stage's next task prefetched); one misaligned array cost a tenth of a layer. Not applied
-      if the activation is loaded per row or tile, or an LDS offset is not a multiple of 16 bytes.
-   4. **Few readers; small stages off the late workgroups**: a small hot read done by a few workgroups, one per
-      XCD (top-k stage −45%; a reader in every workgroup was 2.2× slower); a stage moved off the workgroups that
-      finish the previous stage last. Not applied if every workgroup reads the same few KB.
+5. **Rank by expected verified gain per engineer-hour, not by stage size.** Effects measured on an already tuned kernel outrank a stage's share of the layer.
+   A stage the timeline shows compute-bound (instructions per byte, not bytes or waits) is a first-class candidate for an arithmetic or operand-role change,
+   whatever its size: transposing the MFMA operand roles of compute-bound expert GEMVs gave 1.10× of the layer in two lane runs.
+   **On a deployed kernel with no timeline yet, propose in this order.** "Lanes" = *measured in kernel lanes (two deployed kernels)*, incremental on the layer;
+   "built" = measured on kernels while they were being built ([measured_rounds.md](references/measured_rounds.md)). None is a prediction for another kernel.
+   1. **Everything that does not depend on the awaited hand-off goes in front of the wait** — not only the loads: also the conversion and staging
+      of the operands (format conversion into the MFMA operands, transposed slabs staged in LDS, tables, masks, address math); after the wait only
+      the current token is patched. Then wait only for the tiles this workgroup consumes. Lanes: +3.2% to +7.0% in three runs, the largest single step, kept in
+      4 of 4 runs. Built: sliding-window attention stage −52%, long-context attention stage −16% (bundles). Not applied if a stage polls its
+      input tags before its first load or operand preparation, or its wait covers every task of the previous stage.
+   2. **Less work after the wait**: one softmax pass per wave, back-to-back MFMA chains, a single accumulation, fewer barriers, one LDS exchange instead of a
+      multi-round merge, stores deferred until the output is published, a small trailing stage fused into its producer's epilogue. Lanes: +2.5% to +3.7%, 4 of 4.
+      Built: down + final sum stages −36%; batched combine −5.7% of the layer. Not applied if a merge loop holds a barrier per round or a stage only sums.
+   3. **A stage's units off workgroups that own another stage's tiles** (or that finish the previous stage last); few readers, one per XCD, for a small hot
+      read. Lanes: attention units moved off two shared o_proj tiles +2.0% to +3.4%, 4 of 4. Built: top-k stage −45% with 8 readers per token, a reader in every
+      workgroup 2.2× slower. Not applied if a workgroup runs critical-path tiles of two stages, or every workgroup reads the same few KB.
+   4. **LDS: small inputs staged once, arrays 16-byte aligned, hot gathers free of bank conflicts** (padded rows, skewed slabs). Lanes: +1.1% to +2.0%,
+      3 of 4. Built: gate/up stage −19% (activation in LDS, same stage's next task prefetched); one misaligned array cost a tenth of a layer.
+      Not applied if the activation is loaded per row or tile, or an LDS offset is not a multiple of 16 bytes.
 
-   **Rarely pays on an already tuned kernel** (*measured*; all dead ends: measured_rounds.md):
-   - Issuing **another stage's weights earlier** (the next stage's, or the second expert GEMM's during the
-     first): noise or a loss in two kernels — memory was saturated; one stage lost 1.5× what the other gained.
-   - **Micro-tuning an inner loop** (software-pipelined loads, register double buffers, more tiles per round,
-     wider stores) and **spreading a stage over more workgroups** (a chunk per CU, a combine split 4×, helper
-     workgroups): slower, neutral, spills or hot spots — those loops were memory- or dependency-bound, not compute-bound.
-   - **Placement or an XCD map on its own** (measured only inside bundles; placement variants of a chain-bound
-     stage changed nothing). Restructuring a stage's arithmetic is NOT in this list: it was never measured here.
+   **Rarely pays on an already tuned kernel** (*measured*: built kernels and lanes; every dead end: measured_rounds.md):
+   - Issuing **weights earlier still while memory is busy** (a deeper prefetch of the stage's own, the second expert GEMM's, the next round's): noise or a loss in two
+     built kernels and in every lane run that tried it (0.97× to 1.00×) — memory was saturated. Only a prefetch into an idle tail was ever part of a paying bundle.
+   - **Micro-tuning an inner loop** (software-pipelined or reordered loads, register double buffers, more tiles per round, wider stores, more
+     instruction-level parallelism) and **spreading a stage over more workgroups** (a chunk per CU, a combine split 4×, helper workgroups):
+     slower, neutral, spills or hot spots — those loops were memory- or dependency-bound, not compute-bound.
+   - **An XCD map on its own** (noise in a lane; otherwise only inside bundles), **placement variants of a stage bound by its own chain**, **pipelined polls** and **a different epoch read at launch entry** (0.99× to 1.00× in lanes).
+     Restructuring a stage's arithmetic is NOT in this list: where measured it paid (move 2, the operand-role change above) or was flat; pipelining gate/up + down per expert was never tried.
 6. One direction = one critical-path segment (a stage with the hand-offs into and out of it); shared tables go to one direction.
 7. **Stack; do not stop at the first gain.** Inside its direction the engineer adds separately verified steps on the same
-   segment until the round ends (independent steps multiplied). Only a schedule change, merging launches or adding rows is a
-   multi-round project. Do not cap the expected gain by this skill's per-lever figures: they are shares of other kernels' stages.
-8. Evidence = a speedup against the baseline **in the same run**, above twice the noise (about 2%). The oracle's gates are the contract:
-   bit-identity with the baseline is not required unless the oracle checks it. Three rounds under 2–3% is plateau evidence.
+   segment until the round ends (steps on different stages multiplied; on one segment re-measure the whole stack after each step).
+   Only a schedule change, merging launches or adding rows is a multi-round project. Do not cap the expected gain by this skill's per-lever figures (shares of other kernels' stages).
+8. Evidence = a speedup against the baseline **in the same run**, above twice the run-to-run noise measured in this task (the oracle's A/A band).
+   The oracle's gates are the contract: bit-identity with the baseline is not required unless the oracle checks it. Three rounds under 2–3% is plateau evidence.
 
 ### Engineer quick card — first ten minutes (1–3), then every round (4–8)
 1. Read the kernel's header comment and stage list; confirm the class, the applied levers, the task's constraints.
@@ -113,13 +111,13 @@ across ranks, gfx950, experimental). Also applies: `native_decode_numerics`. Del
 4. Measure inside the time box: per-case table → existing timeline → byte floors (an estimate unless you measured). → [measuring.md](references/measuring.md)
 5. One lever at a time, local to one stage or hand-off (confirm in the source it is not applied); when it verifies, save and take the next on the same segment.
 6. Correctness first, then the benchmark. **Always compare against the baseline measured in the same run** —
-   never an earlier run, a different GPU group or a figure from this skill. Under twice the noise: no result.
+   never an earlier run, a different GPU group or a figure from this skill. Inside twice the task's own A/A noise a step is not yet evidence — save it all the same (step 8).
 7. Correctness once per step while iterating; on the state you finally save, if it changed synchronization, hand-offs or LDS
    sharing, **repeat it three times** (report the count). The oracle does not check: launch count (kernels per step ÷ layers, after a structural
    change), a hollow kernel (body emptied → correctness must fail), ISA scratch after a prefetch. → [acceptance.md](references/acceptance.md)
-8. **Bank each verified step**: the moment it verifies, re-save the patch your role file asks for (the
-   workspace diff). Do not commit inside the workspace unless the role file says so — a commit empties that
-   diff. Otherwise revert completely. The number that counts is the lane's verify re-run, not your own.
+8. **Bank each verified step**: as soon as it passes correctness and beats the incumbent, re-save the patch exactly as
+   your role file says (the workspace diff). Do not commit inside the workspace unless the role file says so — a commit
+   empties that diff. Otherwise revert completely. The lane's verify re-run decides, not your own number.
 
 ## Lever table
 The levers that built the measured MiMo-V2.6-Flash kernels (step 3 tells which are applied). P90 = serving latency (HIP designs, while being built); stage figures = that stage's own time; "bundle" = with other changes.
@@ -128,9 +126,9 @@ The levers that built the measured MiMo-V2.6-Flash kernels (step 3 tells which a
 |---|---|---|---|---|
 | cases with width > 1 are slower per row than width 1 | take every width into the kernel (rows as MFMA columns, or workgroup groups) | largest step in both HIP designs: P90 −59% in one round; in the other design rows arrived inside bundles (−20%, −14%, −12%) | stage functions take a row count; width > 1 cases run the kernel | [structure](references/structure_levers.md) |
 | one stage sets the critical path while workgroups idle | rebalance the CU plan by bytes; fold a tiny stage only if it adds no reads | not measured (folding the input norm into QKV cost +14% time in one attempt) | one stage → workgroup table; no idle private partition | [structure](references/structure_levers.md) |
-| a stage starts late on busy workgroups; hand-offs costly although balanced | per-stage task tables with staggered bases; producer and consumer on one XCD | not measured alone (bases and the XCD map appear only inside bundles) | `(base + i) mod grid` mapping; a tile map keyed by XCD | [structure](references/structure_levers.md) |
+| a stage starts late on busy workgroups; hand-offs costly although balanced | per-stage task tables with staggered bases; producer and consumer on one XCD | bases: only inside bundles; an XCD-local tile map alone was noise in one lane run (move 3 in step 5 is the placement that paid) | `(base + i) mod grid` mapping; a tile map keyed by XCD | [structure](references/structure_levers.md) |
 | a long stage stalls short ones; they never overlap | two wave groups per workgroup | not measured as an A/B; the one-sequence design did better in fewer rounds | code branches on the wave index | [structure](references/structure_levers.md) |
-| gaps between stages or layers; time inside device-wide barriers; flags cleared per step; slow peer accesses | per-tile (value, tag) hand-offs with no device-wide barrier; one epoch per step; batched polls; scalar peer bases | one barrier ≈ 4–5% of a tuned layer; one epoch per step: layer gap −68% yet P90 only −0.3%; polling with parallel lanes neutral | no grid-wide barrier between stages; epoch advanced once per step; nothing zeroed | [hand-off](references/handoff_levers.md) |
+| gaps between stages or layers; time inside device-wide barriers; flags cleared per step; slow peer accesses | per-tile (value, tag) hand-offs with no device-wide barrier; one epoch per step; batched polls; scalar peer bases | one barrier ≈ 4–5% of a tuned layer; one epoch per step: layer gap −68% yet P90 only −0.3%; polling with parallel lanes neutral; in one lane run a relaxed memory ordering on the end-of-launch completion counter +1.2% | no grid-wide barrier between stages; epoch advanced once per step; nothing zeroed | [hand-off](references/handoff_levers.md) |
 | the all-reduce is a serial block after its GEMM | partials from the GEMM epilogue; sum + residual + next norm in the reduce epilogue | not measured alone (the fused down + final sum is move 2 in step 5) | GEMV epilogues store into peer buffers; no collective call | [hand-off](references/handoff_levers.md) |
 | a stage starts with a load ramp | issue this stage's first loads / the first K tile at kernel start | at most 2–3% each on P90 | load-first passes; K tile issued at entry | [hand-off](references/handoff_levers.md) |
 | a GEMV stage far above its byte floor | wide coalesced loads, dequant in registers, bytes in flight | gate/up −23% (bundle: XCD tile map, cached scales, lane redistribution, depth-2 loop, one-wave epilogue); a scale copy in read order −12% P90 (bundle; an extra copy: step 1) | 16-byte loads before the math; scale after block accumulation | [stage](references/stage_levers.md) |
@@ -141,10 +139,11 @@ The levers that built the measured MiMo-V2.6-Flash kernels (step 3 tells which a
 ## Knobs & pitfalls
 - Floors (*measured*): a stage's floor is ramp + bytes ÷ marginal stream rate, never bytes ÷ peak nor bytes ÷ 85% of
   peak. Effective fractions of peak: 58% for a tuned in-kernel 64 MB stream, 31% for a generic 64 MB read, 75% at 1 GiB.
+  The role files' roofline uses 0.7–0.85× nameplate bandwidth: report that figure, but steer decode-sized stages by this floor.
 - Numbers: the oracle's same-run speedup decides; kernel-trace time is what the kernel itself costs (the oracle's
   ratio carries a fixed graph-launch part in both legs); the timeline tells which stage. A lane gain is not a serving gain.
-- Registers (public constants): 512 threads per workgroup leave 256 VGPRs per wave; every prefetch or double
-  buffer can spill — check the ISA for scratch. LDS is 64 KiB per workgroup.
+- Registers (public constants): 512 threads per workgroup leave 256 registers per wave (architected VGPRs plus accumulator
+  file); a prefetch or double buffer can spill — check the ISA for scratch and accumulator moves. LDS is 64 KiB per workgroup.
 - Stale builds: a JIT / build cache may miss an edit in a helper module — rename the kernel or clear the cache.
 - Never read the target model's own finished mono kernel from any source but the task directory; a different model's
   is a structure reference only. Statements without a status mark are read from source.
@@ -152,14 +151,13 @@ The levers that built the measured MiMo-V2.6-Flash kernels (step 3 tells which a
 ## Do-no-harm notes
 - The task statement's constraints (memory footprint, graph safety, no host-side win) rank above every lever. No
   extra or re-laid-out weight / scale copy under a stated memory limit unless in place or allowed by the task.
-- Never loosen the oracle tolerance; never edit an oracle file.
-- Never change the all-reduce order (fp32 sum in rank order); every rank takes the same path every step.
+- Never loosen the oracle tolerance or edit an oracle file. Never change the all-reduce order (fp32 sum in rank order); every rank takes the same path every step.
 - No host synchronization on the steady decode path; nothing per-step from the host; no per-call allocation.
 - Do not add launches, and do not fall back to the native path for any eligible width, to look faster; the host
   side computes nothing new. A deployed kernel keeps the launch count it arrived with (one, or front + tail).
 - Never remove a bound from a wait. A new wait uses the kernel's existing wait helper, never a bare spin loop;
   giving deadlines to a kernel that has none is a separate, declared change. The timeline build is never installed.
-- Out of budget mid-change: revert to the last saved patch. "No verified gain" is a valid result; never bank noise.
+- Out of budget mid-change: revert to the last saved patch. "No verified gain" is a valid result; never claim a step inside the A/A noise as a gain.
 
 ## Sources
 - An internal mono-kernel generation workflow (not public): its lever cards, optimize-phase rules, timing and
@@ -167,4 +165,5 @@ The levers that built the measured MiMo-V2.6-Flash kernels (step 3 tells which a
   optimized by a GEAK kernel lane), MI300X, four ranks — as ratios only; peak from [arch.md](../../../hardware/cdna3_mi300/arch.md).
 - Public code (symbol names and docstrings read at these commits; behaviour not re-verified): FlyDSL
   `kernels/monokernel/`, `docs/ktrace_guide.md` at `9b70d465`; sgl-amd-mono `sgl_amd_mono/common/` at `572ddf18`.
-- STATUS: draft — not yet validated in a GEAK kernel lane. Nothing here replaces the oracle.
+- GEAK kernel-lane runs, one round each, on two deployed vLLM mono kernels (HIP for MiMo-V2.6-Flash, FlyDSL for DeepSeek-V4.1), independently re-measured: the figures marked *measured in kernel lanes*.
+- STATUS: draft — the skill itself is not yet validated in a GEAK kernel lane. Nothing here replaces the oracle.

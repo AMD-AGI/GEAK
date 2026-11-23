@@ -54,9 +54,9 @@ stages or layers; short-context steps slower than the baseline.
    tags per lane and reissue only the stale ones.
 5. Scopes: device-scope relaxed atomics inside a GPU; system scope and IPC-shared peer buffers across
    GPUs. Peer buffers are uncached. Waits that clear flags need acquire semantics at system scope.
-6. Bounded waits: every cross-workgroup or cross-rank wait has a deadline (seconds); on expiry set an
-   error word and trap — never continue with stale data. A host thread may read the error word as a
-   second check, but only in a relaxed graph-capture mode, or it breaks capture at start-up.
+6. Bounded waits: every cross-workgroup or cross-rank wait has a deadline (seconds); on expiry set the error
+   word and stop the launch (skip the dependent work or trap, as the kernel's own helper does) — never continue
+   with stale data. A host thread may read the error word only in a relaxed graph-capture mode (else capture breaks).
 
 **Already applied if** the header comment or helpers speak of tagged pairs, an epoch word is advanced by
 the last workgroup of the step's last launch, nothing is zeroed per step, and the poll helper takes a
@@ -68,7 +68,7 @@ wrap either way. Every buffer keeps a fixed device address so the launch can be 
 trapped process may write a GPU core dump and not exit unless core dumps on exception are disabled.
 Every rank must take the same path each step, or system-scope waits hang until the deadline. **Check.**
 Layer-to-layer gap (target: a few percent of the layer); a short-context step not slower than the
-baseline; random parity on every rank; a forced timeout that traps instead of hanging.
+baseline; random parity on every rank; a forced timeout ends in the deadline error — no hang, no stale data.
 
 **Evidence (measured).** One epoch per step cut the layer-to-layer gap by about two thirds (from about
 8% of the layer to about 3%) yet moved serving P90 by only −0.3% in that round. Batched polling was one
@@ -143,8 +143,8 @@ slices in the same order, or the ranks drift apart and a sequence check fails la
 the sum of squares: combine slice sums in slice order, never arrival order. Two reductions use separate
 partial buffers and indices; a half's capacity is max width × hidden and identical for every width that
 shares the buffer. Peers read partials over IPC: release the writes before a peer reads. Keep the
-baseline's rounding of the stored sum (a native all-reduce may truncate bf16 rather than round — *read
-from source only*; see `native_decode_numerics`). **Check.** Random parity on every rank catches order
+baseline's rounding of the stored sum (aiter's custom all-reduce truncates the bf16 sum on gfx942 — *verified by
+a real-op probe* on two ranks; `native_decode_numerics`, TPA-09). **Check.** Random parity on every rank catches order
 drift as a mismatch between ranks.
 
 **Evidence (measured).** Expert down fused with the final sum over all experts (fp32 slot-order sum in

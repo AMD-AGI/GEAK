@@ -131,8 +131,8 @@ hold a visible share of the timeline, or the experts stay well above their weigh
    normalizes, so there is no second hand-off. Keep the readers few when they read the same few KB: in
    the FlyDSL kernel selection in every workgroup was 2.2× slower than 8 readers per token (*measured*),
    although both HIP designs select in every workgroup.
-2. Top-k at wave level: each lane sorts its few candidates (score descending, id ascending on ties);
-   then k rounds compare only the lanes' heads (cross-lane max, then a ballot for the lowest lane).
+2. Top-k at wave level: each lane sorts its few candidates, then k rounds compare only the lanes' heads (cross-lane
+   max, then a ballot); tie side and id order exactly as the native router kernel has them (`native_decode_numerics`, tie table).
 3. FP4 decode in registers: a byte permute builds FP16 (or FP8) bytes directly from the 4-bit codes,
    since every code is exact in those formats — no LDS lookup table.
 4. Scales in read order (section 1, item 6).
@@ -195,6 +195,6 @@ read from source only*): check against the installed version. In HIP C++ read th
 | rebuild on any source edit | a digest of the package sources in the kernel name (the JIT cache key). The cache does not see edits in helper modules: without it you measure the old kernel |
 | compile without a GPU | hide the devices and set the `COMPILE_ONLY` option with the target architecture |
 
-Resources on gfx942: 512 threads per workgroup (two waves per SIMD) leave at most 256 VGPRs per wave, and
-state held across a loop is where spills start; LDS is 64 KiB per workgroup; direct global → LDS loads can
-make the compiler insert a full memory wait before the next LDS read, which serializes the step's loads.
+Resources on gfx942: 512 threads per workgroup (two waves per SIMD) leave 256 registers per wave, architected VGPRs and
+accumulator file together; state held across a loop is where spills start (count accumulator moves as well as scratch);
+LDS is 64 KiB per workgroup; direct global → LDS loads can add a full memory wait before the next LDS read.

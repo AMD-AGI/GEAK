@@ -142,7 +142,7 @@ waiting only on consumed shards: twice the registers per wave and no cross-side 
 
 **Already applied if** the code branches on the wave index and splits the LDS between two sides.
 
-**Pitfalls.** The register budget is per side (256 VGPRs per wave with two waves per SIMD): moving work
+**Pitfalls.** The register budget is per side (256 registers per wave with two waves per SIMD): moving work
 to a side spills; check every variant. The sides communicate only through tagged hand-offs; a
 workgroup-wide barrier stalls both. LDS: the largest A stage plus the largest B stage must fit 64 KiB.
 

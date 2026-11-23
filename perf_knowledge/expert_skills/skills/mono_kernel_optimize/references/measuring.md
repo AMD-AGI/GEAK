@@ -121,10 +121,13 @@ How to read it:
 
 In a trace of a two-leg test, kernels present in both legs are harness work; the layer's kernels are
 the ones present in one leg only. Under a profiler a kernel that waits on peers absorbs the ranks' skew:
-take the minimum over ranks per sample, then the median. Run-to-run noise of a whole-layer case was
-about 2% in one measurement, and XCD clocks differ by 3–10%
-([xcd_chiplet.md](../../../../hardware/cdna3_mi300/xcd_chiplet.md)): a gain
-under about twice the noise is not a result — repeat it or drop it.
+take the minimum over ranks per sample, then the median.
+
+Noise differs from oracle to oracle: about 2% run to run for a whole-layer case in one harness, and XCD
+clocks alone differ by 3–10% ([xcd_chiplet.md](../../../../hardware/cdna3_mi300/xcd_chiplet.md)). Measure
+it in your task: run the unmodified kernel as the candidate and read the A/A band. A gain under about
+twice that band is not yet evidence — repeat it. Saving a patch follows the role file (as soon as it
+beats the incumbent); the verify re-run decides.
 
 ## Cost of hand-offs (relative to a tuned layer)
 
