@@ -79,8 +79,8 @@ zero, and the first call per width must run eagerly.
 
 ## Resource budget
 
-- Registers: 70 to 178 at 256 threads; one fp32-gate, hidden 8192 shape took 272 (16 of them in the
-  accumulator file). At 512 threads every shape fits 256 with no scratch. Plan for
+- Registers per wave: 70 to 178 at 256 threads; one fp32-gate, hidden 8192 shape took 272 (16 of them
+  in the accumulator file, no scratch). At 512 threads every shape fits 256 with no scratch. Plan for
   `240 + 4 x ceil(experts / 64)`.
 - LDS: `2 x hidden + 4 x waves x 4` bytes, plus `256 x ceil(experts / 64)` when grouped.
 

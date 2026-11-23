@@ -89,13 +89,17 @@ workspace / owner protocol. No task waits for the cache write.
 
 ## Resource budget
 
-- Registers: **172 to 339 at 256 threads**, because every K and V load of a round is in flight before
-  the matrix-core work; that means one wave per SIMD. In the 512-thread form 114 to 237, no scratch.
-- LDS 1 to 33 KB (queries, tile maxima, end-of-row sums); a split adds the frame maxima.
-- Split workspace: `rows x heads x (split - 1) x (v_dim + 4) + 2 x tasks` 32-bit words, about 124 KB for
-  16 heads on 16 segments at one row.
-- Block-sparse with 128-position blocks: about 486 registers at 256 threads (fits one wave per SIMD) and
-  about 456 in the 512-thread form, which **spills**: 2.4x slower there. Use at most 256 threads.
+- Registers per wave: **172 to 339 at 256 threads**, because every K and V load of a round is in flight
+  before the matrix-core work; that means one wave per SIMD. In the 512-thread form 114 to 237, no
+  scratch.
+- LDS about 1 to 32 KiB (queries, tile maxima, end-of-row sums; 33088 bytes for a 16-head full-context
+  shape at 512 threads); a split adds the frame maxima.
+- Split workspace: `rows x heads x (split - 1) x (v_dim + 4) + 2 x tasks` 32-bit words, about 124 KiB
+  for 16 heads on 16 segments at one row.
+- Block-sparse with 128-position blocks: an estimated 486 registers per wave at 256 threads (fits one
+  wave per SIMD; everything past 256 sits in the accumulator file) and an estimated 456 in the
+  512-thread form, where the cap is 256 per wave and the round **spills**: measured 2.4x slower there.
+  Use at most 256 threads.
 
 ## Where the time goes
 

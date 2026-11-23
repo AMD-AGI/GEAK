@@ -54,7 +54,7 @@ workflow) does not have to rediscover them.
 ## Mechanism
 
 - **What is built.** One persistent FlyDSL kernel per rank, one launch per decode step, at most one workgroup
-  resident per CU. Stages hand off inside it through tagged per-tile mailboxes; the TP all-reduce and the KV write
+  resident per CU (a "block" below; the layout names say CTA). Stages hand off inside it through tagged per-tile mailboxes; the TP all-reduce and the KV write
   happen in the kernel. An adapter subclasses the layer class and sends ineligible calls to the native path.
 - **Where the gain is.** Decode already runs in a captured graph, so host dispatch is gone. The kernel wins on the
   device timeline: gaps between kernels (a native layer ran 18 to 91 kernels per step), synchronization, memory.
@@ -71,18 +71,14 @@ workflow) does not have to rediscover them.
 
 ## Procedure
 
-**Planner, first ten minutes.**
-1. Check the three lines above against the task directory. Read the unit test's docstring and the lane's COMMANDMENT
-   file: ranks, widths, tolerance, which checks run, how long one oracle pass takes.
-2. Pick the route (table below); inside a lane pick direct. Take structure `full_one_launch` and layout
-   `staged_all_ctas` unless step 3 says otherwise.
-3. Plan several rounds: contract → "correct" → "resources" plus review → hand over. A round is one engineer for one
-   to two hours; internal direct authoring took about 1.5 to 3.3 hours per layer kind *after* the contract existed.
-   If the task has no synchronization runtime, the first round writes and self-tests it.
+**Planner, first ten minutes** (an external workflow or a person; a lane's author mode has no planner before authoring).
+1. Check the three lines above against the task directory. Read the unit test's docstring: ranks, widths, tolerance, which checks run, how long one oracle pass takes.
+2. Pick the route (table below); inside a lane pick direct. Take structure `full_one_launch` and layout `staged_all_ctas` unless step 3 of the Steps (structure and layout) says otherwise.
+3. Outside a lane, plan several rounds: contract → "correct" → "resources" plus review → hand over. Internal direct authoring took about 1.5 to 3.3 hours per layer kind *after* the contract existed. A task without a synchronization runtime spends its first round writing and self-testing one.
+4. Inside a lane's author mode there is exactly one author call and no authoring rounds: contract, "correct" and "resources" must fit that call, and an incorrect seed aborts the lane. A task without a vendored synchronization runtime is out of scope for a lane. If the layer does not fit, return `authored: false` with the reason.
 
 **Engineer, first ten minutes.**
-1. Run the oracle once before changing anything, exactly as the COMMANDMENT file and the unit test's docstring say,
-   holding every GPU of the rank group in one lease for the whole command. A native stub passes at about 1.0×.
+1. Get a first oracle run, holding every GPU of the rank group in one lease for the whole command. Outside a lane: run it on the untouched stub, as the COMMANDMENT file and the unit test's docstring say; a stub that returns the native `forward` passes at about 1.0×. In a lane's author mode `kernel_src/` arrives empty and no COMMANDMENT file exists yet: copy the stub adapter and the vendored runtime, if the task has them, from `TASK_DIR/kernel_src/`, and run the oracle once a candidate exists, with the command form of the lane's author role file (read it for the exact form).
 2. Read the native `forward`: list the op sequence, the collectives, and what the layer writes (KV cache, state).
 3. Write the stage table with port names before any kernel code.
 4. Write the adapter's eligibility test (shape, dtype, configuration only) and its native fallback.
@@ -100,16 +96,16 @@ workflow) does not have to rediscover them.
    - **Cut:** one GEMM-like operation, one reduction or one hand-off per stage. State a stage writes (the KV write) is an output port of exactly one stage.
    - **Ports:** an input reads the nearest earlier output of the same name. A second reader of a layer input that an earlier stage updated reads the nearest earlier output whose name contains it (`residual` reads `residual1`, not the layer input). An input that no output names is a layer input. Example: `input_norm` reads the layer inputs `hidden` and `residual` and outputs `normed` and `residual1`; a later `post_norm` that lists the input `residual` reads `input_norm`'s `residual1`, not the layer input.
    - **`tp`:** write 1 for every stage, also for one that runs on every rank on its own weight shard; write the TP size only for a stage that itself contains a collective (the all-reduce).
-   - **Split:** a port is either handed off or a layer output, never both, so never split a stage at a layer output that a later part also reads.
-   - **Tolerance:** `layer_tol = min(derived, max(4 × measured, 4 × noise))`: take 4 × the larger of measured and noise, compare it with the derived bound, and the smaller of the two wins. Every negative control of the task must still fail at `3 × layer_tol`. KV writes are byte-exact.
+   - **Split:** when a stage cannot be authored, cut it at an internal boundary and mark the old stage as replaced by the new parts (they take its place in layer order and keep its external port names). Then build and test only the new parts; every other stage stays as it is. A port is either handed off or a layer output, never both, so never split a stage at a layer output that a later part also reads.
+   - **Tolerance:** `layer_tol = min(derived, max(4 × measured, 4 × noise))`: take 4 × the larger of measured and noise, compare it with the derived bound, and the smaller of the two wins. Every negative control of the task must still fail at `3 × layer_tol`. KV writes are byte-exact. In a lane the oracle's tolerance and controls are frozen: compute `layer_tol` as a self-check only, and if it differs from the oracle's tolerance or a control does not fail at 3 ×, report it; do not re-run or strengthen controls.
      Example (invented numbers): derived 0.47, measured 0.016, noise 0.023: 4 × the larger = 4 × 0.023 = 0.092, below 0.47, so `layer_tol` = 0.092. Derived 0.23, measured 0.071, noise 0.009: 4 × 0.071 = 0.284, above 0.23, so the derived bound caps it and `layer_tol` = 0.23. The controls must then fail at 0.276 and at 0.69.
-   - **First-draft CU plan:** one persistent workgroup per CU, and CUs of a stage = total CUs × its bytes moved ÷ the sum of bytes moved by all stages (bytes: the weights it reads on this rank, plus KV pages for attention). Not proportional to its operation count or to its share of the native layer's time, and not an even split. Drop a width that does not fit LDS or registers.
-     Example (invented numbers, 304 CUs): `qkv_proj` moves 175 MiB, `attn` 65 MiB, `experts_ar` 520 MiB, sum 760 MiB, so they get 304 × 175 ÷ 760 = 70, 304 × 65 ÷ 760 = 26 and 304 × 520 ÷ 760 = 208 CUs (70 + 26 + 208 = 304). Ignore every other column: by operation count (1, 3, 2) the split would be 51 / 152 / 101, by share of native time (20%, 45%, 35%) 61 / 137 / 106, evenly 101 / 101 / 102, all of them wrong.
+   - **First-draft CU plan:** one persistent workgroup per CU. For stages that run at the same time: CUs of a stage = total CUs × its bytes moved ÷ the sum of bytes moved by those stages (bytes: the weights it reads on this rank, plus KV pages for attention). Not proportional to its operation count or to its share of the native layer's time, and not an even split. Under the default layout stages run one after another and every stage uses every CU. Drop a width that does not fit LDS or registers.
+     Example of the proportional split (invented numbers; three stages that run at the same time on 304 CUs): `qkv_proj` moves 175 MiB, `attn` 65 MiB, `experts_ar` 520 MiB, sum 760 MiB, so they get 304 × 175 ÷ 760 = 70, 304 × 65 ÷ 760 = 26 and 304 × 520 ÷ 760 = 208 CUs (70 + 26 + 208 = 304). Ignore every other column: by operation count (1, 3, 2) the split would be 51 / 152 / 101, by share of native time (20%, 45%, 35%) 61 / 137 / 106, evenly 101 / 101 / 102, all of them wrong for this split.
 3. **Choose structure and layout** ([`references/structures_and_layouts.md`](references/structures_and_layouts.md)) from structural facts only, never from a model name.
    **Largest stage task count ≥ 8× the smallest: `task_tables`; otherwise `staged_all_ctas`** (a draft rule; its threshold was not validated by measurement). `wave_split` was never run.
 4. **Check or write the synchronization runtime** ([`references/sync_patterns.md`](references/sync_patterns.md)): launch epoch read on the device, one deadline per launch (well above the slowest rank's layer time), a sticky error word written to every rank, per-tile mailboxes, one deadline site per hand-off port, all-reduce summed in fp32 in rank order.
    - **All-reduce partial buffer:** slot capacity = (largest decode width sharing the buffer) × hidden elements, and every width passes that same capacity; buffer bytes = 2 × capacity × bytes per element (two halves, chosen by the parity of the launch epoch). Example: widths 1 and 4, hidden 4096, bf16 (2 bytes): capacity 4 × 4096 = 16384 elements for both widths; buffer 2 × 16384 × 2 = 65536 bytes.
-5. **Write the kernel** ([`references/fusion_playbook.md`](references/fusion_playbook.md)). Direct route, each milestone committed: **correct** (one kernel, any simple schedule; oracle and probe pass on every rank) → **resources** (ISA scratch 0, VGPR ≤ 512, LDS ≤ 64 KiB, every wait bounded) → **seed** (largest stage first, until the budget ends). Stages route: **chained** (one launch per stage) → **persistent**.
+5. **Write the kernel** ([`references/fusion_playbook.md`](references/fusion_playbook.md)). Direct route, each milestone committed: **correct** (one kernel, any simple schedule; oracle and probe pass on every rank) → **resources** (ISA scratch 0, VGPR ≤ 512, LDS ≤ 64 KiB, every wait bounded) → **seed** (largest stage first, until the budget ends; inside a lane stop at resources: the seed milestone belongs to the optimize rounds, skill `mono_kernel_optimize`). Stages route: **chained** (one launch per stage) → **persistent**.
 6. **Localize failures with a probe build** that exports every port of every stage. Judge each stage on the inputs the kernel actually gave it; run 1, 7 and all blocks, about 3 repeats each, and about 4 consecutive steps from an empty and from a captured cache. Then name the failure class (table under Knobs & pitfalls).
 7. **Review** ([`references/review_criteria.md`](references/review_criteria.md)): the criteria below, then robustness: **at least 32 consecutive decode steps** with the KV cache byte-identical after each; kernel ↔ native switching; every width × build flag; fault injection; **10 repeated oracle runs**; memory; **1000 graph replays** of one captured step, the last compared with native.
 8. **Hand over.** A correct seed, even slower than native, goes to `mono_kernel_optimize`.
@@ -143,7 +139,7 @@ Name the failure class first, then act on it. If several apply, report the first
 | hang | a deadline expired or the outer wall clock ran out | fail | all waits share one deadline, so the error word may name a downstream waiter. **Look first at the producer stage of the most upstream port whose tiles do not carry this launch's tag**, not at the stage that reads it: does it publish under every block count and for every tile? | sync_patterns §6 (fault injected) |
 | stage numerics | a stage is wrong on its own inputs at every block count | fail | only that stage: its numerics rules against the native source | fusion_playbook §5 |
 | hand-off / race | right with 1 block and wrong with more; repeats differ and are wrong; the oracle fails while the probe passes | fail (repeats that differ inside the stage's bound: warning) | the stage's input waits and the upstream publish order | fusion_playbook §3.5 (fault injected) |
-| state write | single steps pass, sequences fail; the KV write is missing, misplaced or wrong | fail | check slot, format and scale of the write, on every step | fusion_playbook §3.3 (observed) |
+| state write | single steps pass, sequences fail; the KV write is missing, misplaced or wrong | fail | check slot, format and scale of the write, on every step | fusion_playbook §4.3 (observed) |
 | error accumulation | every stage within its bound on its own inputs **and** the chained error grows over the steps | **a failure only when the layer oracle fails; while the oracle still passes it is a warning to report, not this class** | move the stage's numerics to the deployed path's rounding points; a fix round alone cannot close it: report it, loosen nothing | fusion_playbook §5 (observed, 1.2× the tolerance) |
 | launch count | not exactly one kernel per replay, or a native kernel in the trace | fail | remove the extra launch or the native call | review_criteria §2 |
 | hollow | the oracle still passes with every kernel body emptied | fail | report it; never change a test | review_criteria §2 |
@@ -157,8 +153,8 @@ Name the failure class first, then act on it. If several apply, report the first
 - Prefill, mixed batches, widths outside the feasible set and refused configurations (expert parallelism, LoRA,
   speculative decoding, other quantization formats) always take the native path, decided identically on every rank.
 - A failed wait stops every rank and returns no output. **A stalled rank must end in the deadline error, not a hang.**
-- No host sync inside the step: the error word is read in tests and at teardown only.
-- Do not quantize more coarsely than native. Report extra weight copies in bytes; create them before KV-cache sizing.
+- No host sync inside the step. Never read the error word per step: read it in tests, at teardown, or from a watchdog thread in relaxed capture mode.
+- Do not quantize more coarsely than native. Report extra weight copies in bytes; create them on the first eligible call in the lane adapter. Delivery moves that build to load time, before KV-cache sizing (skill `apply_mono_kernel_to_framework`).
 - A seed slower than native is a valid seed and not a delivery. Do not use this skill to optimize an existing kernel.
 
 ## Sources

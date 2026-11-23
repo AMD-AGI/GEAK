@@ -40,7 +40,7 @@ model load, and list it separately from the model-owned code.
 | Location | The model owns the code: `vllm/models/<model>/amd/specialized_decode/`. No change to the vLLM core beyond what the commit already provides |
 | Switch | The commit's opt-in switch, default off (`--monokernel` at the pinned commit). The packages there refuse the first-generation model runner and stock `torch.compile` |
 | Mode | Layer mode: `plan()` runs once per step, and the model's layer loop asks the step for the kernel of each layer index (`Step.layer(i)`). Stock modules and parameters are never replaced. Step mode, which replaces the whole forward, is out of scope when you deliver one layer kind |
-| `plan()` | Pure decode with a row count in the kernel's widths uses the mono kernel. Prefill, mixed batches, speculative verify and any other width keep the stock path. The decision depends only on metadata every rank holds alike and replays under CUDA graphs exactly as captured. Upstream's `decide_step` (`runtime/routing.py`) returns the decision together with its reason |
+| `plan()` | Routes by step kind and rows (rows = requests × tokens per request of the step). Pure decode with a row count in the kernel's widths uses the mono kernel; a verify step only if the kernel's oracle and width list cover it (one upstream package serves pure verify steps). Prefill, mixed batches and any other width keep the stock path. The decision depends only on metadata every rank holds alike and replays under CUDA graphs exactly as captured. Upstream's `decide_step` (`runtime/routing.py`) returns the decision together with its reason |
 | Refusal | Explicit, every reason at once, the same verdict on every rank, never a silent fallback. How it is expressed is the next section |
 | Build | JIT every width at model load, **before the KV-cache profiling run**, so that KV sizing sees the kernel's memory: peer buffers, control region, any weight repack. Create the cross-rank peer group over the TP group, using the CPU group of `get_tp_group()` for the object gather |
 | Counters | Per rank: `launches`, read from the control region at log intervals and not per step, and `skips{reason}` from `plan()`. Use what the commit has first: at the pinned commit one package keeps `mono_steps` / `stock_steps` on its `SpecializedDecode` and logs launch coverage now and then without a host sync (`output_step` in `runtime/executor.py`: output steps, launches, covered layers each); the older DeepSeek-V4.1 file logs a one-time "active" line and a debug-level skip reason |
@@ -63,10 +63,10 @@ does the opposite for an explicit opt-in, and upstream wins:
   reason once at debug level). This skill additionally counts it by reason.
 
 ### The three refusal stages
-1. **Configuration, before load.** Pipeline, data and expert parallelism; LoRA; speculative decoding; KV
-   connectors; quantization formats other than the loaded one; a TP size or device the kernel was not built
-   for; fewer compute units than the kernel's resident blocks (a partitioned GPU); and every entry of the
-   layer kind's own refusal list.
+1. **Configuration, before load.** Pipeline, data and expert parallelism; LoRA; speculative decoding unless
+   the kernel's oracle covered verify steps; KV connectors; quantization formats other than the loaded one; a
+   TP size or device the kernel was not built for; fewer compute units than the kernel's resident blocks (a
+   partitioned GPU); and every entry of the layer kind's own refusal list.
 2. **Model, after load.** Weight formats, shapes and dtypes as actually loaded, not as the checkpoint stores
    them.
 3. **Cache, at each KV-cache bind.** Layout, block size, KV dtype, slot-mapping form.

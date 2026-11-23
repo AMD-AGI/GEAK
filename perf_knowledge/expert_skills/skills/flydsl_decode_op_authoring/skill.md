@@ -34,12 +34,15 @@ supersedes: []
 
 1. **FlyDSL.** The lane runs `mode=author` with `target_language=flydsl`, or the existing source under `kernel_src/` imports `flydsl` and defines a `@flyc.kernel`. A Triton, HIP or library-call kernel fails this line.
 2. **One operator.** The kernel computes one decoder-layer operator and `unittest.py` compares that operator's outputs (a projection, a norm, RoPE / KV write, decode attention, MLA, a router, MoE experts, an indexer, a state update). A whole-layer kernel fails this line: its source is a `kernel_src/mono/` tree or takes a layer's whole weight set, and its output is the layer's hidden state.
-3. **Decode shape.** The cases have 1 to 8 rows, one new token per row.
+3. **Decode shape.** The task has cases with 1 to 8 rows, one new token per row. Wider or prefill cases in the same task do not make this line false: the designs here serve the 1-to-8-row cases, and the Do-no-harm notes say what to do with the wider ones.
 
-If any line is false, this skill does not apply — stop reading. A whole-layer persistent kernel belongs to
-`mono_kernel_optimize` (existing kernel) or `mono_kernel_authoring` (new kernel), even when it is written in
-FlyDSL; single operators in HIP or Triton are not covered. Use `native_decode_numerics` together with this
-skill: it holds the rounding and layout facts that decide parity, and this skill does not repeat them.
+If any line is false, this skill does not apply — stop reading. A whole-layer kernel whose unit test starts more
+than one rank belongs to `mono_kernel_optimize` (existing kernel) or `mono_kernel_authoring` (new kernel), even
+when it is written in FlyDSL. A single-rank whole-layer kernel, or a fused multi-operator kernel such as router +
+experts, has no skill here: use the per-operator references as stage notes. Single operators in HIP or Triton are
+not covered. Use `native_decode_numerics` together with this skill: it holds the rounding and layout facts that
+decide parity, and this skill does not repeat them. It has no rows for the gated delta rule: read that operator's
+rounding points from the backend source.
 
 **Related skills.** Validated FlyDSL kernel skills already cover part of this operator list:
 - On gfx942, when [`flydsl_rewrite_quantized_moe`](../flydsl_rewrite_quantized_moe/skill.md) also matches (porting an int4 W4A16 or fp8 block-scale quantized GEMM / fused-MoE grouped GEMM from Triton to FlyDSL, prefill and decode), it is the high-prior recipe: follow its rule to map the math onto an existing FlyDSL primitive instead of writing from scratch. This skill adds the 1-to-8-row decode design (task split, lane layout) on top.
@@ -87,10 +90,10 @@ wave; attention-class designs need more and run at 256 threads.
 task split already in step 1 is not chasing performance: it is the structure every later round would otherwise
 have to rebuild.
 1. *Shape.* Write a device function plus a thin launcher: grid-agnostic tasks, static widths, a launcher name unique per configuration, no host control flow, weights read in place. [`single_op_shape_rules.md`](references/single_op_shape_rules.md).
-2. *Correctness on the smallest case first.* Width 1, the shortest context, then every case; run the oracle exactly as the lane's COMMANDMENT file and the task's own `unittest.py` docstring say. If a multi-rank task, hold every GPU of the group in one lease for the whole command.
+2. *Correctness on the smallest case first.* Width 1, the shortest context, then every case. As the author, use the correctness command of your role file (`author_engineer.md`, correctness loop: `cd $WORKSPACE && bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID python3 $TASK_DIR/unittest.py`; read the exact form there): the COMMANDMENT file does not exist yet, the Benchmark phase writes it after the Author phase. In optimize rounds, run the oracle exactly as the COMMANDMENT file says. If a multi-rank task, hold every GPU of the group in one lease for the whole command.
 3. *Grid check.* Give the launcher a workgroup-count override and pass at 1, at 7 and at the full grid.
-4. *Resource check.* ISA: registers under the cap for your thread count, scratch 0, LDS under 64 KiB. [`flydsl_idioms_and_resources.md`](references/flydsl_idioms_and_resources.md).
-5. *First three speed moves, in this order, one per commit, measured each time:*
+4. *Resource check.* ISA: registers per wave under the cap for your thread count, scratch 0, LDS under 64 KiB. A *spill* here always means non-zero scratch; values parked in the accumulator file are not a spill, but they cost issue slots. [`flydsl_idioms_and_resources.md`](references/flydsl_idioms_and_resources.md).
+5. *First three speed moves, in this order, one per saved patch, measured each time* (save `best_patch.diff` as your role file says and re-save it whenever your best improves; do not commit in an optimize round: that patch is a `git diff` of the workspace against its HEAD, so a commit empties it, and Verify returns `apply_failed` for an empty patch):
    (a) spread one row over at least 64 tasks, up to about the CU count (*measured:* 5x to 11x on the router, 36x on the MoE experts, 2x to 2.6x on the delta rule);
    (b) read each byte once with 8- or 16-byte loads, all loads of a step issued before its arithmetic (*measured:* 1.18x to 1.29x on fp8 GEMVs from halving the K steps);
    (c) remove per-element serial chains: lane = position, one cross-lane reduction per tile, all waves working (*measured:* about 40x on attention).
@@ -125,8 +128,9 @@ Speed is the deployed kernel's time over this design's (above 1 = this design is
 | short-context attention slower than native | more, narrower tasks; then stop | 64 tasks | [`decode_attention.md`](references/decode_attention.md) |
 
 - *Measured dead ends that recur:* matrix cores for a one-row GEMV (about 2x slower); more or fewer waves on a
-  latency-bound GEMV; unrolling on top of wider steps (spills); a 512-thread workgroup for a design that needs
-  more than 256 registers (2.4x slower); splitting an op whose work already sits in one or two segments.
+  latency-bound GEMV; unrolling on top of wider steps (values parked in the accumulator file, no gain); a
+  512-thread workgroup for a design that needs more than 256 registers per wave (it spills, 2.4x slower);
+  splitting an op whose work already sits in one or two segments.
 - A test that compares only outputs misses a cache or state write, and a value test misses a release-protocol
   bug. Compare the whole cache or state, and reason about arrival orders separately.
 - Many rounding switches sit below the test tolerance when wrong. A passing test does not prove them.

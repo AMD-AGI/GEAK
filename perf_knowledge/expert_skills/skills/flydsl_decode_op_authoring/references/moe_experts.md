@@ -82,7 +82,7 @@ is no deadlock at any workgroup count and no grid-wide barrier. The price:
 
 ## Resource budget
 
-| weight format | registers measured | plan for |
+| weight format | registers per wave, measured | plan for |
 |---|---|---|
 | 4-bit block-scaled, bf16 activations | 110 to 191 | 200 |
 | fp8 with activation quant (keeps the slice's 128 quantised values in registers) | 312 | 320 |

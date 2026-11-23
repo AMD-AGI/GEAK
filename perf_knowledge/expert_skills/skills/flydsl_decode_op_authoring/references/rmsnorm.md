@@ -57,8 +57,8 @@ None. No LDS, no barrier, no flags. That is the point of the redundant statistic
 
 ## Resource budget
 
-- Registers: at most `32 + 12 x rows`; add `16 + 4 x rows` for an fp8 output, `16 + 4 x rows` for a
-  gated residual, and `8 x rows` more with the next norm.
+- Registers per wave: at most `32 + 12 x rows`; add `16 + 4 x rows` for an fp8 output, `16 + 4 x rows`
+  for a gated residual, and `8 x rows` more with the next norm.
 - Measured: 25 to 67 without those options; 64 for a 3-row gated shape, 48 for a 2-row residual
   boundary, 77 for a 4-row fp32-input norm. The count is not linear in the row count, because the
   unrolled per-row reductions are scheduled together.

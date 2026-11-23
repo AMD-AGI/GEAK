@@ -42,9 +42,9 @@ Three kinds of task; a task waits only for lower indices.
 ### Lane and wave layout
 
 - Column task: wave `r mod waves` takes row `r`. Lane `L` holds stream values `L + 64 i`, that is
-  stream `(L + 64 i) / 16`, column `(L + 64 i) mod 16`. Each lane keeps `2n + n^2 + 1` accumulators (its
-  partial dots with the mixing weight and its share of the sum of squares); an XOR butterfly reduces
-  them over the wave.
+  stream `(L + 64 i) / 16`, column `(L + 64 i) mod 16`. The wave keeps `2n + n^2 + 1` accumulator
+  registers, holding each lane's partial dots with the mixing weight and its share of the sum of
+  squares; an XOR butterfly reduces them over the wave.
 - Owner: **one combination-matrix element per lane** (lane `L < n^2` holds element `(L / n, L mod n)`);
   its row and column sums are gathered from the lanes of its row / column in index order. The
   iterations are a runtime loop with one loop-carried register.
@@ -56,10 +56,10 @@ Three kinds of task; a task waits only for lower indices.
 
 ### Resources
 
-- Registers: about `96 + 6 x (2n + n^2 + 1)`: 246 at `n = 4`, 192 at `n = 3`, 150 at `n = 2`. Measured
-  90 to 244.
+- Registers per wave: about `96 + 6 x (2n + n^2 + 1)`: 246 at `n = 4`, 192 at `n = 3`, 150 at `n = 2`.
+  Measured 90 to 244.
 - LDS: a few hundred bytes (`4 x waves x (2n + n^2 + 2) x rows`).
-- Workspace: about 108 KB at `n = 4`, hidden 4096, one row.
+- Workspace: about 108 KiB at `n = 4`, hidden 4096, one row.
 
 ### Where the time goes, and status
 
@@ -80,7 +80,8 @@ column tasks' partials so that the norm tasks need no second pass over the row.
 
 - Which values the mixing projection reads: the unrounded fp32 new streams or the stored bf16 ones. This
   one is visible in a test (several tolerances); the store rounding mode is visible only when the mixes
-  read the stored streams. Both are parity facts for `native_decode_numerics`.
+  read the stored streams. Both are parity facts: take them from `native_decode_numerics` if it lists
+  this operator, otherwise from the backend source.
 - The Sinkhorn iteration count: off by one is visible unless the iteration has already converged.
 - Any workgroup count gives bit-identical small outputs (the fixed reduction order).
 
@@ -98,6 +99,10 @@ RMSNorm. Per row and value head, with state `S` of shape `[v_dim, k_dim]`:
 The state is updated **in place**. The decay is per head or per key channel. Not covered: multi-token
 verify, prefill, a packed input row, the short convolution in front (it has its own recurrent state and
 needs a different task split; keep it a separate op, as the deployed decode path does).
+
+`native_decode_numerics` has no rows for the gated delta rule. Read its rounding points from the backend
+source: the format the state is stored in, whether the recurrent output is rounded before the norm, the
+form of the decay gate and of the write strength, and which state index marks a padding row.
 
 ### The structural fact that makes it parallel
 
@@ -136,8 +141,9 @@ order), writes all outputs of the head and resets the counter. Nobody waits.
 
 ### Resources
 
-Registers 64 to 96 (four shapes). LDS 16 to 32 bytes with a per-head decay, about 8 KB with per-channel
-decays. Workspace 2.6 to 10 KB. No scratch. The state is never held whole in registers.
+Registers per wave 64 to 96 (four shapes). LDS 16 to 32 bytes with a per-head decay, about 8 KiB (8224
+bytes) with per-channel decays. Workspace 2576 to 10272 bytes. No scratch. The state is never held
+whole in registers.
 
 ### Where the time goes, and status
 

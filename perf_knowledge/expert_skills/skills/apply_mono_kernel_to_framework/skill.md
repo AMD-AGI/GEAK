@@ -12,9 +12,6 @@ match:
   regimes: [decode, graph]
   from_backend: ""
   to_backend: ""
-  profile_signature:
-    op_name_regex: "mono|monokernel|specialized_decode"
-    min_pct_gpu: 10.0
 expects:
   e2e_delta_min_pct: 1.0
   parity: required
@@ -51,7 +48,7 @@ its numerics is kernel-lane work (`mono_kernel_authoring`, `mono_kernel_optimize
 ### Quick card: routing role (first ten minutes)
 1. Run the test above, then read the kernel's contract: layer kinds and layer indices covered, decode widths,
    TP size, device, weight formats as loaded, refusal list, launches per layer, extra memory per rank.
-2. Estimate the share of the workload's decode steps that are pure decode at a covered width. That share times
+2. Estimate the share of the workload's decode steps that the kernel covers (step kind and rows). That share times
    the share of layer time replaced bounds the delta; if it is small, say so instead of scheduling a long A/B.
 3. Plan ONE candidate (`source: expert_skill:apply_mono_kernel_to_framework (advisory)`), switch-gated, baseline =
    the identical server with the switch off, engagement check = *launches grow on every rank, 0 with the switch off*.
@@ -92,14 +89,16 @@ main on 2026-11-23, an `sgl-amd-mono`-style plugin behind `--enable-amd-monokern
 3. **Touch only the covered layers.** Use the commit's hook (current vLLM: the layer loop asks the step for a
    kernel per layer index, stock modules stay; current SGLang: the plugin's forward replaces the model's for
    covered steps). Without one, replace only the table's instances, never the layer class: other kinds share it.
-4. **Route per step.** Pure decode with a row count in the kernel's widths takes the kernel. Prefill, mixed
-   batches, speculative verify, other widths and piecewise-graph steps take the native path, counted by reason.
+4. **Route per step,** by step kind and rows (rows = requests × tokens per request of the step). Pure decode at
+   a row count in the kernel's widths takes the kernel; a verify step only if the kernel's oracle and width list
+   cover it. Prefill, mixed batches, other widths and piecewise-graph steps take the native path, counted by reason.
 5. **Refuse explicitly, in three stages:** configuration before load; model after load (formats, shapes, dtypes
    as actually loaded); cache at every KV-cache bind (layout, block size, KV dtype, slot-mapping form). Each stage
    lists every reason at once and reaches the same verdict on every rank; never a silent fallback. HOW it is
    expressed follows the framework at your commit: for an explicit opt-in flag, current vLLM (`KernelConfig.monokernel`
    in `vllm/config/kernel.py`, `MonoDecodeLayer._create`) and SGLang (`handle_monokernel` in `binding.py`) fail at
    startup with an error, in the newer code one error listing every unsupported setting. An ineligible step is not an error (step 4).
+   Exception: SGLang's binding at that commit has no per-bind stage, so state KV-layout conditions in the spec's `requires`.
 6. **Build at load, before KV sizing and outside any graph capture:** JIT every width, allocate the peer
    buffers, the control region and any second weight copy, and create the cross-rank peer group over the TP group.
 7. **Count and log.** Per rank: launches (read from the control region at log intervals, never per step) and
@@ -111,13 +110,15 @@ main on 2026-11-23, an `sgl-amd-mono`-style plugin behind `--enable-amd-monokern
    three.** (a) *Off is stock*: switch-off tokens identical to the unpatched server's, launches 0 on every rank.
    (b) *Greedy match*, on against off, per prompt: at the first divergence record the step and the top-5 logits
    of both sides; it is a **tie**, reported as a tie and not a failure, only when the top-2 logits are within the
-   bound the kernel's oracle derived. The tie rule applies to (b) only and the bound is never widened.
-   (c) *Effect*: launches grow on every rank by eligible decode steps × replaced instances × the kernel's
-   launches per layer; skips occur only for routed-away steps (prefill, mixed batch, speculative verify, a width
-   outside the list, piecewise-graph step); 0 launches with the switch on fails even if outputs match.
-   **Not pass conditions of the smoke:** the optional accuracy run (full benchmark, on and off, paired; report
-   both scores and the paired difference) and speed (single-concurrency width-1 time per output token and
-   throughput, recorded only). Detail: [smoke_and_acceptance.md](references/smoke_and_acceptance.md).
+   bound the kernel's oracle derived. The tie rule applies to (b) only and the bound is never widened. A tie is
+   a smoke classification only: the e2e gate counts any divergence from the unpatched baseline as a real output
+   change, so once any prompt diverged the paired accuracy run is required before acceptance.
+   (c) *Effect*: launches grow on every rank by eligible steps × replaced instances × the kernel's launches per
+   layer; skips occur only for routed-away steps (prefill, mixed batch, a verify step or width the kernel does
+   not cover, piecewise-graph step); 0 launches with the switch on fails even if outputs match.
+   **Not pass conditions of the smoke:** the accuracy run (full benchmark, on and off, paired; report both scores
+   and the paired difference; optional for the smoke) and speed (single-concurrency width-1 time per output token
+   and throughput, recorded only). Detail: [smoke_and_acceptance.md](references/smoke_and_acceptance.md).
 10. **Timed A/B** under the e2e workflow's own protocol, on versus off. Report what was replaced, refused or routed away, the counters, and how to reproduce.
 11. **Partial delivery.** One patch per model; only kinds that pass enter its table. If the smoke fails, bisect
     by kind, drop the offending kind and rerun the whole smoke; if nothing passes, deliver nothing and say so.
@@ -154,7 +155,7 @@ main on 2026-11-23, an `sgl-amd-mono`-style plugin behind `--enable-amd-monokern
 - **Switch off must be inert:** token-identical to the unpatched server, launch counter 0 on every rank.
 - **Refuse explicitly, never fall back silently:** every reason at once, the same verdict on every rank,
   expressed as the framework does at your commit (current vLLM and SGLang: one startup error for an opt-in flag).
-- **Pure decode at the kernel's widths only.** Every other step stays on the native path.
+- **Only the steps the kernel's oracle covers:** pure decode at its widths, verify steps only if covered. Every other step stays native.
 - **Never emit the token of a failed step.** Abort with the decoded cause.
 - Do not edit the kernel, widen a tolerance, lower the candidate leg's memory fraction or edit the installed
   package to obtain a pass. No number from a run whose effect proof failed; an accuracy run is never speed evidence.
@@ -162,8 +163,7 @@ main on 2026-11-23, an `sgl-amd-mono`-style plugin behind `--enable-amd-monokern
 ## Sources
 - Upstream, public, read at the snapshots named. vLLM: [RFC 60904](https://github.com/vllm-project/vllm/issues/60904), pull requests
   [61311](https://github.com/vllm-project/vllm/pull/61311), [62256](https://github.com/vllm-project/vllm/pull/62256), [63486](https://github.com/vllm-project/vllm/pull/63486), [60397](https://github.com/vllm-project/vllm/pull/60397), [61082](https://github.com/vllm-project/vllm/pull/61082), [61662](https://github.com/vllm-project/vllm/pull/61662); source at commit [`f09d5e30c`](https://github.com/vllm-project/vllm/commit/f09d5e30c35862c19a17dd1706147d29d1f7c4f4).
-  SGLang: [RFC 43949](https://github.com/sgl-project/sglang/issues/43949), pull requests [44353](https://github.com/sgl-project/sglang/pull/44353), [45389](https://github.com/sgl-project/sglang/pull/45389); source at main [`38ae3402`](https://github.com/sgl-project/sglang/commit/38ae340221b4b65859c68e85d9e8ffb6b9c6f167) on 2026-11-23;
-  the plugin [sgl-amd-mono](https://github.com/sgl-project/sgl-amd-mono). File and symbol citations are in the two framework references.
+  SGLang: [RFC 43949](https://github.com/sgl-project/sglang/issues/43949), pull requests [44353](https://github.com/sgl-project/sglang/pull/44353), [45389](https://github.com/sgl-project/sglang/pull/45389); source at main [`38ae3402`](https://github.com/sgl-project/sglang/commit/38ae340221b4b65859c68e85d9e8ffb6b9c6f167) on 2026-11-23; the plugin [sgl-amd-mono](https://github.com/sgl-project/sgl-amd-mono). File and symbol citations are in the two framework references.
 - This repository: [e2e_integrator.md](../../../../e2e_workflow/roles/e2e_integrator.md) (gate, overlay, capture safety),
   [system_architect.md](../../../../e2e_workflow/roles/system_architect.md) (`engagement_check`), [e2e_optimization.md](../../../../e2e_workflow/knowledge/e2e_optimization.md).
 - Origin: an internal mono-kernel generation workflow (not public): its framework delivery guides, integration role,

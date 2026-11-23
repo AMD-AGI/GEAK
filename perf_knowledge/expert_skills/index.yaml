@@ -70,9 +70,6 @@ skills:
     - graph
     from_backend: ''
     to_backend: ''
-    profile_signature:
-      op_name_regex: mono|monokernel|specialized_decode
-      min_pct_gpu: 10.0
   expects:
     e2e_delta_min_pct: 1.0
     parity: required

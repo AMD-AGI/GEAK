@@ -78,9 +78,9 @@ read after the launch, so this does not show there.
 
 ## Resource budget
 
-- Registers: 22 to 43 without the norm (rope-only on a packed row 22 to 33; with the cache write 32 to
-  43); 28 to 67 with the per-head norm; 49 for the reciprocal-multiply fp8 write. Plan for 48, or 80
-  with the norm.
+- Registers per wave: 22 to 43 without the norm (rope-only on a packed row 22 to 33; with the cache
+  write 32 to 43); 28 to 67 with the per-head norm; 49 for the reciprocal-multiply fp8 write. Plan for
+  48, or 80 with the norm.
 - LDS 0, scratch 0.
 
 ## Where the time goes

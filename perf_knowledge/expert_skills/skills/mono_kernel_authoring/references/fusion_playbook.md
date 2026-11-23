@@ -24,7 +24,9 @@ The rows differ in tooling version, stage count (seven or eight), authoring mode
 
 - Work in a copy of the task under version control. Edit only `kernel_src/`. Everything else stays byte-identical
   to the task; scratch scripts and logs live outside the copy. Commit every milestone; a fix continues from the
-  last commit. If the harness looks wrong, stop and report it. Do not work around it.
+  last commit. If the harness looks wrong, stop and report it. Do not work around it. An empty `kernel_src/` and
+  a missing COMMANDMENT file at the start of a lane's author mode are normal, not a harness fault: take the stub
+  adapter and the vendored runtime from the task directory's own `kernel_src/`.
 - Products in `kernel_src/`: the adapter; the layer kernel (one kernel function and a builder that returns one
   launcher per decode width, with a launcher name unique per configuration); one file per stage with its
   device function and a thin standalone launcher; the synchronization runtime, unmodified.
@@ -67,7 +69,8 @@ The rows differ in tooling version, stage count (seven or eight), authoring mode
 - Resources come before speed: a seed that fails resources or the static rules is not a seed.
 - An intermediate with one launch per stage is allowed while getting the numbers right. Only the one-launch
   kernel is accepted.
-- Speed is not a pass criterion here. A correct seed slower than native is a valid result.
+- Speed is not a pass criterion here. A correct seed slower than native is a valid result. Inside a lane's author
+  mode stop at "resources": the seed milestone belongs to the optimize rounds (skill `mono_kernel_optimize`).
 
 ### 3.3 The probe build
 
@@ -134,7 +137,8 @@ with the contract: fix the contract, do not guess.
 4. Every width is a compile-time constant of its own build.
 5. Data that crosses blocks or GPUs goes through the synchronization runtime only; every wait has a deadline.
 6. Weights are read in place. A one-time repacked copy is allowed only if it is created at the first call,
-   keyed by the weight's address, and its bytes are reported.
+   keyed by the weight's address, and its bytes are reported. (A framework integration builds it at load time
+   instead, before the KV cache is sized: skill `apply_mono_kernel_to_framework`.)
 7. No framework code on the candidate side, and the emptied device function must fail the stage test.
 
 Read the native kernels of the stage first: data layout, the split over threads, waves and blocks, the vector

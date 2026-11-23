@@ -21,7 +21,7 @@ General FlyDSL authoring is covered by the public cards and is not repeated here
 | offsets past 4 GiB (a large KV cache, a big request-to-token table) | a raw-pointer load (`llvm.LoadOp` on an `inttoptr` address) with the offset formed in 64 bits: buffer offsets are 32 bits |
 | a wave-uniform value kept scalar | `rocdl.readfirstlane` (both halves of a 64-bit value): keeps buffer descriptors scalar, no waterfall loops |
 | issue every load of a step before the math | collect the loads in a list, `rocdl.sched_barrier(0)`, then the arithmetic in the same order |
-| stop LLVM from moving FMAs into the next round, or spilling an accumulator | an opaque register move (`v_mov_b32` through `llvm.inline_asm`) on the accumulator |
+| stop LLVM from moving FMAs into the next round, or spilling to scratch | an opaque register move (`v_mov_b32` through `llvm.inline_asm`) on the accumulator |
 | wave reductions | DPP (`update_dpp_i32`) for xor distances 1 to 8, a shuffle (`shuffle_xor`, `ds_bpermute`) for 16 and 32 |
 | matrix cores | `rocdl.mfma_f32_16x16x32_fp8_fp8` (a lane holds 8 FNUZ bytes as one i64), `rocdl.mfma_f32_16x16x16bf16_1k` |
 | fp8 / bf16 conversion | `rocdl.cvt_pk_fp8_f32` (it does **not** saturate: clamp first), `cvt_pk_f32_fp8`, `perm_b32` for exact bf16 pairs |
@@ -37,11 +37,14 @@ Hardware constants are from the public cards: [architecture](../../../../hardwar
 [memory hierarchy](../../../../hardware/cdna3_mi300/memory_hierarchy.md).
 
 - **304 CUs**, 64 lanes per wave, 4 SIMDs per CU. One decode row has to be spread over tasks to use them.
-- **Registers.** A SIMD has 512 vector registers shared by its resident waves. A workgroup of **512
-  threads** is 8 waves, two per SIMD, so each wave gets **at most 256**. At 256 threads or fewer (one
-  wave per SIMD) a kernel may report up to 512, but everything past 256 lives in the accumulator file
-  and is reached through register moves. The counts quoted in the per-op references are the ISA's
-  next-free-register figure, which includes those accumulator registers.
+- **Registers, always counted per wave.** A SIMD has 512 vector registers shared by its resident waves.
+  A workgroup of **512 threads** is 8 waves, two per SIMD, so each wave gets **at most 256**. At 256
+  threads or fewer (one wave per SIMD) a kernel may report up to 512, but everything past 256 lives in
+  the accumulator file and is reached through register moves. The counts quoted in the per-op
+  references are the ISA's next-free-register figure, which includes those accumulator registers.
+- **Spill means non-zero scratch in the ISA, nothing else.** Values parked in the accumulator file are
+  not a spill and do not show up as scratch, but each move costs an issue slot; the register-allocation
+  gate of the public optimization card counts those moves for that reason.
 - **LDS: 64 KiB per workgroup.** A design that uses more than half of it runs one workgroup per CU.
 - **L2 is per XCD.** A plain load in one workgroup can miss a store made by a workgroup on another
   XCD in the same launch. Cross-workgroup data needs coherent accesses (below).
@@ -50,16 +53,16 @@ Hardware constants are from the public cards: [architecture](../../../../hardwar
 
 Measured register counts, for orientation (256-thread workgroups unless noted):
 
-| operator | registers | LDS |
+| operator | registers per wave | LDS |
 |---|---|---|
 | GEMV / linear | 77 to 112 (up to 256 with 16-element steps and an activation epilogue) | 0 |
 | RMSNorm | 25 to 77 | 0 |
 | RoPE / KV write | 22 to 67 | 0 |
-| decode attention | 172 to 339; 114 to 237 in the 512-thread form | 1 to 33 KB |
-| MLA decode | 262 to 376; 254 in the one path that fits 512 threads | about 35 to 52 KB |
-| MoE experts | 110 to 191 (4-bit weights), 312 (fp8 with activation quant), 166 (bf16) | 2 x hidden + small |
-| router top-k | 70 to 178 (one shape 272) | 2 x hidden + small |
-| sparse indexer | 109 to 208 | about 41 KB |
+| decode attention | 172 to 339; 114 to 237 in the 512-thread form | about 1 to 32 KiB |
+| MLA decode | 262 to 376; 254 in the one path that fits 512 threads | about 35 to 51 KiB |
+| MoE experts | 110 to 191 (4-bit weights), 312 (fp8 with activation quant), 166 (bf16) | `2 x hidden` bytes + small |
+| router top-k | 70 to 178 (one shape 272) | `2 x hidden` bytes + small |
+| sparse indexer | 109 to 208 | about 40 KiB |
 
 ## Compiler pitfalls seen
 
@@ -71,9 +74,10 @@ Measured register counts, for orientation (256-thread workgroups unless noted):
    rows needed 466 registers at 3 rows; with the rows as runtime loops the same shape needs 244 and the
    count no longer grows with the width. Small operators (norm, RoPE, delta rule) unroll rows without
    trouble; check the count at the largest width, not at width 1.
-3. **Unrolling a K step on top of a wider step spills.** In the GEMV, unrolling with hoisted loads
-   helped the 8-element step by about 14 %, but combined with the 16-element step it spilled into the
-   accumulator file and lost.
+3. **Unrolling a K step on top of a wider step overflows into the accumulator file.** In the GEMV,
+   unrolling with hoisted loads helped the 8-element step by about 14 %, but combined with the
+   16-element step the wave ran out of its 256 architected registers, parked values in the accumulator
+   file (no scratch, so not a spill) and gave no gain.
 4. **Global-to-LDS copies can serialise a step.** Without alias information LLVM may insert a wait for
    all outstanding vector-memory operations before the next LDS read. Read the ISA before relying on a
    direct global-to-LDS load to overlap with anything.

@@ -78,10 +78,10 @@ around each histogram and scan pass.
 
 ## Resource budget
 
-- Registers at 256 threads: 109 to 208 over the five shapes, no scratch. Plan for
+- Registers per wave at 256 threads: 109 to 208 over the five shapes, no scratch. Plan for
   `192 + 16-head blocks x (2 matrix-core steps + 8)`.
-- LDS about 41 KB: the 8 KB histogram, the scans, the folded key, and 32 KB for the keys of a selection
-  staged in LDS. One workgroup per CU.
+- LDS about 40 KiB (41008 bytes, 41152 with a fold): the 8 KiB histogram, the scans, the folded key, and
+  32 KiB for the keys of a selection staged in LDS. One workgroup per CU.
 - Workspace: one 32-bit key per candidate per selection, one 64-bit flag per score / filter task, plus
   the filter lists; about 0.8 MB at a 131k maximum length and one row.
 

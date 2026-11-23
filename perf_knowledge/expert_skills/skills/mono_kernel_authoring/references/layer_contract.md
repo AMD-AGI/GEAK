@@ -54,7 +54,9 @@ you do have, at the composed bound. *(Adaptation for a lane task; not exercised.
    check them. Never record "writes nothing" for a stage that writes.
 6. A module the layer calls several times per step is checked once per call. A boundary that never runs (a norm
    folded into a fused op) has no stage of its own.
-7. When a stage cannot be authored, split it at an internal boundary. The parts keep the old stage's external port
+7. When a stage cannot be authored, split it at an internal boundary. Mark the old stage as replaced by the new
+   parts, which take its place in layer order. **Check the references of the new parts, then build and test only
+   those parts; every other stage and its test stays as it is.** The parts keep the old stage's external port
    names; a tensor passed between parts has the same name on both sides. **Under a layout a port is either handed
    off or a layer output, never both (one buffer per port): never split at a layer output of the old stage that a
    later part also reads.**
@@ -148,6 +150,9 @@ MLP's derived bound was about 16× its measured error.)*
   factor, more corrupted entries). Never swap it for another bug, delete it, or edit the checks it names. If no
   larger magnitude is meaningful, the contract fails; return the numbers.
 - The multipliers 4 and 3 are fixed. Never change them to make a layer pass.
+- **Inside a kernel lane the oracle is frozen**: its tolerance and its controls are immutable files. Compute
+  `layer_tol` there as a self-check only. If it differs from the oracle's tolerance, or a control would not fail
+  at `3 × layer_tol`, report it. Re-running or strengthening controls belongs to whoever freezes the oracle.
 
 *(Measured on three layer kinds in one run: about 6×, 7× and 16× the oracle's first-guess tolerance, the last
 capped by the derived envelope; reruns under the revised metric gave about 4× to 6×. A reference that differed

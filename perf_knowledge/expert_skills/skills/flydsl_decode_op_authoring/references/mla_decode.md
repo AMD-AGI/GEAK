@@ -90,14 +90,14 @@ wait is bounded and traps. Inside a task: one workgroup barrier per round.
 
 ## Resource budget
 
-- **LDS about 35 to 52 KB**, so one workgroup per CU. A tile of 64 positions with a bf16 cache does not
-  fit and is refused.
-- Registers at 256 threads, by operand path: a bf16 cache read as stored 262; a converted cache 361 to
-  376. In the 512-thread form only the converted single-part path fits (254); the other two were
+- **LDS about 35 to 51 KiB** (35392 to 52352 bytes), so one workgroup per CU. A tile of 64 positions
+  with a bf16 cache does not fit and is refused.
+- Registers per wave at 256 threads, by operand path: a bf16 cache read as stored 262; a converted cache
+  361 to 376. In the 512-thread form only the converted single-part path fits (254); the other two were
   measured to spill there and are refused.
 - An index list adds about 10 registers. One shape with a 256-wide value dim reports 506: the one-row
-  finish prefetches 256 words of `W_UV` per lane, which runs past 256 into the accumulator file, with no
-  scratch.
+  finish prefetches 256 words of `W_UV`, one register of the wave each, which runs past 256 into the
+  accumulator file. That is not a spill (no scratch), but those registers are reached through moves.
 - Width and context do not enter the register count (rows, rounds, chunks and `W_UV` groups are loops).
 - Workspace: about 4.3 MB at 16 heads, 128 chunks and one row.
 

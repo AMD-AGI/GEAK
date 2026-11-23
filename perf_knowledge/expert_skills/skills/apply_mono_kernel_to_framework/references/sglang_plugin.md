@@ -42,8 +42,8 @@ examples. Read it from the source you run.
   padded rows included, and is capturable in a CUDA graph: no host sync, shapes fixed by the plan's key.
 - **Selection.** By graph key alone (`ShapeKey`: forward mode, batch size, tokens per request; rows = batch size
   × tokens per request). "Every rank holds it alike", and a captured graph replays the decision made at capture.
-  The forward mode is `decode` or `target_verify`. This skill delivers pure decode only; a verify step needs a
-  kernel whose oracle covered verify steps and a spec that accepts speculative decoding.
+  The forward mode is `decode` or `target_verify`. A verify step is routed only for a kernel whose oracle and
+  width list cover verify steps and whose spec accepts speculative decoding; otherwise it stays native.
 - **Capture sizes.** At startup the binding aligns the decode capture batch sizes with the spec's widths unless
   they were set explicitly (`covered_capture_sizes`). After capture it checks the captured graphs themselves,
   logs which steps run the kernels, and refuses a runner none of whose captured decode graphs does
@@ -78,8 +78,9 @@ help text: "An unsupported startup configuration raises an error listing the rea
 - **After capture:** `_CaptureCheck`, above.
 - **Not an error:** a step outside the served keys runs the model's own forward, and a draft model with no
   registered spec keeps its normal forward with an info line.
-- The binding has no separate per-bind cache stage at that commit: KV-layout conditions belong in `requires`
-  and `model_disable_reasons`.
+- **No per-bind stage.** The binding has no separate cache-bind stage at that commit, and it builds the spec
+  before the KV cache is sized. State KV-layout conditions through `requires` (server arguments, the decode
+  attention backend); this is the one place where the three-stage rule of the skill does not map onto SGLang.
 
 ### `SGLANG_READS`
 A convention of the plugin, not a field of SGLang's contract: every module of `sgl-amd-mono` that reads SGLang

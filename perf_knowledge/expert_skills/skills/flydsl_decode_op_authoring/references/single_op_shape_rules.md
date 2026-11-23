@@ -135,10 +135,10 @@ Observed in an internal mono-kernel generation workflow (not public); each cost 
 
 | failure | how it showed | what to do |
 |---|---|---|
-| the test did not test the edited kernel | another copy of the candidate (the native op, or a stub) was picked up, so the result was always PASS or always an error | run the oracle exactly as the lane's COMMANDMENT file says, and confirm once that breaking your kernel makes it fail |
+| the test did not test the edited kernel | another copy of the candidate (the native op, or a stub) was picked up, so the result was always PASS or always an error | run the oracle with the correctness command of your role file (author) or exactly as the lane's COMMANDMENT file says once it exists (optimize rounds), and confirm once that breaking your kernel makes it fail |
 | the candidate called the framework op | PASS with a speedup of about 1 | rule 7 |
 | a refinement round handed back byte-identical code | a full round spent re-measuring the same kernel | diff against the previous attempt before submitting |
-| resources not checked before handing in | a kernel rejected twice for a small register spill | read the ISA (registers, scratch, LDS) before every hand-in |
+| resources not checked before handing in | a kernel rejected twice for a small spill (non-zero scratch in the ISA) | read the ISA (registers per wave, scratch, LDS) before every hand-in |
 | a busy or contended GPU read as a wrong kernel | timeouts on a lock or an IPC handle counted as a failed attempt | treat "no verdict" as no verdict; hold every GPU of a multi-rank task in one lease for the whole command |
 | a profiler run that never returned | a hung profile, in one case with an unbounded log | bound the profile's run time and output size |
 | a correct seed with no optimize round | the lane only measured the slow seed | ask for at least one optimize round on the operator that dominates |

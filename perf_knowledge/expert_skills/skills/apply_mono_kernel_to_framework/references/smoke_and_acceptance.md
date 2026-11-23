@@ -41,7 +41,7 @@ few hundred generated tokens each, temperature 0.
 | Off is stock | Switch-off tokens are identical to the unpatched server's, prompt by prompt, and `launches` is 0 on every rank | yes |
 | Greedy match | Switch-on tokens against switch-off tokens, prompt by prompt; a divergence passes only as a tie (section 4) | yes |
 | Effect | Section 3 | yes |
-| Accuracy | Section 5 | optional; reported, not part of the smoke's pass rule; recommended before a release |
+| Accuracy | Section 5 | optional for the smoke (reported, not in its pass rule); required by the e2e gate once any prompt diverged |
 | Speed | Section 6 | recorded only, not a pass condition of the smoke |
 
 The smoke passes only when the three required checks hold. If no serving smoke was run, report `skipped`,
@@ -69,8 +69,9 @@ The effect proof holds when all of these are true:
    kernel's launches per layer. Take that last factor from the kernel's own contract: a kernel designed for
    one launch per layer has 1, but a deployed kernel may legitimately use two (the public plugin documents one
    or two launches per layer, and specs that cover several layers in one launch).
-3. Skips appear only under the expected reasons: prefill, a mixed batch, speculative verify, a width outside
-   the list, a piecewise-graph step. A skipped pure-decode step at a covered width fails the check.
+3. Skips appear only under the expected reasons: prefill, a mixed batch, a verify step the kernel does not
+   cover, a width outside the list, a piecewise-graph step. A skipped step of a kind and width the kernel
+   covers fails the check. Rows, and so widths, are requests × tokens per request of the step.
 4. With the switch off, `launches` stays 0 on every rank.
 
 A server that is healthy and matches greedy output with `launches` at 0 has routed every step away. That is a
@@ -86,13 +87,18 @@ failed effect proof, and no speed number from that run may be reported.
   differ in the last place now and then. The native path itself forks at near-ties between batch sizes and
   between eager and graph mode. Compare the kernel's agreement with native against native's agreement with
   itself, and never widen the bound to turn a divergence into a tie.
-- Parity is judged against the unpatched server, not only against the previous leg, as the e2e gate requires
-  ([e2e_integrator.md](../../../../../e2e_workflow/roles/e2e_integrator.md)).
+- **A tie is a smoke classification, not an acceptance.** The e2e gate judges parity against the unpatched
+  server ([e2e_integrator.md](../../../../../e2e_workflow/roles/e2e_integrator.md), gate 4) and treats a
+  candidate that diverges on any prompt from a deterministic baseline as a real output change: it rejects a
+  non-quantized change outright and accepts a quantized kernel only after a task-accuracy gate. So once any
+  prompt diverged, tie or not, the paired accuracy run of section 5 is required before acceptance, and the
+  accept is reported with `parity_kind` `accuracy`, never `byte_exact`.
 
 ## 5. Accuracy check: a correctness gate, not speed evidence
-Optional, and not part of the smoke's pass rule. Run the full accuracy benchmark with the switch on and with
-it off, paired on the same items, and report both scores and the paired difference. It answers one question
-only: did near-tie forks change task quality? The e2e gate decides what difference it accepts.
+Optional for the smoke and not part of its pass rule; required by the e2e gate as soon as any prompt diverged
+from the unpatched baseline (section 4). Run the full accuracy benchmark with the switch on and with it off,
+paired on the same items, and report both scores and the paired difference. It answers one question only: did
+near-tie forks change task quality? The e2e gate decides what difference it accepts.
 Its wall-clock is not a speed result: it runs at its own concurrency, which need not be the one you serve at.
 
 ## 6. Speed, and reconciling it with the layer speedup
@@ -129,14 +135,14 @@ kernel's owner cannot show the properties below, check them before replacing man
 | Memory ledger | Per rank, width and instance count: weight copies, peer buffers, control region, scratch. Nothing allocated per call except outputs, and weight copies allocated before KV sizing |
 
 ## 10. Measured evidence (hand-driven integrations, not this procedure)
-All figures are ratios against the fastest native configuration of the same server, MiMo-V2.6-Flash in vLLM,
-TP4 on gfx942. They show what a delivered whole-layer kernel can be worth and where the effect comes from.
+MiMo-V2.6-Flash in vLLM, TP4 on gfx942. Each figure is a ratio against that integration's own fastest native
+baseline. The baselines differ, so compare within a row, never the HIP rows with the FlyDSL row.
 
 | Integration | Result | Caveat |
 |---|---|---|
 | Two independent HIP kernels | Concurrency-1 P90 inter-token latency better by 3.05× and 3.73×; accuracy not significantly different | Independently reviewed |
 | The same two, one-row steps only | About 1.4–1.5×; the largest single step in both was taking multi-row decode steps into the kernel | Read the skip counters before polishing width 1 |
-| One FlyDSL kernel | Concurrency-1 P90 inter-token latency better by 2.25×, output throughput +27%; accuracy scores 0.3 points apart, not significant (paired p = 0.34) | Not independently reviewed. At concurrency 8 the accuracy run took about 1.4× as long with the kernel on, and latency at concurrency 2 to 16 was not measured |
+| One FlyDSL kernel | Concurrency-1 P90 inter-token latency better by 2.25×, output throughput +27%; accuracy scores 0.3 points apart, not significant (paired p = 0.34) | Its baseline is the fastest native configuration **with multi-token prediction on**, which the HIP rows' baseline did not have, so this ratio must not be compared with theirs. Not independently reviewed. At concurrency 8 the accuracy run took about 1.4× as long with the kernel on, and latency at concurrency 2 to 16 was not measured |
 
 ## 11. What the report must contain
 Image, framework commit, the patch, the exact server command of each leg, the commands for the smoke and for

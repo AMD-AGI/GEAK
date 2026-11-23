@@ -52,7 +52,7 @@ group on a subset of those blocks) was designed only.
 
 Every block runs every stage in contract order. **Default for decode layers.**
 
-- Fixed: one group on all waves; 256 threads per block (one wave per SIMD, so 512 VGPRs per lane); every stage
+- Fixed: one group on all waves; 256 threads per block (one wave per SIMD, so 512 VGPRs per wave); every stage
   on all blocks, unless a stage is too small to feed them all (then a count or a share; the idle blocks move on
   to the next stage and wait there).
 - Free: blocks (start at the CU count; fewer only if calibration shows the tail stage idling); hand-off unit
@@ -71,7 +71,7 @@ Task `i` of a stage runs on block `(base + i) mod n_blocks`, then on every `n_bl
 its tasks stage by stage in contract order and waits only on earlier stages, so the resident grid cannot
 deadlock. Bases are chosen so that stages that can overlap run on different CUs.
 
-- Fixed: one group on all waves and all blocks; 512 threads per block (8 waves, so 256 VGPRs per lane); a task
+- Fixed: one group on all waves and all blocks; 512 threads per block (8 waves, so 256 VGPRs per wave); a task
   count per stage (an integer, or an expression over the row count using `+ - * //`, at least 1 at every width)
   and a base block; a mailbox-free in-block hand-off (designed only) only between stages with the same task table.
 - Free: task count (a task per tile of the first output; a task per row for norms; GEMV: output rows ÷ MFMA tile
@@ -95,11 +95,11 @@ loads (QKV, attention, gate/up), group B runs the short dependent stages (norms,
 down projection, all-reduce).
 
 - Fixed: exactly two groups with disjoint wave lists (draft: waves 0–3 and 4–7); 512 threads per block; two waves per
-  SIMD, so the per-lane VGPR cap is 256; LDS per block = largest A stage + largest B stage ≤ 64 KiB (start at
+  SIMD, so the per-wave VGPR cap is 256; LDS per block = largest A stage + largest B stage ≤ 64 KiB (start at
   32 KiB each); hand-offs between A and B still go through mailboxes.
 - Free: which stage is in which group; LDS split between the groups; hand-off unit.
 - Use when one long stage (attention over long contexts, MoE expert streaming) stalls the stages behind it and
-  they could overlap. It halves the registers per lane: spills start at the 256 cap, and a stage that needs
+  they could overlap. It halves the registers per wave: spills start at the 256 cap, and a stage that needs
   more belongs in `staged_all_ctas`.
 - Status: **designed only.** It passes the static rules, but the internal tooling could not assemble it (two
   wave groups in one block need named barriers) and it never ran. Choose it only if you can verify it yourself.
@@ -112,6 +112,12 @@ First match wins *(a draft heuristic of the internal flow; its thresholds were n
 2. A long producer exists (attention core or MoE) **and** register headroom is known (every stage has a register
    estimate, none above half of that layout's per-wave cap) → `wave_split`. Never exercised.
 3. Otherwise → `staged_all_ctas`.
+
+Unresolved conflict in rule 1. The internal selector took every stage of the contract, small ones included, and
+counted a stage's tasks as the task count of its tested op code where it had one, otherwise as the element count
+of its first output. With the task counts section 3.2 suggests (one task per row for a norm, hundreds for a GEMV)
+the ratio reaches 8 for almost any decoder layer, and the declared default would never be chosen. The sources do
+not settle this. When in doubt, take `staged_all_ctas`: it was the internal flow's fallback.
 
 If the register need is unknown, do not pick `wave_split`. If the compiled kernel later fails the register check,
 fall back to `staged_all_ctas`. A deviation needs a written reason that cites a structural fact or a measurement.

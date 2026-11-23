@@ -64,11 +64,12 @@ at 1, 7 and 64 workgroups over 20 repeats). No atomic float add is used.
 
 ## Resource budget
 
-- Registers: an upper envelope of `72 + 4 x rows x columns_per_wave` (doubled with an epilogue).
-  Measured 77 to 112 at 256 threads without an epilogue; the activation quant and the bias cost more
-  than the accumulators, so treat the formula as a ceiling, not a model.
-- 16-element lane steps add about 16 per (column x row): measured 108 at 4 columns, 256 with an
-  epilogue, which is the cap of a 512-thread workgroup.
+- Registers per wave: an upper envelope of `72 + 4 x rows x columns`, where `columns` is the number of
+  output columns the wave owns (the last term doubled with an epilogue). Measured 77 to 112 at 256
+  threads without an epilogue; the activation quant and the bias cost more than the accumulators, so
+  treat the formula as a ceiling, not a model.
+- 16-element lane steps add about 16 registers per (column x row): measured 108 at 4 columns, 256 with
+  an epilogue, which is the per-wave cap of a 512-thread workgroup.
 - LDS 0, scratch 0.
 
 ## Where the time goes
@@ -97,7 +98,7 @@ order them and not good enough to skip measuring.
 |---|---|---|
 | more waves per workgroup (512 or 1024 threads) | slower | consistent with the bound being the dependent round trip per K step, which more waves do not shorten; not isolated further |
 | fewer waves (64 or 128 threads) | slower | result recorded only; 256 threads was the best of the five sizes tried |
-| unrolling the K step with the loads hoisted | about 14 % better for 8-element steps, but 16-element steps alone are better, and both together spill into the accumulator file | register pressure |
+| unrolling the K step with the loads hoisted | about 14 % better for 8-element steps, but 16-element steps alone are better, and both together gave no gain | register pressure: the wave runs past its 256 architected registers and parks values in the accumulator file (no scratch, so not a spill, but each move costs an issue slot) |
 | K split on shapes with tiles close to the CU count | slower | two tasks per workgroup, plus the merge |
 | matrix cores at 1 to 4 rows | not adopted | weight-read bound; needs a preshuffled weight |
 
