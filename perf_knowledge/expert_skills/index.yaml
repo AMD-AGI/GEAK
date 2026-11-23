@@ -537,6 +537,44 @@ skills:
   constraint_validation_status: ''
   auto_apply: false
   explicit_pin_modes: []
+- id: mono_kernel_authoring
+  file: skills/mono_kernel_authoring/skill.md
+  scope: kernel
+  revision: ''
+  playbook_file: skills/mono_kernel_authoring/skill.md
+  planner_extension_file: ''
+  contract_file: ''
+  validation_file: skills/mono_kernel_authoring/skill.md
+  validation_schema: ''
+  runtime_validation_file: ''
+  embedded_components: []
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    dtypes:
+    - bf16
+    - fp8_e4m3_fnuz
+    - mxfp4
+    regimes:
+    - decode
+    - graph
+    from_backend: ''
+    to_backend: flydsl
+    config:
+      kernel_class: decoder_layer_monokernel
+      ranks: multi
+      entry: author
+  expects:
+    isolated_speedup_min: 1.0
+    parity: required
+  validation_status: draft
+  reference_evidence_status: ''
+  constraint_validation_status: ''
+  auto_apply: false
+  explicit_pin_modes: []
 - id: mono_kernel_optimize
   file: skills/mono_kernel_optimize/skill.md
   scope: kernel
