@@ -81,8 +81,9 @@ Two kernel lanes each authored a FlyDSL
 fused add + RMSNorm on gfx942 against the deployed HIP kernel: 2880 columns, bf16, input rows with a
 stride wider than the row, 11 timed cases (1, 2, 4 and 8 rows under graph replay, seven wide cases from
 400 to 16384 rows). Every figure below is *measured in kernel lanes*, one run each, one optimisation
-round each; differences under about 1.5 % between single runs are noise. Do not carry the figures to
-another operator, shape or GPU generation.
+round each: the weighted results were re-measured independently, the per-move shares are the lanes' own
+same-process A/B figures. Differences under about 1.5 % between single runs are noise. Do not carry the
+figures to another operator, shape or GPU generation.
 
 **Result.** Weighted speedup over the deployed kernel: 1.30x in one lane and 1.26x
 in the other. Neither used the 16-column-tile design

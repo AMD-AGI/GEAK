@@ -91,6 +91,9 @@ Measured register counts, for orientation (256-thread workgroups unless noted):
    refuses two of its three operand paths there because they were measured to spill.
 8. **A workgroup barrier needs every thread.** Keep the staging branch-free (clamp an index instead of
    guarding it); see the barrier-deadlock section of the public debugging card.
+9. **Kernarg preload did not pay.** Preloading the kernel arguments was slower or neutral in all four
+   lanes that tried it (*measured in kernel lanes*, one run each, two operators: add + RMSNorm and
+   RoPE + KV write). A small pointer-only argument block read by one scalar load was the better choice.
 
 ## JIT cache and trace-time pitfalls
 

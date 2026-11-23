@@ -5,7 +5,8 @@ KV cache. Maturity: the design passed every correctness leg on gfx942 with FlyDS
 gfx950 and tensor parallelism above 1 are untested; **the design itself has no timing against a
 deployed kernel**. It is shaped for a slot inside a larger kernel. For a standalone RoPE + KV-write
 launch, two kernel lanes measured kernels of their own against the deployed kernel, and two of their
-results go against the step that looks obvious (vector loads and stores): read
+results go against steps that look obvious (vector loads and stores; doing the kv work on the
+query-head task): read
 [Measured in a kernel lane](#measured-in-a-kernel-lane) first.
 
 ## What the design covers
@@ -93,7 +94,7 @@ read after the launch, so this does not show there.
 ## Where the time goes
 
 - **Every element is a separate 2-byte (bf16) or 1-byte (fp8) load and store.** Vectorising them looks
-  like the first optimisation step. The lanes below measured the opposite at decode
+  like the first optimisation step. One of the lanes below measured the opposite at decode
   widths: narrow lanes with a short per-lane instruction chain won.
 - With the write, each kv head's k rotation and cache write is repeated by all the query-head tasks of
   its group: 16 times for a 16-to-1 layout.
@@ -108,7 +109,9 @@ Two kernel lanes each authored a FlyDSL
 fused RoPE + paged KV write on gfx942 against the deployed Triton kernel: 64 query heads and 8 kv heads
 of 64 dims, rotation in halves, bf16 cache, 7 timed cases at 1, 2, 4 and 8 tokens, all under graph
 replay, bit-exact. Every figure below is *measured in kernel lanes*, one run each, one optimisation
-round each. A single run resolves about 4 % (four runs of one build gave 1.31x, 1.20x, 1.31x, 1.30x).
+round each: the weighted results were re-measured independently, the per-move shares are the lanes' own
+same-process A/B figures. A single run resolves about 4 % (four runs of one build gave 1.31x, 1.20x,
+1.31x, 1.30x).
 Do not carry the figures to another operator, shape or GPU generation.
 
 **Result.** Weighted speedup over the deployed kernel: 1.40x in one lane and 1.30x
@@ -147,7 +150,7 @@ kept so that non-decode calls do not regress.
 | cache-policy variants on the loads | neutral: the rows are cold after the oracle's eviction |
 | kv heads first in the grid; loading the v row from the query wave | noise |
 | the rows-per-wave kernel at 8 tokens or fewer | slower than one row per wave |
-| knock-out probes in one lane: no rotation arithmetic, no cos / sin hop | no gain, so those paths were closed; removing the row loads entirely would have saved 7 % |
+| knock-out probes in one lane: no rotation arithmetic, no cos / sin hop | not faster in that lane, which therefore tried no trims; the other lane gained 1.9 % from arithmetic trims, so treat these as unproven; removing the row loads entirely would have saved 7 % |
 
 **Where it ended.** The launch floor is 85 % to 89 % of the call; the rest is the argument fetch and
 the cold read of the row.
@@ -161,8 +164,8 @@ measured 5 % from a device-scope policy on the same stores, most of the gap betw
 1. Take the lane geometry above for a standalone launch, including the store policy and the
    branch-free predication.
 2. Share the norm statistic through LDS within a workgroup (for the fused per-head norm; untested).
-3. Not this: wider lanes or vector stores. Two and four pairs per lane lost, and a knock-out showed no
-   gain left in the store width.
+3. Not this first: wider lanes. Two and four pairs per lane lost. Wider stores were not measured; one
+   lane ruled them out with a knock-out probe only.
 
 ## What to check
 

@@ -55,8 +55,8 @@ shapes; the operator map says which. Treat every design as a correct, parallel s
 
 ## Mechanism
 At 1 to 8 rows an operator is latency-bound, not throughput-bound. Its time is set by the longest chain of
-dependent memory round trips, by how many of the 304 CUs one row is spread over, and by fixed launch and
-synchronisation costs. *Measured:* kernels written without this view were 8x to about 5400x slower than the
+dependent memory round trips, by fixed launch and synchronisation costs, and by how many of the 304 CUs one row is spread over; that spread stops mattering for an op whose launch is dominated by the empty-launch floor, as the two lane-measured ones are.
+*Measured:* kernels written without this view were 8x to about 5400x slower than the
 native op. Three choices decide the outcome, and they must be made before the first line of code:
 
 - **The task axis.** Split one row into tasks that each own their outputs exclusively (16 output columns, a
@@ -164,4 +164,4 @@ Speed is the deployed kernel's time over this design's (above 1 = this design is
   as read at FlyDSL 0.5.0, not re-checked against later versions): `attention/pa_decode_fp8.py`,
   `attention/pa_decode_swa.py`, `attention/fused_rope_cache_kernel.py`, `attention/mla_fwd_decode.py`,
   `gemm/fp8_gemm_4wave.py`, `norm/rmsnorm_kernel.py`, `moe/topk_gating_softmax_kernel.py`.
-- GEAK kernel-lane runs that authored an add + RMSNorm and a RoPE + KV-write operator in FlyDSL on gfx942 (one optimisation round, one run each way, results re-measured): the figures marked *measured in kernel lanes*.
+- GEAK kernel-lane runs that authored an add + RMSNorm and a RoPE + KV-write operator in FlyDSL on gfx942 (one optimisation round, one run each way; the weighted results were re-measured, the per-move shares are the lanes' own same-process A/B figures): the figures marked *measured in kernel lanes*.
