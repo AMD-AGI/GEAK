@@ -18,6 +18,9 @@ the selected opportunity.
 **Acceptance:** the native task and delivery gates pass for the requested cases,
 the actual device width and the declared edit boundary. CPU preflight alone is incomplete.
 
+When the entry consumes caller-owned buffers, prepare them in the timing factory.
+Keep validation-only allocation or poisoning outside the timed callable; retain those checks in correctness.
+
 Implementation: [kernel-ut](kernel-ut/SKILL.md). `scripts/scaffold_tasks.py` installs and
 scaffolds the requested tasks; CPU author lanes write them in parallel and borrow GPUs
 per validation command (`ut_wave.py gpu -- ...`); every task qualifies with
