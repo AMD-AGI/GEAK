@@ -343,6 +343,8 @@ jobs:
       # Pure node (fs/path only) — no npm install needed.
       - name: expert_skills OFF-identical regression
         run: node e2e_workflow/scripts/test_expert_skills_off_identical.js
+      - name: kernel_lane fast_mode / max_rounds OFF-identical regression
+        run: node kernel_workflow/scripts/test_fast_mode_off_identical.js
       # Claude Code's workflow tool refuses a script over its size limit before any phase runs.
       - name: workflow script size limit
         run: node e2e_workflow/scripts/test_workflow_script_size.js
