@@ -78,7 +78,10 @@ Read, as reference, before writing:
     `BLOCK_N=32` are provisional search hints only; include alternatives in the
     same on-box autotune.
     Do not use Instinct MFMA tiles, FNUZ, or gfx950 MX.
-  - **gfx11* (RDNA3.5 client):** read `SKILL_DIR/knowledge/amd_ryzen.md` for the matrix ISA and the
+  - **gfx1100 (RDNA3, Radeon Pro W7900 only):** read `SKILL_DIR/knowledge/amd_rdna3.md`. Wave
+    **32**, gfx11 **WMMA** (`_w32` builtins, A/B replicated across half-waves) with FP16, BF16
+    and INT8 inputs (INT4 is not validated), 64 KiB LDS per workgroup.
+  - **gfx115x (RDNA3.5 APU):** read `SKILL_DIR/knowledge/amd_ryzen.md` for the matrix ISA and the
     dtypes it supports.
   - **gfx942 / gfx950 (Instinct):** read `SKILL_DIR/knowledge/amd_instinct.md` §3 for the
     arch-specific fp8 format + MFMA shapes — **fp8 is FNUZ on gfx942 (CDNA3) but OCP on gfx950

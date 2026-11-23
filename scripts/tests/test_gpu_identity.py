@@ -91,6 +91,56 @@ def test_gfx1201_does_not_imply_r9700(product: str) -> None:
     assert identity["target"] == "unknown"
 
 
+@pytest.mark.parametrize(
+    "product",
+    [
+        "AMD Radeon Pro W7900",
+        "AMD Radeon PRO W7900",
+        "AMD Radeon Pro W7900 Dual Slot",
+        "AMD Radeon PRO W7900 Dual Slot",
+    ],
+)
+def test_exact_w7900_product_is_structured(product: str) -> None:
+    identity = gpu_identity.parse_rocminfo(_rocminfo("gfx1100", product, cu=96))
+    assert identity == {
+        "gfx": "gfx1100",
+        "marketing_name": product,
+        "target": "w7900",
+        "physical_cu_count": 96,
+        "visible_gpu_agents": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    "product",
+    [
+        "AMD Radeon Pro W7800",
+        "AMD Radeon Pro W7800 48GB",
+        "AMD Radeon RX 7900 XTX",
+        "AMD Radeon RX 7900 XT",
+        "AMD Radeon RX 7900 GRE",
+        "AMD Radeon Pro W7900 Engineering Sample",
+        "W7900",
+        "",
+    ],
+)
+def test_gfx1100_does_not_imply_w7900(product: str) -> None:
+    identity = gpu_identity.parse_rocminfo(_rocminfo("gfx1100", product, cu=84))
+    assert identity["gfx"] == "gfx1100"
+    assert identity["target"] == "unknown"
+
+
+@pytest.mark.parametrize("gfx", ["gfx1201", "gfx1101", "gfx1102", "gfx1151", "gfx950"])
+def test_w7900_product_rejects_wrong_isa(gfx: str) -> None:
+    with pytest.raises(gpu_identity.IdentityError, match="w7900 requires gfx1100"):
+        gpu_identity.parse_rocminfo(_rocminfo(gfx, "AMD Radeon Pro W7900", cu=96))
+
+
+def test_casefolded_match_is_w7900_only() -> None:
+    identity = gpu_identity.parse_rocminfo(_rocminfo("gfx1201", "amd radeon ai pro r9700"))
+    assert identity["target"] == "unknown"
+
+
 def test_instinct_identity_stays_unknown_product() -> None:
     identity = gpu_identity.parse_rocminfo(
         _rocminfo("gfx950", "AMD Instinct MI355X", cu=256)

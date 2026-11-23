@@ -78,8 +78,10 @@ Steps:
    only product/ISA/CU source. It emits `target=r9700` or `target=r9600d` only
    for the exact marketing name `AMD Radeon AI PRO R9700` or
    `AMD Radeon AI PRO R9600D`, respectively; any other gfx1201 product remains
-   `unknown`. Return the probe's `target` unchanged as `device_target`; never
-   infer either product from gfx1201. Hard-stop if it disagrees with
+   `unknown`. It emits `target=w7900` only for `AMD Radeon Pro W7900` or
+   `AMD Radeon Pro W7900 Dual Slot` on `gfx1100`; any other gfx1100 board is
+   `unknown` and refused. Return the probe's `target` unchanged as `device_target`;
+   never infer a product from its ISA. Hard-stop if it disagrees with
    `EXPECTED_GFX`, a non-empty `EXPECTED_TARGET`, or a positive
    `EXPECTED_PHYSICAL_CU_COUNT`.
    Then follow `SKILL_DIR/knowledge/preflight.md` (judgment guide,
@@ -164,7 +166,7 @@ Return JSON:
   "workload": {"isl": 1024, "osl": 1024, "conc": 64},
   "bench_script": "<EVAL_DIR>/bench_e2e.sh",
   "gfx": "<required gfx target from step 4, e.g. gfx950>",
-  "device_target": "r9700|r9600d|unknown",
+  "device_target": "r9700|r9600d|w7900|unknown",
   "device_name": "<exact Marketing Name from the selected rocminfo agent>",
   "physical_cu_count": 64,
   "precision": "<serving precision, e.g. mxfp8 | fp8 | bf16 — or \"\" if not established>",

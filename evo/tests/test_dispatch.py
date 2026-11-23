@@ -348,8 +348,9 @@ class DispatchTests(unittest.TestCase):
                     self.assertNotIn("evo:init", labels)
 
     def test_evo_author_route_and_ordinary_verifier_prompts_are_preserved(self):
-        arguments = {"mode": "author", "optimizer": "evo", "evolution_source_paths": ["kernel.py"]}
-        legacy = self.run_workflow(JAVASCRIPT[1], {"mode": "author"})
+        # profile is off by default; turn it on so the baseline profile prompt is compared too.
+        arguments = {"mode": "author", "optimizer": "evo", "evolution_source_paths": ["kernel.py"], "profile": "on"}
+        legacy = self.run_workflow(JAVASCRIPT[1], {"mode": "author", "profile": "on"})
         for entry in (JAVASCRIPT[0], JAVASCRIPT[1]):
             with self.subTest(entry=entry):
                 evolved = self.run_workflow(entry, arguments)

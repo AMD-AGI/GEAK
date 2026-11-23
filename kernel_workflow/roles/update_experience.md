@@ -77,7 +77,7 @@ fraction before it reaches the card), `CANDIDATES` (bake-off only), `OP_SPEC` (b
    CDNA / Instinct cards. Skip INDEX entries whose `platforms` are not in `REQUIRED_PLATFORMS`
    (on gfx1201, `r9700` also matches).
    Do not read operator SOTA cards from `PERF_KNOWLEDGE_DIR`. A new card on this run
-   MUST set `platforms` to `REQUIRED_PLATFORMS` (the detected ISA, e.g. `['gfx1201']`).
+   MUST set `platforms` to `REQUIRED_PLATFORMS` (the detected ISA, e.g. `['gfx1201']` or `['gfx1100']`).
 2. Read `${REPORT_PATH}` and the `WINNER` input. Write the reuse `key` as **one line of plain English**
    naming what this card is about — the op, the arch, and whatever else actually distinguishes it
    (framework, dtype/quant format, shape regime): e.g. `bf16 fused-MoE grouped GEMM · gfx942/MI300X ·

@@ -16,6 +16,7 @@ Two things are locked here.
 """
 import importlib.util
 import os
+import re
 import sys
 import unittest
 
@@ -24,6 +25,15 @@ sys.path.insert(0, os.path.join(E2E_DIR, "knowledge", "analysis_skills", "roofli
 import roofline_tools as rt  # noqa: E402
 
 PEAKS_MD = os.path.join(os.path.dirname(os.path.abspath(rt.__file__)), "peaks.md")
+RDNA3_GUIDE = os.path.join(os.path.dirname(E2E_DIR), "kernel_workflow", "knowledge", "amd_rdna3.md")
+
+# AMD's published W7900 figures, the source peaks.md and amd_rdna3.md both cite.
+W7900_PAGES = (
+    "https://www.amd.com/en/products/graphics/workstations/radeon-pro/w7900.html",
+    "https://www.amd.com/en/products/graphics/workstations/radeon-pro/w7900-dual-slot.html",
+)
+W7900_PUBLISHED = {"cu": 96, "hbm_bw_bytes_s": 8.64e11, "fp32": 6.13e13, "fp16": 1.23e14,
+                   "int8": 1.23e14, "int4": 2.45e14}
 
 _IDENTITY_SPEC = importlib.util.spec_from_file_location(
     "gpu_identity", os.path.join(os.path.dirname(E2E_DIR), "scripts", "gpu_identity.py"))
@@ -229,6 +239,89 @@ class TestPeaks(unittest.TestCase):
     def test_unmeasured_gfx120x_is_hard_unknown_not_derived(self):
         self.assertIsNone(rt.resolve_peaks("/nonexistent/peaks.md", "gfx1209"))
 
+    def test_w7900_peaks_require_product_identity(self):
+        self.assertIsNone(rt.resolve_peaks(PEAKS_MD, "gfx1100"))
+        for name in ("AMD Radeon Pro W7900", "AMD Radeon PRO W7900 Dual Slot"):
+            with self.subTest(name=name):
+                w7900 = _identity("gfx1100", name, 96)
+                self.assertEqual(w7900["target"], "w7900")
+                p = rt.resolve_peaks(PEAKS_MD, w7900["gfx"], product=w7900["target"])
+                self.assertIsNotNone(p)
+                self.assertEqual(p["source"], "table")
+                self.assertEqual(p["confidence"], "high")
+                self.assertEqual(p.get("product"), "w7900")
+                self.assertEqual(p["cu"], 96)
+                self.assertAlmostEqual(p["hbm_bw_bytes_s"], 8.64e11, delta=1e8)
+                self.assertAlmostEqual(rt.peak_flops_for(p, "fp16"), 1.23e14, delta=1e11)
+                self.assertAlmostEqual(rt.peak_flops_for(p, "int8"), 1.23e14, delta=1e11)
+                self.assertAlmostEqual(rt.peak_flops_for(p, "fp32"), 6.13e13, delta=1e11)
+                for dtype in ("bf16", "fp8", "float8_e4m3fn", "fp4"):
+                    self.assertIsNone(rt.peak_flops_for(p, dtype), dtype)
+        w7800 = _identity("gfx1100", "AMD Radeon Pro W7800", 70)
+        self.assertEqual(w7800["target"], "unknown")
+        self.assertIsNone(rt.resolve_peaks(PEAKS_MD, w7800["gfx"], product=w7800["target"]))
+        self.assertIsNone(rt.resolve_peaks(PEAKS_MD, "gfx1100", product="r9700"))
+
+    def test_w7900_peaks_match_the_guide_and_the_cited_source(self):
+        """peaks.md's w7900 section, the kernel guide's §1 table and AMD's pages say the same."""
+        p = rt.resolve_peaks(PEAKS_MD, "gfx1100", product="w7900")
+        self.assertEqual(p["cu"], W7900_PUBLISHED["cu"])
+        self.assertEqual(p["hbm_bw_bytes_s"], W7900_PUBLISHED["hbm_bw_bytes_s"])
+        self.assertEqual(p["flops"], {k: W7900_PUBLISHED[k] for k in ("fp32", "fp16", "int8")})
+
+        with open(RDNA3_GUIDE, encoding="utf-8") as fh:
+            guide = fh.read()
+        rows = dict(re.findall(r"^\| ([^|]+?) \| ([^|]+?) \| [^|]+\|$", guide, re.MULTILINE))
+
+        def number(row):
+            return float(re.search(r"(\d+(?:\.\d+)?) (?:TFLOP/s|TOPS|GB/s)", rows[row]).group(1))
+
+        self.assertEqual(rows["Compute units"], "96")
+        self.assertAlmostEqual(number("Memory") * 1e9, W7900_PUBLISHED["hbm_bw_bytes_s"], delta=1e8)
+        for row, key in (("Matrix FP16", "fp16"), ("Matrix INT8", "int8"),
+                         ("Vector FP32", "fp32"), ("Matrix INT4", "int4")):
+            self.assertAlmostEqual(number(row) * 1e12, W7900_PUBLISHED[key], delta=1e11, msg=row)
+        self.assertIn("not validated, no roofline ceiling", rows["Matrix INT4"])
+
+        with open(PEAKS_MD, encoding="utf-8") as fh:
+            peaks_md = fh.read()
+        section = peaks_md[peaks_md.index("product: w7900"):]
+        section = section[:section.index("\n## ")]
+        for doc, text in (("peaks.md", section), ("amd_rdna3.md", guide)):
+            for url in W7900_PAGES:
+                self.assertIn(url, text, doc)
+            self.assertIn("read on 2026-11-20", text, doc)
+            self.assertNotIn("W7900.json", text, doc)
+
+    def test_w7900_int4_has_no_roofline_ceiling(self):
+        """AMD publishes 245 TOPS INT4, but INT4 is not validated on the W7900: no compute axis."""
+        p = rt.resolve_peaks(PEAKS_MD, "gfx1100", product="w7900")
+        self.assertNotIn("int4", p["flops"])
+        for dtype in ("int4", "uint4", "int4_w4a16", "w4a16", "torch.int4"):
+            self.assertIsNone(rt.peak_flops_for(p, dtype), dtype)
+
+    def test_gfx1100_without_w7900_is_hard_unknown_not_derived(self):
+        called = []
+        original = rt.derive_peaks_from_props
+
+        def fake_derive(device=0):
+            called.append(device)
+            return {"hbm_bw_bytes_s": 1.0, "flops": {}, "cu": 96,
+                    "source": "derived", "confidence": "low"}
+
+        rt.derive_peaks_from_props = fake_derive
+        try:
+            self.assertIsNone(rt.resolve_peaks(PEAKS_MD, "gfx1100"))
+            self.assertIsNone(rt.resolve_peaks("/nonexistent/peaks.md", "gfx1100", product="w7900"))
+            self.assertEqual(called, [])
+            self.assertTrue(rt.is_discrete_rdna3("gfx1100"))
+            self.assertFalse(rt.is_discrete_rdna3("gfx1151"))
+            self.assertFalse(rt.is_discrete_rdna3("gfx1101"))
+            self.assertIsNotNone(rt.resolve_peaks("/nonexistent/peaks.md", "gfx1101"))
+            self.assertEqual(called, [0])
+        finally:
+            rt.derive_peaks_from_props = original
+
     def test_gfx1250_missing_table_may_derive(self):
         called = []
         original = rt.derive_peaks_from_props
@@ -246,7 +339,7 @@ class TestPeaks(unittest.TestCase):
             self.assertEqual(called, [])
             self.assertIsNone(rt.resolve_peaks("/nonexistent/peaks.md", "gfx1152", cu=40))
             self.assertEqual(called, [])  # an RDNA 3.5 APU's "memory clock" is system DRAM
-            self.assertIsNone(rt.resolve_peaks("/nonexistent/peaks.md", "gfx1100"))
+            self.assertIsNone(rt.resolve_peaks("/nonexistent/peaks.md", "gfx1101"))
             self.assertEqual(called, [0])
         finally:
             rt.derive_peaks_from_props = original

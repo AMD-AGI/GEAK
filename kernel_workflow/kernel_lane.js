@@ -1,13 +1,13 @@
 export const meta = {
   name: 'kernel-lane',
-  description: 'SINGLE-LANGUAGE kernel optimization worker (Director/TechLead/specialist Engineers) with budget-controlled rounds, independent verification, and integration. Optimizes ONE kernel in ONE language (mode=optimize) or authors a fresh seed then optimizes it (mode=author). This is the worker invoked per lane by the kernel-workflow dispatcher (kernel_workflow.js) and by e2e_workflow; prefer calling kernel-workflow directly unless you specifically want one unchanged lane. Target: AMD Instinct MI-series (CDNA gfx942/gfx950) and the validated RDNA4 product Radeon AI PRO R9700 (gfx1201) — auto-detected on-box; on R9700 use knowledge/amd_rdna4.md (wave32, WMMA). Generic gfx1201 without R9700 identity is not a calibrated target.',
+  description: 'SINGLE-LANGUAGE kernel optimization worker (Director/TechLead/specialist Engineers) with budget-controlled rounds, independent verification, and integration. Optimizes ONE kernel in ONE language (mode=optimize) or authors a fresh seed then optimizes it (mode=author). This is the worker invoked per lane by the kernel-workflow dispatcher (kernel_workflow.js) and by e2e_workflow; prefer calling kernel-workflow directly unless you specifically want one unchanged lane. Target: AMD Instinct MI-series (CDNA gfx942/gfx950), the validated RDNA4 product Radeon AI PRO R9700 (gfx1201) and the RDNA3 Radeon Pro W7900 (gfx1100) — auto-detected on-box; on R9700 use knowledge/amd_rdna4.md, on W7900 knowledge/amd_rdna3.md (wave32, WMMA). Generic gfx1201 without R9700 identity is not a calibrated target; gfx1100 without W7900 identity is refused.',
   whenToUse: 'Internal single-language worker. Prefer the kernel-workflow dispatcher (kernel_workflow.js) as the entry point; invoke this directly only to run one unchanged lane. Pass args.kernel_path (required), args.mode, args.target_language, args.budget, args.gpu_ids, args.gpu_mode, args.gpus_per_job, args.job_gpu_ids, args.task.',
   phases: [
     { title: 'Setup', detail: 'director builds the isolated eval dir + canonical workspace' },
     { title: 'Author', detail: 'author_engineer writes a fresh optimize-loop seed (only when mode=author); speedup denominator stays the frozen online kernel' },
     { title: 'Analyze', detail: 'tech_lead analyzes kernel + writes roadmap' },
     { title: 'Benchmark', detail: 'benchmark_engineer builds the COMMANDMENT + baseline' },
-    { title: 'Profile', detail: 'profile_engineer classifies the bottleneck' },
+    { title: 'Profile', detail: 'profile_engineer classifies the bottleneck (only with args.profile=on; off by default)' },
     { title: 'Research', detail: 'OPT-IN (args.dra_enabled): researcher fans research questions out in parallel via native WebSearch/WebFetch, writes a ranked-directions brief the planner seeds from' },
     { title: 'WarmStart', detail: 'search the experience KB by canonical id (geak:kernel:*) — the shared service when credentialed, else the on-disk store, brought level with kb_artifacts/ first — for the best curated patch per optimization direction for this (kernel,language,gfx), validate each through the verify gate, adopt the first that passes [warm_start!=off]' },
     { title: 'Optimize', detail: 'budget loop: tech_lead plans, specialist OR deep_explore engineers optimize, reprofile' },
@@ -71,10 +71,20 @@ const GPU_FAMILIES = [
   { name: 'R9700', isa: /^gfx1201$/, isolate: true, matrixCore: 'WMMA' },
   // RDNA 3.5 APUs (Strix Halo is gfx1151). Only a gfx1151 Radeon 8060S has been run.
   { name: 'RDNA 3.5', isa: /^gfx115\d$/, isolate: true, matrixCore: 'WMMA' },
+  // Discrete RDNA3. The workflows accept gfx1100 only as the exact Radeon Pro W7900 (target w7900).
+  { name: 'W7900', isa: /^gfx1100$/, isolate: true, matrixCore: 'WMMA' },
 ];
 const GPU_FAMILY_DEFAULT = { name: 'default', isa: null, isolate: false, matrixCore: 'MFMA' };
 const gpuFamily = (gfx) => GPU_FAMILIES.find((f) => f.isa.test(String(gfx || ''))) || GPU_FAMILY_DEFAULT;
 // ---- end GPU families ----
+if (EXPECTED_TARGET === 'w7900' && EXPECTED_GFX !== 'gfx1100') {
+  throw new Error('expected_target=w7900 requires expected_gfx=gfx1100');
+}
+if (EXPECTED_GFX === 'gfx1100' && EXPECTED_TARGET !== 'w7900') {
+  throw new Error(
+    `expected_gfx=gfx1100 requires expected_target=w7900 (got ${EXPECTED_TARGET || 'none'}): ` +
+    'no other gfx1100 product is validated');
+}
 const BUDGET = parseInt(A.budget != null ? A.budget : 6, 10);
 // Minimum verified geomean improvement over the cumulative best for a round winner to be COMMITTED
 // into the canonical workspace (default 2%). Kept as a knob rather than a hard-coded constant so the
@@ -772,12 +782,15 @@ const cfg = (o) => Object.entries(o).map(([k, v]) =>
 // terminal API errors to null but NOT an indefinite hang. So bound every agent()
 // call: if it has not returned after AGENT_TIMEOUT_MS, resolve it to null (which
 // every .filter(Boolean)/null-check downstream already tolerates) and let the
-// round proceed. VERY generous default (60min): a true hang never returns, so this only fires on a
+// round proceed. VERY generous default (3h): a true hang never returns, so this only fires on a
 // hang, NEVER on a legitimately-long agent. Inner agents include benchmark/profile/verify that build
-// (hipcc/ninja) and run benches — minutes, well under 60min — plus the LLM-heavy optimize engineers
-// (the ones observed hanging). A too-short bound would kill legit long agents (e.g. a slow rocprof or
-// build), so keep it large. Cache keys (prompt, opts) are unchanged so resume still works. Falls back
-// to raw agent() if setTimeout is unavailable. args.agent_timeout_ms=0 disables.
+// (hipcc/ninja) and run benches, plus the LLM-heavy optimize engineers (the ones observed hanging).
+// On a prepared extract UT one full run takes 20-40 min, so a MOE verify (one run + patch/build/
+// correctness) plus a wait for another lane's GPU lock is ~95 min; a non-weighted UT still runs 3x
+// in benchmark setup (~135 min). 60min killed every such lane (GEAK #606). Keep it under the
+// standalone runtime's 4h spawn backstop (run_workflow.mjs), which must stay the longer of the two.
+// Cache keys (prompt, opts) are unchanged so resume still works. Falls back to raw agent() if
+// setTimeout is unavailable. args.agent_timeout_ms=0 disables.
 // API-FAULT TOLERANCE: a transient API failure (gateway 4xx/5xx, rate-limit, dropped connection, the
 // model API going down mid-run) must NOT crash the whole workflow. agentT retries the call up to
 // AGENT_RETRIES times on a thrown API/agent error, then resolves to null (every .filter(Boolean)/
@@ -787,8 +800,10 @@ const cfg = (o) => Object.entries(o).map(([k, v]) =>
 // (e.g. an auth/header requirement the client doesn't send), retries are exhausted then the run
 // degrades — re-run with Workflow({resumeFromRunId}) once the client/API is fixed; cached agent results
 // make resume cheap.
-const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : 3600000, 10);
+const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : 10800000, 10);
 const AGENT_RETRIES = Math.max(1, parseInt(A.agent_retries != null ? A.agent_retries : 4, 10));
+// Labels whose agent the guard gave up on. The agent is still running; stopAfterTimeout() reads this.
+const TIMED_OUT_LABELS = new Set();
 // GEAK-ABLATION-ARMS-v1 (B6): registered mechanical dispatches are folded into the NEXT
 // agent instead of getting an agent of their own. In the historical Qwen3 run the
 // storage-reclaim agent -- whose whole job is to run one fixed bash command -- cost
@@ -1976,6 +1991,7 @@ async function agentTCore(p, o) {
       const guard = new Promise((resolve) => {
         to = setTimeout(() => {
           log(`  [hung-agent guard] ${label} exceeded ${Math.round(AGENT_TIMEOUT_MS / 60000)}min with no return — resolving null so the round proceeds.`);
+          TIMED_OUT_LABELS.add(label);
           resolve(null);
         }, AGENT_TIMEOUT_MS);
       });
@@ -2004,6 +2020,51 @@ async function agentTCore(p, o) {
 // recovery dispatch — are gone under ABORT-AND-QUARANTINE). Nothing else needs a non-routed guaranteed
 // dispatch, so the helper would be dead code.
 
+// LANE STOP. A null from agentT does not stop the agent: a timed-out benchmark_engineer kept its UT
+// runs on the GPU for 2+ hours after its lane had failed, and the retried lane timed out waiting for
+// that GPU (GEAK #606). So before the lane ENDS on an agent that returned nothing, it stops everything
+// still running under its EVAL_DIR and blocks gpu_lock.sh there (scripts/stop_lane_work.py). Only on
+// lane-ending paths: the stop file blocks every later GPU command under EVAL_DIR. Non-fatal.
+// The standalone runtime exposes a host hook that bypasses the saturated agent queue. Native
+// Workflow hosts without that capability retain the best-effort, one-command agent fallback.
+const STOP_LANE_SCHEMA = obj({ ok: { type: 'boolean' }, blocked: { type: 'boolean' },
+  stopped: { type: 'array', items: { type: 'object', additionalProperties: true } },
+  survivors: { type: 'array', items: { type: 'object', additionalProperties: true } } },
+  ['ok', 'blocked', 'stopped', 'survivors']);
+async function stopLaneWork(evalDir, reason, phaseName) {
+  if (!evalDir) return null;
+  let r;
+  if (typeof agent.stopLaneWork === 'function') {
+    try {
+      r = await agent.stopLaneWork(evalDir, reason);
+    } catch (e) {
+      log(`  [lane-stop] ${reason}: host cleanup failed (${String(e)}; NON-FATAL).`);
+      return null; // Do not fall back into the queue we are trying to unblock.
+    }
+  } else {
+    const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+    const cmd = `python3 ${q(`${WORKFLOW_DIR}/scripts/stop_lane_work.py`)} --eval-dir ${q(evalDir)} --block --reason ${q(reason)}`;
+    r = await agentT(
+      'You are the kernel lane\'s GPU release step. Run EXACTLY this command, once, and return its JSON ' +
+      'stdout verbatim as StructuredOutput. It stops only processes inside this lane\'s EVAL_DIR and never ' +
+      'signals your own shell or its ancestors. Do not edit it, retry it, or act on what it reports; a ' +
+      'non-zero exit is a valid answer, so return what it printed.\n```bash\n' + cmd + '\n```',
+      { phase: phaseName, label: 'stop:lane', schema: STOP_LANE_SCHEMA });
+  }
+  if (!r) { log(`  [lane-stop] ${reason}: the stop step returned nothing (NON-FATAL).`); return null; }
+  const n = Array.isArray(r.stopped) ? r.stopped.length : 0;
+  const left = Array.isArray(r.survivors) ? r.survivors.length : 0;
+  log(`  [lane-stop] ${reason}: stopped ${n} process(es) under ${evalDir}${left ? `, ${left} still up` : ''}; gpu_lock.sh ${r.blocked ? 'blocked' : 'NOT blocked'} there.`);
+  return r;
+}
+
+// The same release when the lane carries on without a timed-out agent (engineer, verify, integrate):
+// stop and block only that agent's own dir, so the next round does not queue behind its GPU work.
+// `dir` must be where the agent runs gpu_lock.sh, and nothing the lane still needs may run under it.
+async function stopAfterTimeout(r, label, dir, phaseName) {
+  if (r == null && TIMED_OUT_LABELS.delete(label)) await stopLaneWork(dir, `${label} timed out`, phaseName);
+  return r;
+}
 
 // ---------------------------------------------------------------------------
 // WALL-CLOCK DEADLINE (opt-in; absent => byte-identical to a build without it).
@@ -2311,13 +2372,21 @@ if (!GFX) {
   throw new Error('Setup failed: director did not return device_gfx (required; refuse CDNA knowledge without an ISA)');
 }
 if (!DEVICE_TARGET) {
-  throw new Error('Setup failed: director did not return device_target (r9700 | r9600d | unknown)');
+  throw new Error('Setup failed: director did not return device_target (r9700 | r9600d | w7900 | unknown)');
 }
 if (!Number.isFinite(SETUP_PHYSICAL_CU_COUNT) || SETUP_PHYSICAL_CU_COUNT <= 0) {
   throw new Error('Setup failed: director did not return a positive physical_cu_count');
 }
 if (GFX === 'gfx1200') {
   throw new Error('Detected gfx1200, which is not validated by this workflow; refusing R9700 guidance');
+}
+if (GFX === 'gfx1100' && DEVICE_TARGET !== 'w7900') {
+  throw new Error(
+    `Detected gfx1100 with device_target=${DEVICE_TARGET}: only the exact Radeon Pro W7900 is ` +
+    'validated on gfx1100; refusing RDNA3 guidance');
+}
+if (DEVICE_TARGET === 'w7900' && GFX !== 'gfx1100') {
+  throw new Error(`Setup returned device_target=w7900 on ${GFX}: w7900 requires gfx1100`);
 }
 if (EXPECTED_GFX && GFX !== EXPECTED_GFX) {
   throw new Error(`GPU architecture mismatch: expected ${EXPECTED_GFX}, detected ${GFX || 'unknown'}`);
@@ -2340,6 +2409,8 @@ const DEVICE_NAME = EXPECTED_DEVICE_NAME || SETUP_DEVICE_NAME;
 const PHYSICAL_CU_COUNT = EXPECTED_PHYSICAL_CU_COUNT > 0
   ? EXPECTED_PHYSICAL_CU_COUNT : SETUP_PHYSICAL_CU_COUNT;
 // Products with a `product:` section in e2e_workflow/knowledge/analysis_skills/roofline/peaks.md.
+// The W7900's section holds AMD's published peaks, with no BF16, FP8 or INT4 entry; the roles say
+// which axes that leaves.
 const CALIBRATED_PRODUCTS = ['r9700', 'r9600d'];
 // ISA rows of peaks.md that hold only at the CU count they were measured on: the 8050S / 8040S share
 // gfx1151 with the 40-CU 8060S. Any other part of an isolated family is a hard unknown, as
@@ -2348,10 +2419,25 @@ const TABULATED_CU = { gfx1151: 40 };
 const GPU_FAMILY = gpuFamily(GFX);
 const ROOFLINE_STATUS = (CALIBRATED_PRODUCTS.includes(DEVICE_TARGET) && GFX === 'gfx1201')
   ? `calibrated-${DEVICE_TARGET}`
+  : (DEVICE_TARGET === 'w7900' && GFX === 'gfx1100') ? 'calibrated-w7900'
   : /^gfx120/.test(GFX) ? 'unknown-device-not-r9700'
   : TABULATED_CU[GFX] === Number(PHYSICAL_CU_COUNT) ? `tabulated-${GFX}`
   : GPU_FAMILY.isolate ? `unknown-${GFX}-not-tabulated`
   : 'non-rdna';
+// PROFILING is OFF by default; args.profile='on' restores it. Off: no baseline profile, no reprofile
+// after a commit or a warm-start adopt, and neither the benchmark engineer nor the engineers run the
+// profiler. On a prepared extract UT one profiled run costs 20-40 min, and on the AgentX stacks
+// rocprofv3 aborts outright (LLVM option clash with FlyDSL), so every profile agent spent 10-30 min
+// on the fault ladder before falling back (GEAK #606). Every consumer already tolerates a null summary.
+const PROFILE_ON = String(A.profile != null ? A.profile : 'off').trim().toLowerCase() === 'on';
+// gfx1100 counters are valid only at the profile_standard level, which the operator sets and declares
+// in gpu_perf_level (Hyperloom records it as stable_std; amd-smi prints AMDSMI_DEV_PERF_LEVEL_STABLE_STD).
+// With profiling off no agent collects counters, so the safe set also needs PROFILE_ON.
+// The key is sent only on the W7900, so every other prompt stays byte-identical.
+const GPU_PERF_LEVEL = String(A.gpu_perf_level || '').trim().toLowerCase().replace(/^amdsmi_dev_perf_level_/, '');
+const AT_PROFILE_STANDARD = GPU_PERF_LEVEL === 'profile_standard' || GPU_PERF_LEVEL === 'stable_std';
+const COUNTER_INPUTS = DEVICE_TARGET === 'w7900'
+  ? { COUNTER_GUIDANCE: PROFILE_ON && AT_PROFILE_STANDARD ? 'gfx1100-safe-set' : 'unavailable' } : {};
 if (GPU_FAMILY.isolate) {
   // Until the perf/learned stores implement metadata-enforced gens filtering, fail closed:
   // an isolating family (GPU_FAMILIES) gets the dedicated in-tree hardware guide but no CDNA-biased cards.
@@ -2422,6 +2508,7 @@ if (MODE === 'author') {
     { phase: 'Author', label: `author:${TARGET_LANGUAGE}`, schema: AUTHOR_SCHEMA });
   if (!authored || !authored.authored || !says(authored.correctness, 'pass')) {
     log(`Author mode FAILED for ${TARGET_LANGUAGE}: ${authored ? authored.notes || authored.correctness : 'no result'}. Aborting (no seed to optimize).`);
+    if (!authored) await stopLaneWork(EVAL_DIR, `author:${TARGET_LANGUAGE} returned nothing`, 'Author');
     return {
       mode: 'author', authored: false, target_language: TARGET_LANGUAGE,
       eval_dir: EVAL_DIR, kernel_name: KERNEL_NAME,
@@ -2440,6 +2527,7 @@ const analysis = await agentT(
   roleAgent('tech_lead', 'analyze', 'Analyze the kernel and write the roadmap.', {
     WORKSPACE: CANONICAL, EVAL_DIR, TASK, SKILL_DIR: WORKFLOW_DIR,
     KERNEL_KNOWLEDGE_DIR, GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
+    ...COUNTER_INPUTS,
     ...RESUME_INPUT,
   }),
   { phase: 'Analyze', label: 'tech_lead:analyze', schema: ANALYZE_SCHEMA });
@@ -2459,29 +2547,35 @@ phase('Benchmark');
 const bench = await agentT(
   roleAgent('benchmark_engineer', 'setup', 'Build the COMMANDMENT and record a reliable baseline.', {
     WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL,
-    ANALYSIS: analysis,
+    ANALYSIS: analysis, PROFILING: PROFILE_ON ? 'on' : 'off',
     ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
     ...(WORKLOAD_SPEC_PATH ? { WORKLOAD_SPEC_PATH } : {}),
     ...(WORKLOAD_SPEC ? { WORKLOAD_SPEC } : {}),
   }),
   { phase: 'Benchmark', label: 'benchmark_engineer', schema: BENCH_SCHEMA });
-if (!bench || !bench.baseline_per_case) throw new Error('Benchmark setup failed: no baseline recorded');
+if (!bench || !bench.baseline_per_case) {
+  await stopLaneWork(EVAL_DIR, 'benchmark_engineer returned no baseline', 'Benchmark');
+  throw new Error('Benchmark setup failed: no baseline recorded');
+}
 const BASELINE_PER_CASE = bench.baseline_per_case;
 const BASELINE_GEOMEAN_MS = bench.baseline_geomean_ms;
 log(`Benchmark done. ${bench.num_test_cases || BASELINE_PER_CASE.length} cases, baseline geomean ${BASELINE_GEOMEAN_MS} ms, reliable=${bench.reliable}`);
 
 // ===========================================================================
-// PHASE: Baseline profile (Profile Engineer)
+// PHASE: Baseline profile (Profile Engineer) — only with args.profile='on' (see PROFILE_ON).
 // ===========================================================================
 phase('Profile');
-let profileSummary = await agentT(
+let profileSummary = !PROFILE_ON ? null : await agentT(
   roleAgent('profile_engineer', 'baseline', 'Profile the baseline and classify the bottleneck.', {
     WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: 0,
     COMMANDMENT, GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
+    ...COUNTER_INPUTS,
     ...RESUME_INPUT,
   }),
   { phase: 'Profile', label: 'profile_engineer:baseline', schema: PROFILE_SCHEMA });
-log(`Baseline bottleneck: ${profileSummary ? profileSummary.bottleneck : '?'} (dispatch_count=${profileSummary ? profileSummary.dispatch_count : '?'})`);
+log(PROFILE_ON
+  ? `Baseline bottleneck: ${profileSummary ? profileSummary.bottleneck : '?'} (dispatch_count=${profileSummary ? profileSummary.dispatch_count : '?'})`
+  : 'Profile: skipped (args.profile is off).');
 
 // ===========================================================================
 // PHASE: Research (Deep Research Agent — OPT-IN via args.dra_enabled)
@@ -2802,14 +2896,16 @@ correctness check; only report committed=true if it still passes. Return JSON {c
             warm_start.exp_dir = c.exp_dir || '';
             if (rec) { rec.status = 'adopted'; rec.outcome = 'validated'; rec.verified_speedup = sp; }
             log(`[kb] warm-start ADOPTED ${c.slug} @ ${sp.toFixed(2)}x — optimizing from the patched state.`);
-            profileSummary = await agentT(
-              roleAgent('profile_engineer', 'reprofile',
-                'Re-profile the adopted warm-start state and classify the new bottleneck.', {
-                WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_SINGLE, ROUND: 0,
-                COMMANDMENT, PREVIOUS_METRICS: profileSummary,
-              }),
-              { phase: 'WarmStart', label: 'warm_start:reprofile', schema: PROFILE_SCHEMA }) || profileSummary;
-            if (history) history.bottleneck_now = profileSummary ? profileSummary.bottleneck : history.bottleneck_now;
+            if (PROFILE_ON) {
+              profileSummary = await agentT(
+                roleAgent('profile_engineer', 'reprofile',
+                  'Re-profile the adopted warm-start state and classify the new bottleneck.', {
+                  WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_SINGLE, ROUND: 0,
+                  COMMANDMENT, PREVIOUS_METRICS: profileSummary, ...COUNTER_INPUTS,
+                }),
+                { phase: 'WarmStart', label: 'warm_start:reprofile', schema: PROFILE_SCHEMA }) || profileSummary;
+              if (history) history.bottleneck_now = profileSummary ? profileSummary.bottleneck : history.bottleneck_now;
+            }
             if (WARM_START_RETURN_AFTER) { skipLoop = true; warm_start.returned_after_read_kb = true; }
             break;
           }
@@ -2891,6 +2987,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     CURRENT_BEST_PER_CASE: bestPerCase, HISTORY: history,
     KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE, KK_REFS,
     GFX, DEVICE_TARGET, PHYSICAL_CU_COUNT, ROOFLINE_STATUS,
+    ...COUNTER_INPUTS,
     ...KB_INPUTS,
     // DRA brief (REFERENCE), from main. plan_round reads it and seeds directions[] from the ranked
     // DRA directions — see tech_lead.md plan_round. Spread conditionally, so when dra_enabled was off
@@ -3071,6 +3168,7 @@ ${cfg({
         CANONICAL, GPU_ID: d.gpu_id, SKILL_DIR: WORKFLOW_DIR, COMMANDMENT,
         codebase_context: `${EVAL_DIR}/codebase_context.md`,
         profiling_summary: profileSummary ? profileSummary.summary_path : '',
+        PROFILING: PROFILE_ON ? 'on' : 'off',
         baseline_per_case: BASELINE_PER_CASE,
         INSIGHTS: history.insights,
         KERNEL_KNOWLEDGE_DIR, KK_OPERATOR, KK_LANGUAGE,
@@ -3089,6 +3187,9 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
 
     async (prev) => {
       const { d, eng, route } = prev;
+      // Engineers run gpu_lock.sh from KERNEL_PATH; verify works in out_dir/verify, so it is not blocked.
+      await stopAfterTimeout(eng, `${d.specialty === 'deep_explore' ? 'deep' : 'eng'} ${d.id}:${d.specialty}`,
+        `${d.out_dir}/workspace`, 'Optimize');
       if (EVO && prev.evo_prepare_failed) return { d, eng, ver: null };
       let patch = `${d.out_dir}/best_patch.diff`;
       // Harvest is MEASUREMENT-anchored, not return-value-anchored. An engineer only writes
@@ -3130,7 +3231,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
           ...(REQUIRE_GRAPH_CAPTURE ? { REQUIRE_GRAPH_CAPTURE: '1' } : {}),
         }),
         { phase: 'Verify', label: vlabel, schema: VERIFY_SCHEMA }, vroute
-      ).then((ver) => {
+      ).then((ver) => stopAfterTimeout(ver, vlabel, `${d.out_dir}/verify`, 'Verify')).then((ver) => {
         // eikos v2 E1 (R2): feed the verifier's own terminal outcome to P1 (shadow by default). A verifier
         // that produced a USABLE measurement did its job — SUCCESS — even if it found a bad kernel; an
         // `invalid_measurement` is INFRA (not the verifier's fault) and moves nothing; a null return is
@@ -3219,6 +3320,7 @@ Return ONLY the worker_result.json structure as StructuredOutput.` +
         INSIGHTS: history.insights,
       }),
       { phase: 'Merge', label: `integrate r${round}`, schema: INTEGRATE_SCHEMA });
+    await stopAfterTimeout(integrate, `integrate r${round}`, `${EVAL_DIR}/round_${round}/integrate`, 'Merge');
     const integrateCustody = EVO && integrate && integrate.best && integrate.best.patch_file
       ? await EVO.checkPatch({ id: `r${round}_integrated` }, integrate.best.patch_file) : null;
     const integPrim = integrate && integrate.best ? primSpeedup({
@@ -3458,13 +3560,15 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`;
       roundsCommitted += 1;
       installed = true;        // the winner is now the installed incumbent artifact
 
-      // --- (f) Re-profile the new best ------------------------------------
-      profileSummary = await agentT(
-        roleAgent('profile_engineer', 'reprofile', 'Re-profile the new best and explain the bottleneck shift.', {
-          WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: round,
-          COMMANDMENT, PREVIOUS_METRICS: profileSummary,
-        }),
-        { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
+      // --- (f) Re-profile the new best (only with args.profile='on') -------
+      if (PROFILE_ON) {
+        profileSummary = await agentT(
+          roleAgent('profile_engineer', 'reprofile', 'Re-profile the new best and explain the bottleneck shift.', {
+            WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: round,
+            COMMANDMENT, PREVIOUS_METRICS: profileSummary, ...COUNTER_INPUTS,
+          }),
+          { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
+      }
     } else {
       // eikos v2 E1 (R4 round-4 / Astra re-review #4): ABORT-AND-QUARANTINE (replaces round-3 recovery). The
       // round was `improved` and a commit was attempted under ROUTING_ON, but it FAILED or is AMBIGUOUS —
