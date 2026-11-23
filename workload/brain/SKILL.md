@@ -82,6 +82,8 @@ a separate work root. Give the supervisor time for in-flight calls and native ch
 new-work admission and supervision have different deadlines. Verify native recovery can
 join existing workers or relaunch retained work before renewal; until then monitor existing
 workers without duplicate dispatch. A scheduler deadline does not itself complete a checkpoint.
+When continuation inputs change, exercise the native return path that changed; initial
+admission does not prove cutoff or failure handling.
 
 ## Starting route and adoption
 
