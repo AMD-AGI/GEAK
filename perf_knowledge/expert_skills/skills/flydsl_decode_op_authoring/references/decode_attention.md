@@ -100,7 +100,7 @@ workspace / owner protocol. No task waits for the cache write.
 ## Where the time goes
 
 Speed relative to the deployed kernel (above 1 = this design is faster). Full-context shape: a
-MiMo-V2.6-Flash layer at 4 ranks, 1 kv head and 16 query heads per rank, fp8 cache with fold, compared
+decoder layer at 4 ranks, 1 kv head and 16 query heads per rank, fp8 cache with fold, compared
 against vLLM's Triton unified attention including its cache write.
 
 | design step | 1k context | 20k | 131k |
