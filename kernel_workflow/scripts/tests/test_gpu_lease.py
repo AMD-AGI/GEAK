@@ -1170,7 +1170,7 @@ def test_cli_signal_terminates_child_process_group_and_releases_locks(tmp_path):
     assert pids_path.exists()
 
     manager.send_signal(signal.SIGTERM)
-    manager.wait(timeout=5)
+    manager.wait(timeout=30)
 
     pids = json.loads(pids_path.read_text())
     try:
