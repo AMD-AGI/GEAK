@@ -163,46 +163,10 @@ for the full arg spelling, what the declaration changes, and the two things that
 
 ### Example — one server across machines
 
-A TP group that spans two machines, or a prefill/decode pair, is still **one** server to GEAK.
-GEAK runs on a driver that needs no GPU and reaches every node over ssh; the nodes and the driver
-share one filesystem (`shared_fs`). The backend adapter, bench client, metric and acceptance
-contract are the single-host ones, so the tok/s number is comparable to every other GEAK result.
-There are two ways in; both run the same `mn.py check` on the nodes before Setup.
-
-**From an orchestrator (Hyperloom).** The caller names the machines and each pod's launch command
-in a `node_state.json` and points `MULTI_NODE_STATE` at it; `run_e2e.py` checks the nodes before
-Claude starts. Its `user_data_path` is the shared filesystem: every pod and the driver must mount
-that one directory at the same path. A `multinode` field in the handoff is not read.
-
-```bash
-MULTI_NODE_STATE=/shared/run1/node_state.json python interface/run_e2e.py handoff.json result.json
-```
-
-**From Claude Code.** Pick a run name and start Claude with its pin path and the driver's GPUs hidden:
-`GEAK_MN_STATE=<shared_fs>/pins/<run>/mn_state.json` is how every GPU command of the run finds
-the machines, and `mn.py check` refuses a prompt run without it.
-
-```bash
-GEAK_MN_STATE=/shared/geak/pins/<run>/mn_state.json \
-ROCR_VISIBLE_DEVICES= HIP_VISIBLE_DEVICES= CUDA_VISIBLE_DEVICES= IS_SANDBOX=1 claude --dangerously-skip-permissions
-```
-
-Then name the machines in the prompt; GEAK writes the launch commands itself. The shared
-filesystem and the eval dir (`/shared/geak/exp/<run>`) follow from the pin path.
-
-```
-use path_to_GEAK/e2e_workflow to optimize inference for /models/Qwen3.5-27B-FP8, sglang, ISL/OSL=1024/1024,
-conc=8, prefill on 10.0.0.1 with tp=8 and decode on 10.0.0.2 with tp=8
-```
-
-Before the Workflow call the main session follows
-[`roles/_fragments/multinode_prompt.md`](e2e_workflow/roles/_fragments/multinode_prompt.md): it
-turns that into a `multinode` block, runs `mn.py check --prompt` on it and passes what the check
-prints. A refusal lists every problem and starts nothing; the workflow refuses a `multinode` block
-without the check's verdict.
-
-See [`e2e_workflow/docs/multi_node.md`](e2e_workflow/docs/multi_node.md) for every field of the
-block (ssh user, key, container prefix), the environment check, and the failure messages.
+A TP group spanning machines, or a prefill/decode pair, is served as one GEAK server with the
+single-host adapter, bench client and metric. Set `MULTI_NODE_STATE` for `run_e2e.py`, or start
+Claude Code with `GEAK_MN_STATE=<shared_fs>/pins/<run>/mn_state.json` and name the machines in the
+prompt; see [`e2e_workflow/docs/multi_node.md`](e2e_workflow/docs/multi_node.md).
 
 ---
 

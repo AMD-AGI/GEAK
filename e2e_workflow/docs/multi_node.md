@@ -180,9 +180,9 @@ probe leg starts sglang engines with `--enable-metrics`), one trace expected per
 cannot see the nodes' cards.
 
 Everything multinode-only switches on an explicit signal, so a single-host run behaves as on main:
-- `serving_probe.py --mode multinode` (and `observed_workload.py --mode multinode`, which
-  `mn_traces.py pd-points` passes) also parse an untagged TP1 row and a PD engine's SWA row. The
-  probe also draws a fresh prompt seed per SGLang run, so a recapture misses the prefix cache.
+- `observed_workload.py --mode multinode` (which `mn_traces.py pd-points` passes) also parses an
+  untagged TP1 row and a PD engine's SWA row. `serving_probe.py --mode multinode` draws a fresh
+  prompt seed per SGLang run, so a recapture misses the prefix cache.
 - Every rank script exports `GEAK_MN_ENGINE` (`tp`, `prefill` or `decode`). Only under it does
   shape capture name its directories after the host and record the oracle on TP rank 0 alone, and
   the seam trace tag its pid with the host.
@@ -231,6 +231,10 @@ does for the orchestrator entry is then split between the caller and the check:
   `multinode` and `multinode_check` without launch commands (`commands_in_pin`, as `run_e2e.py`
   relays them), and `expected_gfx` / `expected_target` from the nodes' GPU probe. The main
   session merges it into the Workflow `args` unchanged.
+
+The prompt names the machines and GEAK writes the launch commands itself, e.g. `use
+path_to_GEAK/e2e_workflow to optimize inference for /models/Qwen3.5-27B-FP8, sglang,
+ISL/OSL=1024/1024, conc=8, prefill on 10.0.0.1 with tp=8 and decode on 10.0.0.2 with tp=8`.
 
 ```bash
 GEAK_MN_STATE=/shared/geak/pins/r1/mn_state.json \

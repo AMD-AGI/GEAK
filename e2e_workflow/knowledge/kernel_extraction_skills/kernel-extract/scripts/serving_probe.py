@@ -60,8 +60,6 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "scripts"))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from observed_workload import use_multinode_dialects  # noqa: E402
 
 
 def post(base, path, obj=None, timeout=1800):
@@ -675,8 +673,6 @@ def main():
         ap.error("--vocab-size must be positive")
     ID_HI = min(150000, args.vocab_size - 1) if args.vocab_size else 31999
     multinode = args.mode == "multinode"
-    if multinode:
-        use_multinode_dialects()
     if args.seed is None and (FRAMEWORK == "vllm" or not multinode):
         args.seed = 1234
     args.seed = fresh_seed(args.seed)

@@ -187,7 +187,7 @@ BATCH_HINT_RE = re.compile(r"\](?:\s*)(?:Prefill|Decode) batch[,.]")
 
 
 def parse_line(line):
-    """One scheduler batch line -> normalized record, or None. serving_probe.py arms on this too."""
+    """One scheduler batch line -> normalized record, or None."""
     for _dn, parsers in LOG_DIALECTS:
         for p in parsers:
             try:

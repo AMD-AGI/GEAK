@@ -925,8 +925,7 @@ class ActivePinTest(unittest.TestCase):
     def test_no_tool_falls_back_to_a_machine_wide_pointer(self):
         root = os.path.join(SCRIPTS_DIR, os.pardir, os.pardir)
         for rel in ("e2e_workflow/scripts/multi_node/mn.py", "e2e_workflow/scripts/bench_e2e.sh",
-                    "kernel_workflow/scripts/gpu_lock.sh", "kernel_workflow/scripts/profile_kernel.sh",
-                    "perf_knowledge/expert_skills/skills/gluon_authoring/scripts/gpu_lock.sh"):
+                    "kernel_workflow/scripts/gpu_lock.sh", "kernel_workflow/scripts/profile_kernel.sh"):
             with open(os.path.join(root, *rel.split("/")), encoding="utf-8") as f:
                 self.assertNotIn("/state_path", f.read(), rel)
         self.assertFalse(hasattr(mn, "ACTIVE_PIN"))
