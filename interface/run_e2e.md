@@ -196,7 +196,7 @@ requires `gfx1201` in explicit and detected identity pairs. The interface
 preserves the product, ISA, device name and CU count in the workflow handoff.
 
 Product identity selects product data, not separate logic. `r9700` and
-`r9600d` share the gfx1201 ISA path (vLLM-only serving, CDNA knowledge
+`r9600d` share the gfx1201 ISA path (vLLM or SGLang serving, CDNA knowledge
 isolation) and differ only in the `product:` block of
 `e2e_workflow/knowledge/analysis_skills/roofline/peaks.md`; the R9600D block
 holds its own datasheet peaks, not R9700's. The default backend is `vllm` for both.

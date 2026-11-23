@@ -318,8 +318,8 @@ const LAUNCH_SCRIPT = A.launch_script || '';
 const VLLM_DEFAULT = RDNA4_PRODUCT_E2E || !!E2E_FAMILY.vllmOnly;
 const BACKEND = String(A.backend != null ? A.backend : (VLLM_DEFAULT ? 'vllm' : 'sglang')).trim()
   || (VLLM_DEFAULT ? 'vllm' : 'sglang');  // serving adapter
-if (RDNA4_PRODUCT_E2E && !R9700_E2E && BACKEND !== 'vllm') {
-  throw new Error(`${EXPECTED_TARGET.toUpperCase()} E2E is vLLM-only (got backend=${BACKEND}): there is no validated ${EXPECTED_TARGET.toUpperCase()} image for it; pass args.backend=vllm`);
+if (RDNA4_PRODUCT_E2E && !R9700_E2E && !['vllm', 'sglang'].includes(BACKEND)) {
+  throw new Error(`${EXPECTED_TARGET.toUpperCase()} E2E is vLLM or SGLang only (got backend=${BACKEND}): there is no validated ${EXPECTED_TARGET.toUpperCase()} image for it; pass args.backend=vllm or args.backend=sglang`);
 }
 if (R9700_E2E && !['vllm', 'sglang'].includes(BACKEND)) {
   throw new Error(`R9700 E2E is vLLM or SGLang only (got backend=${BACKEND}): there is no validated R9700 image for it; pass args.backend=vllm or args.backend=sglang`);
