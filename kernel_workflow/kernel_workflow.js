@@ -1,7 +1,7 @@
 export const meta = {
   name: 'kernel-workflow',
   description: 'Single ENTRY POINT for kernel optimization on AMD GPUs: Instinct MI-series (CDNA gfx942/gfx950), the validated RDNA4 product Radeon AI PRO R9700 (gfx1201) and the RDNA3 Radeon Pro W7900 (gfx1100). The worker validates on-box identity via structured rocminfo data; generic gfx1201 is not a product identity, and gfx1100 without the exact W7900 product is refused. Dispatches on args.mode: optimize/author -> delegate one unchanged single-language lane to the kernel_lane worker (backward compatible); bakeoff -> freeze the input kernel into ONE immutable oracle + frozen baseline, discover per-language existing impls + offline-tune env backends (aiter/CK), then run one worker lane per backend language (HIP/Triton/FlyDSL/CK/...) in parallel over the GPU pool and pick the fastest verified result across ALL candidates (author/optimize lanes AND the tuned env backend) — every one scored against the SAME frozen original baseline (anti-cheating). Wraps the unchanged kernel_lane worker (one workflow() nesting level; the dispatcher is the bake-off orchestrator).',
-  whenToUse: 'Optimize a kernel. Three modes, all via args.mode (there is NO natural-language mode detection — the caller picks): mode=optimize (DEFAULT) speeds up an EXISTING kernel and behaves exactly like the old single-language workflow; mode=author writes a fresh implementation from scratch, then optimizes it — use it when there is no source to edit yet, or to port the op to another language (pass args.target_language); mode=bakeoff tries several backend languages in parallel and keeps the fastest (pass args.backends, or leave empty to auto-discover). Bakeoff Freeze establishes structured product/ISA identity before Discover; optional expected_gfx/expected_target pins are validated against it. Anything else throws. Pass args.kernel_path (required), args.workflow_dir (required), args.mode, args.target_language, args.backends, args.budget, args.gpu_ids, args.gpu_mode (pool|pin, default pool), args.gpus_per_job / args.job_gpu_ids (optional: a task whose test runs on several GPUs is detected at Setup; pass these only to override; optimize/author only; gpu_ids must hold enough GPUs).',
+  whenToUse: 'Optimize a kernel. Three modes, all via args.mode (there is NO natural-language mode detection — the caller picks): mode=optimize (DEFAULT) speeds up an EXISTING kernel and behaves exactly like the old single-language workflow; mode=author writes a fresh implementation from scratch, then optimizes it — use it when there is no source to edit yet, or to port the op to another language (pass args.target_language); mode=bakeoff tries several backend languages in parallel and keeps the fastest (pass args.backends, or leave empty to auto-discover). Bakeoff Freeze establishes structured product/ISA identity before Discover; optional expected_gfx/expected_target pins are validated against it. Anything else throws. Pass args.kernel_path (required), args.workflow_dir (required), args.mode, args.target_language, args.backends, args.budget, args.gpu_ids, args.gpu_mode (pool|pin, default pool), args.gpus_per_job / args.job_gpu_ids (optional: a task whose test runs on several GPUs is detected at Setup; pass these only to override; optimize/author only; gpu_ids must hold enough GPUs). args.config_aware="true" + args.family_spec (an operator family: one kernel_lane per config, in parallel over gpu_ids, then family_plan/results/report + an exact-signature implementation_catalog; kernel_path is not used on that path).',
   phases: [
     { title: 'Freeze',   detail: 'oracle_freezer: freeze the input kernel -> immutable oracle + baseline_src/ (the ONE denominator) [bakeoff only]' },
     { title: 'Discover', detail: 'op_benchmarker: per-language existing-impl probe + measure + OFFLINE env tune (aiter/CK, shapes from the frozen oracle) -> author_plan, best_known_ms [bakeoff only]' },
@@ -18,7 +18,11 @@ export const meta = {
 // (dispatcher=level0 -> worker=level1). The dispatcher never nests a second level.
 // ---------------------------------------------------------------------------
 const A = args || {};
-if (!A.kernel_path) throw new Error('args.kernel_path is required (absolute path to the kernel/op dir)');
+// Operator-family path (see "Config-aware operator family" below). Only "true"/"on" enable it; every
+// other value, including absent, keeps the optimize/author/bakeoff contract byte-for-byte.
+const CONFIG_AWARE = ['true', 'on'].includes(
+  String(A.config_aware != null ? A.config_aware : 'false').trim().toLowerCase());
+if (!CONFIG_AWARE && !A.kernel_path) throw new Error('args.kernel_path is required (absolute path to the kernel/op dir)');
 const WORKFLOW_DIR = String(A.workflow_dir || '').replace(/\/+$/, '');
 if (!WORKFLOW_DIR) {
   throw new Error('args.workflow_dir is required: absolute path to the directory containing ' +
@@ -86,6 +90,666 @@ if (OPTIMIZER === 'evo' && MODE === 'bakeoff') {
     try { log(`Live execution tracker not started (non-fatal): ${e && e.message}`); } catch (_) {}
   }
 })();
+
+// ===========================================================================
+// CONFIG-AWARE OPERATOR FAMILY (args.config_aware = "true" | "on").
+// One kernel_lane.js per config in args.family_spec, launched together over the GPU pool the same way
+// bakeoff launches its lanes (Promise.all + makeSem, one GPU id per lane, a thrown lane is caught), so
+// nesting stays dispatcher -> kernel_lane. Validation, status mapping, aggregation and the catalog are
+// pure JS; agents only propose a plan (advisory) and write files verbatim. The catalog covers each
+// config's own exact signature only and is never deployment_ready. Runs before the kernel_path-based
+// paths below; those stay untouched when the flag is off.
+// ===========================================================================
+if (CONFIG_AWARE) {
+  if (MODE === 'bakeoff') {
+    throw new Error('config_aware does not support mode=bakeoff yet; set each config\'s mode (optimize|author) in family_spec.');
+  }
+  if (MODE !== 'optimize' && MODE !== 'author') {
+    throw new Error(`unknown mode='${MODE}' with config_aware; each config carries its own mode (optimize|author).`);
+  }
+  if (OPTIMIZER) throw new Error(`config_aware does not support optimizer=${OPTIMIZER} yet`);
+  if ((A.gpus_per_job != null && String(A.gpus_per_job).trim() !== '1') || String(A.job_gpu_ids || '').trim()) {
+    throw new Error('config_aware gives each config lane one GPU id; gpus_per_job > 1 and job_gpu_ids are not supported.');
+  }
+  if (A.apply_to_original != null && String(A.apply_to_original).trim().toLowerCase() !== 'false') {
+    throw new Error('config_aware never modifies an input kernel_path; apply_to_original must be "false".');
+  }
+  if (/(^|\/)kernel_workflow\.js$/.test(WORKER)) {
+    throw new Error('config_aware lanes must run kernel_lane.js, not the kernel_workflow.js dispatcher.');
+  }
+
+  const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+  const isObj = (v) => v != null && typeof v === 'object' && !Array.isArray(v);
+  const isInt = (v) => Number.isInteger(v);
+  const finite = (v) => (typeof v === 'number' && Number.isFinite(v)) ? v : null;
+  const str = (v) => (typeof v === 'string' && v.trim()) ? v.trim() : null;
+  const clip = (v, n) => { const t = typeof v === 'string' ? v.trim() : ''; return t.length > n ? t.slice(0, n - 3) + '...' : t; };
+  // Key-order-independent JSON, so two contracts compare equal regardless of how they were written.
+  const canon = (v) => Array.isArray(v) ? `[${v.map(canon).join(',')}]`
+    : isObj(v) ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canon(v[k])}`).join(',')}}`
+    : JSON.stringify(v === undefined ? null : v);
+  const LANE_FIELDS = ['mode', 'target_language', 'budget', 'gpu_mode', 'task',
+    'use_learned_kb', 'update_experience', 'warm_start', 'apply_to_original'];
+  const DEFAULT_FIELDS = [...LANE_FIELDS, 'gpu_ids'];
+  // Values kernel_lane.js understands for each switch; anything else would silently become its default.
+  const ENUMS = {
+    gpu_mode: ['pool', 'pin'],
+    use_learned_kb: ['true', 'false'],
+    update_experience: ['on', 'off', 'true', 'false', 'none'],
+    warm_start: ['on', 'off', 'true', 'false', 'none', 'reference', 'return_after_read'],
+  };
+  const PLAN_FORMS = ['shared_kernel', 'per_signature', 'internal_buckets'];
+  const CROSS_CONFIG = {
+    status: 'unsupported',
+    reason: 'no candidate adapter: a lane patch is relative to its own workspace, so no implementation was run on a sibling config',
+  };
+
+  // ---- Phase 1: validate + normalize (synchronous; nothing has been spawned yet) ----
+  const validateFamilySpec = (spec) => {
+    if (!isObj(spec)) {
+      throw new Error('config_aware requires args.family_spec as an already-parsed JSON object (not a string or a path).');
+    }
+    const errs = [];
+    if (spec.schema_version !== 1) errs.push(`schema_version must be 1 (got ${JSON.stringify(spec.schema_version)})`);
+    const familyId = typeof spec.family_id === 'string' ? spec.family_id.trim() : '';
+    if (!SAFE_ID.test(familyId)) errs.push('family_id must be a non-empty [A-Za-z0-9._-] identifier');
+    const operator = typeof spec.operator === 'string' ? spec.operator.trim() : '';
+    if (!operator) errs.push('operator must be a non-empty string');
+    const defaults = spec.defaults == null ? {} : spec.defaults;
+    if (!isObj(defaults)) errs.push('defaults must be an object');
+    const checkFields = (o, allowed, where) => {
+      if (!isObj(o)) return;
+      for (const k of Object.keys(o)) {
+        if (!allowed.includes(k)) errs.push(`${where}.${k} is not a supported field (allowed: ${allowed.join(', ')})`);
+      }
+    };
+    checkFields(defaults, DEFAULT_FIELDS, 'defaults');
+
+    const dep = spec.deployment;
+    let axes = null;
+    if (dep != null && !isObj(dep)) errs.push('deployment must be an object');
+    if (isObj(dep)) {
+      if (dep.signature_axes != null) {
+        if (!Array.isArray(dep.signature_axes) || !dep.signature_axes.length ||
+            !dep.signature_axes.every((s) => typeof s === 'string' && s.trim())) {
+          errs.push('deployment.signature_axes must be a non-empty array of axis names');
+        } else axes = dep.signature_axes.map((s) => s.trim());
+      }
+      for (const k of ['tensor_parallel_size', 'expert_parallel_size']) {
+        if (dep[k] != null && !(isInt(dep[k]) && dep[k] > 0)) errs.push(`deployment.${k} must be a positive integer`);
+      }
+    }
+
+    const target = { expected_gfx: '', expected_target: '' };
+    if (spec.target != null && !isObj(spec.target)) errs.push('target must be an object');
+    if (isObj(spec.target)) {
+      target.expected_gfx = String(spec.target.expected_gfx || '').trim().toLowerCase();
+      target.expected_target = String(spec.target.expected_target || '').trim().toLowerCase();
+      if (!!target.expected_gfx !== !!target.expected_target) {
+        errs.push('target.expected_gfx and target.expected_target must be supplied together');
+      }
+      if (target.expected_gfx && !/^gfx[0-9a-f]+$/.test(target.expected_gfx)) errs.push('target.expected_gfx must be a gfx token');
+    }
+
+    const configs = Array.isArray(spec.configs) ? spec.configs : null;
+    if (!configs || !configs.length) errs.push('configs must be a non-empty array');
+    const seen = new Set();
+    const dispatchKeys = new Map();
+    let rank = axes ? axes.length : null;
+    const out = [];
+    (configs || []).forEach((c, i) => {
+      const at = `configs[${i}]`;
+      if (!isObj(c)) { errs.push(`${at} must be an object`); return; }
+      const id = typeof c.id === 'string' ? c.id.trim() : '';
+      const where = id ? `config '${id}'` : at;
+      if (!SAFE_ID.test(id)) errs.push(`${at}.id must be a non-empty [A-Za-z0-9._-] identifier`);
+      else if (seen.has(id)) errs.push(`duplicate config id '${id}'`);
+      else seen.add(id);
+      const kernelPath = typeof c.kernel_path === 'string' ? c.kernel_path.trim() : '';
+      if (!kernelPath.startsWith('/')) errs.push(`${where}: kernel_path must be an absolute path`);
+      if (!isObj(c.op_spec)) errs.push(`${where}: op_spec must be an object`);
+      const ov = c.overrides == null ? {} : c.overrides;
+      if (!isObj(ov)) errs.push(`${where}: overrides must be an object`);
+      checkFields(ov, LANE_FIELDS, `${where}.overrides`);
+
+      // config.overrides -> family_spec.defaults -> kernel_lane default (target_language has no default).
+      const pick = (f) => (isObj(ov) && ov[f] != null) ? ov[f]
+        : ((isObj(defaults) && defaults[f] != null) ? defaults[f] : undefined);
+      const mode = String(pick('mode') != null ? pick('mode') : 'optimize').trim().toLowerCase();
+      if (mode !== 'optimize' && mode !== 'author') errs.push(`${where}: mode must be optimize or author (got '${mode}')`);
+      const lang = pick('target_language') != null ? String(pick('target_language')).trim().toLowerCase() : '';
+      if (!lang) {
+        errs.push(`${where}: target_language must resolve from overrides or defaults ` +
+          '(it selects the warm-start KB page, so the lane\'s triton default is not inherited)');
+      }
+      const rawBudget = pick('budget');
+      const budget = rawBudget == null ? 6
+        : (typeof rawBudget === 'number' ? rawBudget
+          : (/^\s*\d+\s*$/.test(String(rawBudget)) ? parseInt(rawBudget, 10) : NaN));
+      if (!(isInt(budget) && budget > 0)) errs.push(`${where}: budget must be a positive integer`);
+      const ato = pick('apply_to_original');
+      if (ato != null && String(ato).trim().toLowerCase() !== 'false') {
+        errs.push(`${where}: apply_to_original must be false on the config_aware path`);
+      }
+      const knobs = {};
+      for (const [f, allowed] of Object.entries(ENUMS)) {
+        const v = pick(f);
+        if (v == null) continue;
+        const s = String(v).trim().toLowerCase();
+        if (!allowed.includes(s)) errs.push(`${where}: ${f} must be one of ${allowed.join('|')} (got '${s}')`);
+        else knobs[f] = s;
+      }
+      const task = pick('task');
+      if (task != null && typeof task !== 'string') errs.push(`${where}: task must be a string`);
+
+      let sig = null;
+      if (c.signature != null) {
+        if (!Array.isArray(c.signature) || !c.signature.length || !c.signature.every((x) => isInt(x) && x >= 0)) {
+          errs.push(`${where}: signature must be a non-empty array of non-negative integers`);
+        } else {
+          sig = c.signature.slice();
+          if (rank == null) rank = sig.length;
+          if (sig.length !== rank) {
+            errs.push(`${where}: signature rank ${sig.length} does not match ` +
+              `${axes ? 'deployment.signature_axes' : 'the other configs'} (${rank})`);
+          }
+        }
+      }
+      if (c.signature_ranges != null) {
+        if (!isObj(c.signature_ranges)) errs.push(`${where}: signature_ranges must be an object keyed by axis index`);
+        else if (!sig) errs.push(`${where}: signature_ranges requires a valid signature`);
+        else {
+          for (const [ax, r] of Object.entries(c.signature_ranges)) {
+            const k = /^\d+$/.test(ax) ? parseInt(ax, 10) : -1;
+            if (k < 0 || k >= sig.length) errs.push(`${where}: signature_ranges key '${ax}' is not an axis index`);
+            else if (!Array.isArray(r) || r.length !== 2 || !r.every(isInt) || r[0] > r[1]) {
+              errs.push(`${where}: signature_ranges['${ax}'] must be [lo, hi] integers with lo <= hi`);
+            } else if (sig[k] < r[0] || sig[k] > r[1]) {
+              errs.push(`${where}: signature[${k}]=${sig[k]} lies outside signature_ranges['${ax}']`);
+            }
+          }
+        }
+      }
+      const contract = c.contract == null ? null : c.contract;
+      if (contract != null && !isObj(contract)) errs.push(`${where}: contract must be an object`);
+      if (isObj(contract)) {
+        for (const k of ['semantics', 'graph']) {
+          if (contract[k] != null && !isObj(contract[k])) errs.push(`${where}: contract.${k} must be an object`);
+        }
+      }
+      if (c.incumbent != null && !isObj(c.incumbent)) errs.push(`${where}: incumbent must be an object`);
+      if (c.workload_weight != null && !(finite(c.workload_weight) != null && c.workload_weight >= 0)) {
+        errs.push(`${where}: workload_weight must be a finite number >= 0`);
+      }
+      if (c.priority != null && !isInt(c.priority)) errs.push(`${where}: priority must be an integer`);
+      if (c.tags != null && !(Array.isArray(c.tags) && c.tags.every((t) => typeof t === 'string'))) {
+        errs.push(`${where}: tags must be an array of strings`);
+      }
+      // A signature + contract is a dispatch key: two configs with the same key would claim one catalog slot.
+      if (sig) {
+        const dk = canon([sig, isObj(contract) ? contract : {}]);
+        if (dispatchKeys.has(dk)) errs.push(`${where}: same signature and contract as config '${dispatchKeys.get(dk)}'`);
+        else dispatchKeys.set(dk, id);
+      }
+      out.push({
+        id, index: i,
+        kernel_path: kernelPath.length > 1 ? kernelPath.replace(/\/+$/, '') : kernelPath,
+        op_spec: c.op_spec, mode, target_language: lang, budget,
+        gpu_mode: knobs.gpu_mode || 'pool',
+        use_learned_kb: knobs.use_learned_kb || null,
+        update_experience: knobs.update_experience || null,
+        warm_start: knobs.warm_start || null,
+        task: typeof task === 'string' ? task : '',
+        signature: sig,
+        signature_ranges: isObj(c.signature_ranges) ? c.signature_ranges : null,
+        contract: isObj(contract) ? contract : null,
+        incumbent: isObj(c.incumbent) ? c.incumbent : null,
+        workload_weight: c.workload_weight != null ? c.workload_weight : null,
+        priority: c.priority != null ? c.priority : null,
+        tags: Array.isArray(c.tags) ? c.tags.slice() : [],
+      });
+    });
+    if (errs.length) throw new Error(`family_spec invalid (${errs.length} problem(s)):\n  - ${errs.join('\n  - ')}`);
+    return {
+      schema_version: 1, family_id: familyId, operator,
+      description: typeof spec.description === 'string' ? spec.description : '',
+      deployment: isObj(dep) ? dep : null, signature_axes: axes, target, defaults, configs: out,
+    };
+  };
+
+  const FAM = validateFamilySpec(A.family_spec);
+  const byId = new Map(FAM.configs.map((c) => [c.id, c]));
+  const poolSrc = A.gpu_ids != null ? A.gpu_ids : (FAM.defaults.gpu_ids != null ? FAM.defaults.gpu_ids : '0');
+  const FAMILY_GPUS = String(poolSrc).split(',').map((s) => s.trim()).filter(Boolean);
+  if (!FAMILY_GPUS.length) throw new Error('config_aware needs at least one GPU id in gpu_ids');
+  if (new Set(FAMILY_GPUS).size !== FAMILY_GPUS.length) {
+    throw new Error(`gpu_ids lists a GPU twice (${FAMILY_GPUS.join(',')}); two lanes would share one GPU`);
+  }
+  const parentGfx = String(A.expected_gfx || '').trim().toLowerCase();
+  const parentTarget = String(A.expected_target || '').trim().toLowerCase();
+  if (!!parentGfx !== !!parentTarget) throw new Error('expected_gfx and expected_target must be supplied together');
+  if (parentGfx && FAM.target.expected_gfx &&
+      (parentGfx !== FAM.target.expected_gfx || parentTarget !== FAM.target.expected_target)) {
+    throw new Error(`expected_gfx/expected_target (${parentGfx}/${parentTarget}) conflict with family_spec.target ` +
+      `(${FAM.target.expected_gfx}/${FAM.target.expected_target})`);
+  }
+  const LANE_GFX_F = parentGfx || FAM.target.expected_gfx;
+  const LANE_TARGET_F = parentTarget || FAM.target.expected_target;
+  const EXP_ROOT_F = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/exp')).replace(/\/+$/, '');
+  const pinnedDir = String(A.eval_dir != null ? A.eval_dir : '').trim();
+  if (pinnedDir && !pinnedDir.startsWith('/')) throw new Error('eval_dir must be an absolute path');
+  const ignored = ['kernel_path', 'target_language', 'budget', 'gpu_mode', 'task', 'op_spec', 'workload_spec_path',
+    'backends', 'use_learned_kb', 'update_experience', 'warm_start'].filter((k) => A[k] != null);
+  if (A.mode != null) ignored.unshift('mode');
+  if (ignored.length) {
+    log(`config_aware: parent ${ignored.join(', ')} ignored; each config resolves them from overrides -> family_spec.defaults.`);
+  }
+
+  // Knobs forwarded from the parent call to every lane, only when the caller set them.
+  const PARENT_FORWARD = ['exp_root', 'expected_device_name', 'expected_physical_cu_count', 'gpu_perf_level',
+    'kb_artifacts_dir', 'kb_mode', 'kb_store_dir', 'kb_framework_version', 'perf_knowledge_dir',
+    'use_expert_skills', 'expert_skills_dir', 'llm_stats', 'profile', 'fast_mode', 'max_rounds', 'min_improve',
+    'candidate_floor', 'engineer_minutes', 'deep_cost', 'max_no_improve', 'dra_enabled', 'dra_max_questions',
+    'dra_blindspot', 'dra_max_blindspots', 'agent_timeout_ms', 'agent_retries'];
+  const configSummary = (c) => ({
+    id: c.id, mode: c.mode, target_language: c.target_language, op_spec: c.op_spec,
+    signature: c.signature, contract: c.contract, tags: c.tags, priority: c.priority,
+    workload_weight: c.workload_weight, has_incumbent: !!c.incumbent,
+  });
+  const fmtInputs = (o) => Object.entries(o).map(([k, v]) =>
+    `- ${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join('\n');
+  const tryAgent = async (prompt, opts) => {
+    try { return await agent(prompt, opts); } catch (e) {
+      log(`  ${opts.label} failed (${String(e && e.message ? e.message : e).slice(0, 200)})`);
+      return null;
+    }
+  };
+  // Files are rendered in JS; the writer copies them verbatim and cannot change a status or a number.
+  const persist = async (files, label) => {
+    const body = files.map((f) => `### ${f.path}\n\`\`\`\`\n${f.content}\n\`\`\`\``).join('\n\n');
+    const r = await tryAgent(
+      'You are the file_writer. PHASE=persist_family_artifacts.\n' +
+      'Use the Write tool to create each file below with EXACTLY the content between its four-backtick fences, ' +
+      'verbatim (create parent directories if needed; do NOT reformat, reinterpret, truncate or summarize it). ' +
+      'Write nothing else.\n\n' + body + '\n\nThen return {"written": [<every path you wrote>]}.',
+      { phase: 'Report', label, schema: { type: 'object', properties: { written: { type: 'array', items: { type: 'string' } } },
+        required: ['written'], additionalProperties: true } });
+    const written = r && Array.isArray(r.written) ? r.written : [];
+    const missing = files.filter((f) => !written.includes(f.path)).map((f) => f.path);
+    if (missing.length) log(`  ${label}: not confirmed written: ${missing.join(', ')}`);
+    return missing.length === 0;
+  };
+
+  phase('Freeze');
+  log(`config_aware: family ${FAM.family_id} (${FAM.operator}), ${FAM.configs.length} config(s), ` +
+      `GPUs=${FAMILY_GPUS.join(',')} => concurrency ${Math.min(FAM.configs.length, FAMILY_GPUS.length)}; ` +
+      `est cost ~${FAM.configs.length} lane budget(s).`);
+  let FAMILY_DIR = pinnedDir.replace(/\/+$/, '');
+  if (!FAMILY_DIR) {
+    const prefix = `${EXP_ROOT_F}/family_${FAM.family_id}_`;
+    const made = await tryAgent(
+      'You are the file_writer. PHASE=family_setup.\n' +
+      'Create one NEW, empty directory for an operator-family run. Run exactly this Bash command:\n' +
+      `  mkdir -p "${EXP_ROOT_F}" && d="${prefix}$(date -u +%Y%m%dT%H%M%SZ)_$$" && mkdir "$d" && echo "$d"\n` +
+      'If the final mkdir fails because the directory exists, run the command again. Create nothing else.\n' +
+      'Return {"eval_dir": "<the absolute path the command printed>"}.',
+      { phase: 'Freeze', label: 'file_writer:family_setup', schema: { type: 'object',
+        properties: { eval_dir: { type: 'string' } }, required: ['eval_dir'], additionalProperties: true } });
+    const got = made && typeof made.eval_dir === 'string' ? made.eval_dir.trim().replace(/\/+$/, '') : '';
+    if (!got.startsWith(prefix) || got.length === prefix.length || /(^|\/)\.\.(\/|$)/.test(got)) {
+      log(`config_aware: family eval dir setup failed (got '${got}'); no lane was started.`);
+      return { schema_version: 1, mode: 'config_aware', config_aware: true, family_id: FAM.family_id,
+        validation_status: 'setup_failed', eval_dir: null, configs: [],
+        reason: 'could not create a family eval dir; pass args.eval_dir to pin one' };
+    }
+    FAMILY_DIR = got;
+  }
+  const PATHS = {
+    plan: `${FAMILY_DIR}/family_plan.json`, results: `${FAMILY_DIR}/family_results.json`,
+    report: `${FAMILY_DIR}/family_report.md`, catalog: `${FAMILY_DIR}/implementation_catalog.json`,
+  };
+
+  // ---- Phase 2: plan (advisory; any invalid answer -> one group per config) ----
+  const defaultOrder = () => FAM.configs.slice().sort((a, b) => {
+    const pa = a.priority == null ? Infinity : a.priority;
+    const pb = b.priority == null ? Infinity : b.priority;
+    return pa !== pb ? (pa < pb ? -1 : 1) : a.index - b.index;
+  }).map((c) => c.id);
+  const validatePlan = (raw) => {
+    if (!isObj(raw)) return { error: 'planner returned no object' };
+    if (!Array.isArray(raw.groups) || !raw.groups.length) return { error: 'planner returned no groups' };
+    const assigned = new Map();
+    const groupIds = new Set();
+    const groups = [];
+    for (let gi = 0; gi < raw.groups.length; gi++) {
+      const g = raw.groups[gi];
+      if (!isObj(g)) return { error: `groups[${gi}] is not an object` };
+      const gid = typeof g.group_id === 'string' ? g.group_id.trim() : '';
+      if (!SAFE_ID.test(gid)) return { error: `groups[${gi}].group_id is empty or not [A-Za-z0-9._-]` };
+      if (groupIds.has(gid)) return { error: `duplicate group_id '${gid}'` };
+      groupIds.add(gid);
+      if (!Array.isArray(g.config_ids) || !g.config_ids.length) return { error: `group '${gid}' has no config_ids` };
+      for (const id of g.config_ids) {
+        if (!byId.has(id)) return { error: `group '${gid}' names unknown config '${id}'` };
+        if (assigned.has(id)) return { error: `config '${id}' is assigned to both '${assigned.get(id)}' and '${gid}'` };
+        assigned.set(id, gid);
+      }
+      const members = g.config_ids.map((id) => byId.get(id));
+      for (const part of ['semantics', 'graph']) {
+        const kinds = new Set(members.map((c) => canon(c.contract && c.contract[part] != null ? c.contract[part] : null)));
+        if (kinds.size > 1) return { error: `group '${gid}' mixes configs with different contract.${part}` };
+      }
+      const hints = {};
+      if (isObj(g.config_hints)) {
+        for (const id of g.config_ids) { const h = clip(g.config_hints[id], 400); if (h) hints[id] = h; }
+      }
+      groups.push({
+        group_id: gid, config_ids: g.config_ids.slice(),
+        strategy: clip(g.strategy, 600), reasoning: clip(g.reasoning, 600),
+        implementation_form: PLAN_FORMS.includes(g.implementation_form) ? g.implementation_form : null,
+        confidence: (finite(g.confidence) != null && g.confidence >= 0 && g.confidence <= 1) ? g.confidence : null,
+        config_hints: hints,
+      });
+    }
+    const missing = FAM.configs.filter((c) => !assigned.has(c.id)).map((c) => c.id);
+    if (missing.length) return { error: `planner omitted config(s): ${missing.join(', ')}` };
+    const eo = raw.execution_order;
+    const orderOk = Array.isArray(eo) && eo.length === FAM.configs.length &&
+      new Set(eo).size === eo.length && eo.every((id) => byId.has(id));
+    return { groups, execution_order: orderOk ? eo.slice() : defaultOrder(),
+      order_source: orderOk ? 'planner' : 'default', notes: clip(raw.notes, 800) };
+  };
+
+  phase('Discover');
+  const PLANNER_SCHEMA = { type: 'object', additionalProperties: true, required: ['groups'], properties: {
+    groups: { type: 'array', items: { type: 'object', additionalProperties: true, properties: {
+      group_id: { type: 'string' }, config_ids: { type: 'array', items: { type: 'string' } },
+      strategy: { type: 'string' }, reasoning: { type: 'string' }, implementation_form: { type: 'string' },
+      confidence: { type: 'number' }, config_hints: { type: 'object', additionalProperties: { type: 'string' } },
+    } } },
+    execution_order: { type: 'array', items: { type: 'string' } }, notes: { type: 'string' },
+  } };
+  const rawPlan = await tryAgent(
+    `You are the operator_family_planner. PHASE=plan.
+First Read ${WORKFLOW_DIR}/roles/operator_family_planner.md and follow its instructions for PHASE=plan.
+You may Read knowledge under ${WORKFLOW_DIR}/knowledge/ (including knowledge/learned/INDEX.md). Write no files.
+
+## Inputs
+${fmtInputs({
+    FAMILY_ID: FAM.family_id, OPERATOR: FAM.operator, DESCRIPTION: FAM.description,
+    DEPLOYMENT: FAM.deployment || {}, SIGNATURE_AXES: FAM.signature_axes || [],
+    EXPECTED_GFX: LANE_GFX_F || 'unknown (each lane detects the GPU on-box)',
+    GPU_POOL_SIZE: FAMILY_GPUS.length,
+    OBJECTIVE: 'per-config verified speedup against each config\'s own baseline; each config runs its own lane',
+    CONFIGS: FAM.configs.map(configSummary),
+  })}
+
+Return ONLY the structured JSON the role file specifies (a StructuredOutput tool is forced).`,
+    { phase: 'Discover', label: 'operator_family_planner:plan', schema: PLANNER_SCHEMA });
+  const checked = validatePlan(rawPlan);
+  const planBody = checked.error
+    ? { groups: FAM.configs.map((c) => ({ group_id: c.id, config_ids: [c.id], strategy: '', reasoning: '',
+          implementation_form: null, confidence: null, config_hints: {} })),
+        execution_order: defaultOrder(), order_source: 'default', notes: '' }
+    : checked;
+  if (checked.error) log(`config_aware: planner output rejected (${checked.error}); using one group per config.`);
+  const PLAN = {
+    schema_version: 1, family_id: FAM.family_id, operator: FAM.operator,
+    source: checked.error ? 'fallback' : 'planner', fallback_reason: checked.error || null,
+    groups: planBody.groups, execution_order: planBody.execution_order, order_source: planBody.order_source,
+    notes: planBody.notes, gpu_pool: FAMILY_GPUS,
+    concurrency: Math.min(FAM.configs.length, FAMILY_GPUS.length),
+    cross_config_evaluation: CROSS_CONFIG,
+  };
+  const groupOf = new Map();
+  for (const g of PLAN.groups) for (const id of g.config_ids) groupOf.set(id, g);
+  const planPersisted = await persist([{ path: PATHS.plan, content: JSON.stringify(PLAN, null, 2) }], 'file_writer:family_plan');
+
+  // ---- Phase 3: one kernel_lane.js per config, all launched together, one GPU id each ----
+  const sigStr = (c) => c.signature ? `[${c.signature.join(', ')}]` : '';
+  const familyTask = (c, g) => {
+    const sib = FAM.configs.filter((x) => x.id !== c.id);
+    const sibStr = (x) => x.id + (x.signature ? sigStr(x)
+      : (isObj(x.op_spec) && x.op_spec.shapes ? ` ${clip(JSON.stringify(x.op_spec.shapes), 80)}` : ''));
+    return [
+      '[Operator-family context - advisory only; this config\'s own profile and measurements override it]',
+      `family=${FAM.family_id} operator=${FAM.operator} config=${c.id}` +
+        (c.signature ? ` signature=${sigStr(c)}` : '') +
+        (FAM.signature_axes ? ` axes=${FAM.signature_axes.join(',')}` : '') +
+        ` group=${g.group_id} (${g.config_ids.length} config(s): ${g.config_ids.join(', ')})`,
+      sib.length ? `siblings, optimized in separate lanes this lane cannot see: ${sib.slice(0, 12).map(sibStr).join('; ')}` +
+        (sib.length > 12 ? `; +${sib.length - 12} more` : '') : '',
+      g.strategy ? `planner strategy hypothesis: ${g.strategy}` : '',
+      g.reasoning ? `planner reasoning: ${g.reasoning}` : '',
+      g.config_hints[c.id] ? `config hint: ${g.config_hints[c.id]}` : '',
+      'Optimize ONLY this config against its own oracle and baseline. The TechLead may drop this hint after profiling.',
+      c.task ? `caller task: ${c.task}` : '',
+    ].filter(Boolean).join('\n');
+  };
+  const makeLaneArgs = (c, g, gpu) => ({
+    ...Object.fromEntries(PARENT_FORWARD.filter((k) => A[k] != null).map((k) => [k, A[k]])),
+    ...(LANE_GFX_F ? { expected_gfx: LANE_GFX_F, expected_target: LANE_TARGET_F } : {}),
+    ...(c.use_learned_kb ? { use_learned_kb: c.use_learned_kb } : {}),
+    ...(c.update_experience ? { update_experience: c.update_experience } : {}),
+    ...(c.warm_start ? { warm_start: c.warm_start } : {}),
+    kernel_path: c.kernel_path, workflow_dir: WORKFLOW_DIR, eval_dir: `${FAMILY_DIR}/configs/${c.id}`,
+    mode: c.mode, target_language: c.target_language, budget: c.budget,
+    gpu_ids: gpu, gpu_mode: c.gpu_mode, op_spec: c.op_spec, task: familyTask(c, g),
+    apply_to_original: 'false',
+  });
+  const baseRecord = (c, g, k, gpu, laneArgs) => ({
+    config_id: c.id, group_id: g.group_id, execution_index: k, gpu_id: gpu,
+    mode: c.mode, target_language: c.target_language, budget: c.budget,
+    kernel_path: c.kernel_path, eval_dir: laneArgs.eval_dir,
+    signature: c.signature, contract: c.contract, incumbent: c.incumbent, workload_weight: c.workload_weight,
+    status: null, lane_validation_status: null,
+    speedup_vs_stock: null, speedup_vs_incumbent: null,
+    incumbent_comparison: { status: 'unavailable', reason: c.incumbent
+      ? 'no incumbent adapter: the incumbent was not run under this lane\'s oracle and timing basis'
+      : 'no incumbent supplied' },
+    final_speedup: null, final_weighted: null, final_geomean: null, metric_kind: null,
+    timing_basis: null, workload_aligned: null, lane_eval_dir: null, report_path: null, final_patch: null,
+    warm_start: null, kb_written: null, learned_card: null, reason: null, error: null,
+  });
+  const normalizeLaneResult = (rec, r) => {
+    if (!isObj(r)) return { ...rec, status: 'invalid_result', error: `lane returned ${r === null ? 'null' : typeof r}` };
+    const vs = typeof r.validation_status === 'string' ? r.validation_status.trim().toLowerCase() : '';
+    const prim = finite(r.final_speedup) != null ? r.final_speedup
+      : (finite(r.final_weighted) != null ? r.final_weighted : finite(r.final_geomean));
+    const rr = {
+      ...rec, lane_validation_status: vs || null,
+      final_speedup: finite(r.final_speedup), final_weighted: finite(r.final_weighted), final_geomean: finite(r.final_geomean),
+      speedup_vs_stock: prim,
+      metric_kind: r.workload_aligned === true ? 'weighted' : (r.workload_aligned === false ? 'geomean' : null),
+      workload_aligned: typeof r.workload_aligned === 'boolean' ? r.workload_aligned : null,
+      timing_basis: str(r.timing_basis), lane_eval_dir: str(r.eval_dir), report_path: str(r.report_path),
+      final_patch: str(r.final_patch), warm_start: isObj(r.warm_start) ? r.warm_start : null,
+      kb_written: isObj(r.kb_written) ? r.kb_written : null, learned_card: isObj(r.learned_card) ? r.learned_card : null,
+      reason: str(r.reason),
+    };
+    if (!vs) return { ...rr, status: 'invalid_result', error: 'lane result has no validation_status' };
+    if (vs === 'accepted') {
+      if (prim == null) return { ...rr, status: 'invalid_result', error: 'accepted lane result has no finite speedup' };
+      if (prim > 1.0 && !rr.final_patch) return { ...rr, status: 'invalid_result', error: 'accepted speedup without a final_patch' };
+      return { ...rr, status: prim > 1.0 ? 'optimized' : 'accepted_no_improvement' };
+    }
+    if (vs === 'flagged' || vs === 'author_failed' || vs === 'no_baseline') return { ...rr, status: vs };
+    return { ...rr, status: 'not_accepted' };
+  };
+
+  phase('Bakeoff');
+  const famSem = makeSem(FAMILY_GPUS);
+  const RECORDS = await Promise.all(PLAN.execution_order.map((id, k) => famSem.with(1, async ([gpu]) => {
+    const c = byId.get(id);
+    const g = groupOf.get(id);
+    const laneArgs = makeLaneArgs(c, g, gpu);
+    const rec = baseRecord(c, g, k, gpu, laneArgs);
+    let r;
+    try {
+      r = await workflow({ scriptPath: WORKER }, laneArgs);
+    } catch (e) {
+      const msg = String(e && e.message ? e.message : e).slice(0, 500);
+      log(`config ${id} lane failed: ${msg}`);
+      return { ...rec, status: 'lane_failed', error: msg };
+    }
+    const out = normalizeLaneResult(rec, r);
+    log(`config ${id} -> ${out.status}` +
+        (out.speedup_vs_stock != null ? ` ${out.speedup_vs_stock.toFixed(2)}x` : '') +
+        ` (lane ${out.lane_validation_status || 'n/a'})`);
+    return out;
+  })));
+  RECORDS.sort((a, b) => a.execution_index - b.execution_index);
+
+  // ---- Phase 4-6: aggregate, catalog, report (pure functions of RECORDS) ----
+  const OK_STATUSES = ['optimized', 'accepted_no_improvement'];
+  const countOf = (s) => RECORDS.filter((r) => r.status === s).length;
+  const byStatus = {};
+  for (const r of RECORDS) byStatus[r.status] = (byStatus[r.status] || 0) + 1;
+  const SUMMARY = {
+    total: RECORDS.length, optimized: countOf('optimized'),
+    accepted_no_improvement: countOf('accepted_no_improvement'), flagged: countOf('flagged'),
+    failed: RECORDS.filter((r) => !OK_STATUSES.includes(r.status) && r.status !== 'flagged').length,
+    by_status: byStatus,
+  };
+  const AGGREGATE = (() => {
+    const inc = RECORDS.filter((r) => OK_STATUSES.includes(r.status));
+    const base = {
+      value: null, kind: null, metric: null, timing_basis: null, weighting: 'unweighted',
+      rule: 'geometric mean of per-config speedup_vs_stock over accepted configs; requires one metric kind and one known timing_basis',
+      included: inc.map((r) => r.config_id),
+      excluded: RECORDS.filter((r) => !OK_STATUSES.includes(r.status)).map((r) => ({ config_id: r.config_id, status: r.status })),
+      complete: inc.length === RECORDS.length, reason: '',
+    };
+    if (!inc.length) return { ...base, reason: 'no accepted config results' };
+    const bases = [...new Set(inc.map((r) => r.timing_basis))];
+    const kinds = [...new Set(inc.map((r) => r.metric_kind))];
+    if (bases.length !== 1 || bases[0] == null || bases[0] === 'unknown') {
+      return { ...base, reason: `timing_basis not comparable across accepted configs: ${bases.map(String).join(', ')}` };
+    }
+    if (kinds.length !== 1 || kinds[0] == null) {
+      return { ...base, reason: `metric kind not comparable across accepted configs: ${kinds.map(String).join(', ')}` };
+    }
+    if (inc.some((r) => !(r.speedup_vs_stock > 0))) return { ...base, reason: 'an accepted config has a non-positive speedup' };
+    const value = Math.exp(inc.reduce((s, r) => s + Math.log(r.speedup_vs_stock), 0) / inc.length);
+    return { ...base, value, kind: 'geomean_of_config_speedups', metric: kinds[0], timing_basis: bases[0],
+      reason: base.complete ? 'all configs accepted under one timing basis'
+        : `partial family: ${base.excluded.length} config(s) without an accepted result are excluded` };
+  })();
+  const FALLBACK_REASON = {
+    accepted_no_improvement: 'accepted but not faster than its own baseline (speedup <= 1.0)',
+    flagged: 'the Director flagged the lane result',
+    author_failed: 'author lane produced no correct baseline',
+    no_baseline: 'lane could not establish a baseline',
+  };
+  const CATALOG = {
+    schema_version: 1, family_id: FAM.family_id, operator: FAM.operator,
+    deployment: FAM.deployment, signature_axes: FAM.signature_axes,
+    coverage_policy: 'exact_per_config', deployment_ready: false, cross_config_evaluation: CROSS_CONFIG,
+    implementations: RECORDS.filter((r) => r.status === 'optimized').map((r) => ({
+      implementation_id: `${FAM.family_id}:${r.config_id}`, group_id: r.group_id, config_ids: [r.config_id],
+      artifact: { kind: 'lane_patch', path: r.final_patch }, backend: r.target_language, mode: r.mode,
+      contract: r.contract,
+      coverage: { exact: r.signature ? [r.signature] : [], ranges: [] },
+      orchestration_key: r.config_id,
+      validation: 'accepted', verified_speedup: r.speedup_vs_stock, speedup_vs_stock: r.speedup_vs_stock,
+      speedup_vs_incumbent: null, incumbent_comparison: r.incumbent_comparison,
+      metric_kind: r.metric_kind, timing_basis: r.timing_basis,
+      candidate_class: 'optimization_candidate', deployment_ready: false,
+      eval_dir: r.lane_eval_dir || r.eval_dir, report_path: r.report_path,
+    })),
+    fallback: RECORDS.filter((r) => r.status !== 'optimized').map((r) => ({
+      config_id: r.config_id, selected: r.incumbent ? 'incumbent' : 'stock', status: r.status,
+      reason: FALLBACK_REASON[r.status]
+        || (r.status === 'lane_failed' ? `lane threw: ${r.error}`
+          : r.status === 'invalid_result' ? `malformed lane result: ${r.error}`
+            : `lane validation_status=${r.lane_validation_status}`),
+    })),
+  };
+  const fx = (v) => (v == null ? 'n/a' : `${v.toFixed(3)}x`);
+  const cell = (v) => String(v == null || v === '' ? '-' : v).replace(/\|/g, '\\|').replace(/\n/g, ' ');
+  const REPORT_MD = [
+    `# Operator family report: ${FAM.family_id}`,
+    '',
+    `Operator: ${FAM.operator}. Configs: ${SUMMARY.total}. Optimized: ${SUMMARY.optimized}. ` +
+      `Accepted without improvement: ${SUMMARY.accepted_no_improvement}. Flagged: ${SUMMARY.flagged}. ` +
+      `Failed: ${SUMMARY.failed}.`,
+    FAM.description ? `\n${FAM.description}` : '',
+    '',
+    'Every speedup below is against that config\'s own baseline (stock), measured by its own lane. ' +
+      'No incumbent and no sibling config was executed, so `speedup_vs_incumbent` is n/a and the catalog is not deployment-ready.',
+    '',
+    '## Configs',
+    '',
+    '| config | signature | mode | language | budget | kernel_path |',
+    '|---|---|---|---|---|---|',
+    ...FAM.configs.map((c) => `| ${cell(c.id)} | ${cell(sigStr(c))} | ${c.mode} | ${cell(c.target_language)} | ${c.budget} | ${cell(c.kernel_path)} |`),
+    '',
+    `## Plan (${PLAN.source}${PLAN.fallback_reason ? `: ${PLAN.fallback_reason}` : ''})`,
+    '',
+    'Groups are planner hypotheses. Each config still ran its own lane.',
+    '',
+    '| group | configs | form | confidence | strategy |',
+    '|---|---|---|---|---|',
+    ...PLAN.groups.map((g) => `| ${cell(g.group_id)} | ${cell(g.config_ids.join(', '))} | ${cell(g.implementation_form)} | ` +
+      `${cell(g.confidence)} | ${cell(g.strategy)} |`),
+    '',
+    '## Results',
+    '',
+    '| config | status | lane validation | speedup vs stock | vs incumbent | metric | timing basis | GPU | patch |',
+    '|---|---|---|---|---|---|---|---|---|',
+    ...RECORDS.map((r) => `| ${cell(r.config_id)} | ${r.status} | ${cell(r.lane_validation_status)} | ${fx(r.speedup_vs_stock)} | ` +
+      `n/a | ${cell(r.metric_kind)} | ${cell(r.timing_basis)} | ${cell(r.gpu_id)} | ${cell(r.final_patch)} |`),
+    '',
+    '## Selection',
+    '',
+    ...CATALOG.implementations.map((i) => `- ${i.config_ids[0]}: ${i.implementation_id} (lane patch ${i.artifact.path}), ` +
+      `exact coverage ${i.coverage.exact.length ? JSON.stringify(i.coverage.exact[0]) : 'none (no signature supplied)'}`),
+    ...CATALOG.fallback.map((f) => `- ${f.config_id}: ${f.selected} (${f.reason})`),
+    '',
+    '## Family aggregate',
+    '',
+    AGGREGATE.value != null
+      ? `${fx(AGGREGATE.value)} (${AGGREGATE.kind}, ${AGGREGATE.metric}, timing basis ${AGGREGATE.timing_basis}, ${AGGREGATE.weighting}). ${AGGREGATE.reason}.`
+      : `Not reported: ${AGGREGATE.reason}.`,
+    `Rule: ${AGGREGATE.rule}.`,
+    '',
+    '## Profiling and knowledge',
+    '',
+    'Bottleneck summaries are not part of the lane return; see each lane\'s report.',
+    '',
+    ...RECORDS.map((r) => `- ${r.config_id}: report ${r.report_path || 'n/a'}; warm start ` +
+      `${r.warm_start ? (r.warm_start.adopted ? `adopted (${r.warm_start.slug || 'slug n/a'})` : `not adopted (${r.warm_start.read_reason || 'n/a'})`) : 'n/a'}; ` +
+      `KB write ${r.kb_written ? r.kb_written.slug || 'yes' : 'none'}; learned card ${r.learned_card ? r.learned_card.card_path : 'none'}`),
+    '',
+    '## Failed configs and next actions',
+    '',
+    ...(RECORDS.some((r) => !OK_STATUSES.includes(r.status))
+      ? RECORDS.filter((r) => !OK_STATUSES.includes(r.status)).map((r) => `- ${r.config_id} (${r.status}): ` +
+        `${r.error || r.reason || 'see the lane report'}. Re-run this config alone after checking ${r.eval_dir}.`)
+      : ['None.']),
+    '',
+  ].join('\n');
+
+  const FAMILY_RESULTS = {
+    schema_version: 1, family_id: FAM.family_id, operator: FAM.operator, eval_dir: FAMILY_DIR,
+    summary: SUMMARY, aggregate: AGGREGATE, configs: RECORDS,
+  };
+  phase('Report');
+  const persisted = await persist([
+    { path: PATHS.results, content: JSON.stringify(FAMILY_RESULTS, null, 2) },
+    { path: PATHS.report, content: REPORT_MD },
+    { path: PATHS.catalog, content: JSON.stringify(CATALOG, null, 2) },
+  ], 'file_writer:family_artifacts');
+  log(`config_aware COMPLETE: ${SUMMARY.optimized}/${SUMMARY.total} config(s) optimized. Results in ${FAMILY_DIR}`);
+  return {
+    schema_version: 1, mode: 'config_aware', config_aware: true,
+    family_id: FAM.family_id, operator: FAM.operator, eval_dir: FAMILY_DIR,
+    plan_path: PATHS.plan, results_path: PATHS.results, report_path: PATHS.report, catalog_path: PATHS.catalog,
+    plan: PLAN, configs: RECORDS, summary: SUMMARY, aggregate: AGGREGATE, catalog: CATALOG,
+    artifacts_persisted: planPersisted && persisted,
+    validation_status: SUMMARY.optimized > 0 ? 'ok' : 'no_optimized_config',
+  };
+}
 
 // ===========================================================================
 // SINGLE-LANGUAGE PASS-THROUGH (mode=optimize | author) — byte-compatible with
