@@ -44,7 +44,8 @@
     "Tests: plan_points --reuse-capture (identical deployment reused and resumed, different deployment refused).",
     "Tests trimmed (2026-11-16) to one end-to-end check per module plus the mono_layer lint: kernel-profile keeps test_profile_fast_path, test_vllm_profile (CI) and test_plan_points_reuse; kernel-ut keeps test_ut_contracts and test_mono_layer_lint.",
     "plan_points.py counts observed rows whose log reports no context (sglang '#token: 0' decode rows, 19 of 7305 in InferenceX run 42879019953 c10) under rows_without_context instead of failing the plan.",
-    "c28 regression: preserve sampling-partition ownership in 2D bands; stable band IDs prevent colliding case IDs when owners share a cell. Planner validation and shared lock fixes are in brain/tools and stages/_shared."
+    "c28 regression: preserve sampling-partition ownership in 2D bands; stable band IDs prevent colliding case IDs when owners share a cell. Planner validation and shared lock fixes are in brain/tools and stages/_shared.",
+    "Decode timed on the graph server (2026-11-23): probe_server.py sets DEBUG_CLR_GRAPH_PACKET_CAPTURE=0 on the profile_cuda_graph server so ROCm keeps every VERIFY replay; run_points.py tries the first decode point there and defers the rest to the eager server only if it is graph-hidden (--defer-decode restores the old deferral; --decode-on-graph is gone). plan_points.py --prefill-points spreads prefill points over the observed range; important_shapes.py ranks every observed cell by estimated device time and records its launch (graph/eager, capture size) for UT cases."
   ],
   "files": [
     {

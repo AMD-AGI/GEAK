@@ -121,6 +121,28 @@ class WaveHandoffTest(unittest.TestCase):
         self.assertEqual(state['attempt_limit'], 6)
         self.assertIsNone(state['started'])
 
+    def test_a_block_before_the_last_attempt_hands_over_to_the_next(self):
+        wave = self.root / 'ut_wave'
+        runner = self.root / 'runner.sh'
+        runner.write_text('echo x >> "$2/run/sessions"\n'
+                          'echo \'{"reason": "estimate exceeds the window"}\' > "$2/run/lane_blocked.json"\n')
+        W.save(str(wave / 'wave.json'), {'rows': [{'label': 'op', 'task_dir': str(self.task), 'need': 1}],
+                                         'lane_sec': 600, 'attempts': 2, 'runner': str(runner),
+                                         'eval_dir': str(self.root)})
+        for d in ('prompts', 'logs'):
+            (wave / d).mkdir()
+        with patch.object(W.GPU, 'drain_owner'):
+            self.assertEqual(W.lane_run(SimpleNamespace(wave_dir=str(wave), task='op')), 0)
+        self.assertEqual((self.task / 'run/sessions').read_text().count('x'), 2)
+        self.assertTrue((self.task / 'run/lane_blocked.attempt1.json').exists())
+        state = W.status_of(str(wave), 'op')
+        self.assertEqual((state['status'], state['why']), ('blocked', 'estimate exceeds the window'))
+
+    def test_planned_cases_may_be_a_count(self):
+        W.save(str(self.root / 'task_plan.json'),
+               {'tasks': [{'label': 'op', 'task_dir': str(self.task), 'planned_cases': 54}]})
+        self.assertEqual(W.cmd_plan(self.args(), quiet=True)[2][0]['cost'], 54.0)
+
     def test_resume_reconciles_valid_delivery_interrupted_before_terminal_state(self):
         wave = str(self.root / 'ut_wave')
         W.set_status(wave, 'op', status='running', attempts=2, started=1)

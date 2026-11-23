@@ -132,3 +132,6 @@ python3 $SKILL_ROOT/scripts/ut_wave.py block --task-dir $TASK_DIR \
 ```
 
 A vague reason ("doesn't work") is the one unacceptable outcome; nobody can act on it.
+An estimate that the work will not fit the deadline is not a blocker: build what you can and
+leave the rest for the next attempt. A block before the last attempt is read by that attempt,
+which continues; only the last attempt's block ends the task.

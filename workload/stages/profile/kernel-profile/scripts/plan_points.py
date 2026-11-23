@@ -3,8 +3,8 @@
 captures of another profile of the same deployment.
 
     python3 plan_points.py --eval-dir "$EVAL_DIR" --num-points 24 \
-        [--context-tolerance 1.5] [--target-pct 90] [--runtime-identity identity.json] \
-        [--reuse-capture <another profile's EVAL_DIR>]
+        [--prefill-points 6] [--context-tolerance 1.5] [--target-pct 90] \
+        [--runtime-identity identity.json] [--reuse-capture <another profile's EVAL_DIR>]
 
 reads   $EVAL_DIR/serving.json  $EVAL_DIR/evidence/observed_workload.json
         [$EVAL_DIR/evidence/server_info.json]  [$EVAL_DIR/runtime_identity.json]
@@ -16,7 +16,10 @@ mode and a context band (`--context-tolerance`; 1 = exact context). The represen
 cell is an actual observed row, never an invented midpoint. The budget goes greedily to the
 cell covering the most uncovered proxy mass of its phase (prefill new tokens, decode
 iterations), each phase normalized to 1, until every phase meets `--target-pct` or the budget
-is spent. Proxy coverage is a planning figure, not measured GPU time.
+is spent. Proxy coverage is a planning figure, not measured GPU time. `--prefill-points N`
+takes N prefill cells at evenly spaced quantiles of prefill proxy mass instead: prefill
+new tokens say little about its time (attention grows with the cached context), so the
+points span the range and important_shapes.py interpolates measured costs between them.
 
 Reuse. A cell another profile already captured costs no budget when both deployments are
 identical: serving fields and arguments except transport/allocation, and the runtime identity
@@ -158,6 +161,8 @@ def boundaries(serving, eval_dir):
         if isinstance(info.get(k), list) and info[k]:
             b["graph_bs"] = sorted(int(x) for x in info[k])
             break
+    if not b["graph_bs"]:
+        b["graph_bs"] = read(Path(eval_dir) / "evidence/observed_workload.json", {}).get("graph_bs") or []
     if not b["graph_bs"] and (info.get("cuda_graph_max_bs") or info.get("cuda_graph_max_bs_decode")):
         b["notes"].append("cuda_graph_max_bs is set but the capture-size list is not exposed: a "
                           "decode point at bs=B may measure the padded size, not B")
@@ -195,7 +200,20 @@ def reusable(other_dir, dep, tolerance):
     return out
 
 
-def plan(serving, identity, observed, budget, tolerance=1.5, target_pct=90.0, reuse=None):
+def spread(cells, n):
+    """n cells at evenly spaced quantiles of their proxy mass, ordered by (shape, context): a
+    range the measured costs can be interpolated over, not only the heaviest cells."""
+    cells = sorted(cells, key=lambda c: (c["partition"][1], c["point"]["context_tokens"]))
+    total, acc, out = sum(c["proxy_mass"] for c in cells), 0.0, []
+    for c in cells:
+        acc += c["proxy_mass"]
+        if len(out) < n and acc >= (len(out) + 0.5) / n * total:
+            out.append(c)
+    return out
+
+
+def plan(serving, identity, observed, budget, tolerance=1.5, target_pct=90.0, reuse=None,
+         prefill_points=None):
     if isinstance(budget, bool) or not isinstance(budget, int) or budget < 0:
         raise ValueError("num-points must be a nonnegative integer")
     positive(tolerance, "context-tolerance")
@@ -241,13 +259,25 @@ def plan(serving, identity, observed, budget, tolerance=1.5, target_pct=90.0, re
             reused.append(c)
             covered[c["partition"][0]] += c["gain"]
 
+    pool = remaining
+    if prefill_points is not None:
+        pool = [c for c in remaining if c["partition"][0] != "PREFILL"]
+        have = sum(c["partition"][0] == "PREFILL" for c in reused)
+        pre = [c for c in remaining if c["partition"][0] == "PREFILL"]
+        for c in spread(pre, min(max(0, prefill_points - have), budget)):
+            remaining.remove(c)
+            selected.append(c)
+            covered["PREFILL"] += c["gain"]
+
     def score(c):
         return min(c["gain"], max(0.0, target_pct / 100 - covered[c["partition"][0]]))
-    while remaining and len(selected) < budget:
-        best = max(remaining, key=score)
+    while pool and len(selected) < budget:
+        best = max(pool, key=score)
         if score(best) <= 1e-12:
             break
-        remaining.remove(best)
+        pool.remove(best)
+        if best in remaining:
+            remaining.remove(best)
         selected.append(best)
         covered[best["partition"][0]] += best["gain"]
     phases = {ph: {"total_proxy_mass": totals[ph],
@@ -295,6 +325,9 @@ def main(argv=None):
                     help="capture budget for this config (reused points cost none)")
     ap.add_argument("--context-tolerance", type=float, default=1.5)
     ap.add_argument("--target-pct", type=float, default=90.0)
+    ap.add_argument("--prefill-points", type=int, default=None,
+                    help="spend exactly this many of the budget on PREFILL, spread over its "
+                         "observed range (default: PREFILL competes greedily with DECODE)")
     ap.add_argument("--runtime-identity", help="default: $EVAL_DIR/runtime_identity.json")
     ap.add_argument("--reuse-capture", help="another profile EVAL_DIR of the same deployment")
     a = ap.parse_args(argv)
@@ -308,7 +341,7 @@ def main(argv=None):
             require_identity(identity, a.runtime_identity or str(ev / "runtime_identity.json"))
             reuse = reusable(a.reuse_capture, dep, a.context_tolerance)
         doc = plan(serving, identity, read(ev / "evidence/observed_workload.json"),
-                   a.num_points, a.context_tolerance, a.target_pct, reuse)
+                   a.num_points, a.context_tolerance, a.target_pct, reuse, a.prefill_points)
     except (ValueError, OSError, KeyError) as exc:
         print("plan_points: %s" % exc, file=sys.stderr)
         return 1

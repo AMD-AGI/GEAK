@@ -428,12 +428,17 @@ def _run(a, task, meta):
     call = cases.call
     if meta.get("phase_regimes") is None and h.deployment_compile_mode(regime):
         call = h.compiled_op(call, regime)
-    graph = h.deployment_graph_mode(regime)
+
+    def launch_graph(case, default):
+        # A case's observed launch (important_shapes.json) over its phase's default: a decode
+        # batch above the largest capture size runs eagerly.
+        mode = (case.get("launch") or {}).get("mode")
+        return mode == "graph" if mode in ("graph", "eager") else h.deployment_graph_mode(default)
 
     def case_execution(case):
         phase_regimes = meta.get("phase_regimes")
         if phase_regimes is None:
-            return call, graph
+            return call, launch_graph(case, regime)
         phase = case.get("regime", "")
         if not isinstance(phase_regimes, dict) or not isinstance(phase_regimes.get(phase), dict):
             raise ValueError(f"missing phase_regimes entry for {phase!r}")
@@ -441,7 +446,7 @@ def _run(a, task, meta):
         phase_call = cases.call
         if h.deployment_compile_mode(phase_regime):
             phase_call = h.compiled_op(phase_call, phase_regime)
-        return phase_call, h.deployment_graph_mode(phase_regime)
+        return phase_call, launch_graph(case, phase_regime)
 
     if a.mode == "time":
         rt = _load("rank_timing", os.path.join(task, "rank_timing.py")) \

@@ -91,9 +91,10 @@ produces profile evidence only; UT declaration/scaffolding is a separate explici
   JSON parsing when the streaming format does not match.
 - `serving_probe.py` checks phase/shape on one rank, closes after trace files settle,
   and drains its requests before returning. `point_census.py` checks every rank.
-- `probe_server.py` captures prefill on the declared graph server and normally
-  defers decode to an eager server. `--decode-on-graph` can try graph decode first;
-  graph-hidden or partially traced cycles are rejected and retried eagerly.
+- `probe_server.py` keeps the declared graph server (with
+  `DEBUG_CLR_GRAPH_PACKET_CAPTURE=0`) and `run_points.py` times decode on it. If the first
+  decode point is graph-hidden or partially traced, the rest are deferred and recaptured
+  on an eager server. `--defer-decode` skips the graph try.
 - A graph decode window with valid costs but missing source frames requests one
   eager evidence window. Its cost is kept outside the original graph census.
 - `point_census.py` counts complete instances: prefill target plus its draft;

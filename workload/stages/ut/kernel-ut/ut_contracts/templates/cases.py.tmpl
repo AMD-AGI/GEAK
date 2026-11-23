@@ -122,7 +122,7 @@ def timing_specs(h, meta):
 
 def make_timing_case(spec):
     return {{"sig": spec["sig"], "regime": spec["regime"], "m": spec.get("m"),
-             "args": make_args(spec)}}
+             "launch": spec.get("launch"), "args": make_args(spec)}}
 
 
 def timing_cases(h, meta):

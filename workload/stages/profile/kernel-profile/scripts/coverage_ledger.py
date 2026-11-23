@@ -188,6 +188,8 @@ def main():
         covered = any(ut_covers(u, phase, shape, args.shape_tolerance) for u in ut_cases)
         e = phases[phase]
         e["points"].append({"point_id": pid, "shape": shape, "instances": inst,
+                            "context": p.get("achieved_context") or p.get("context_tokens"),
+                            "us_per_instance": round(sum(c["per_kernel"].values()), 3),
                             "ut_covered": covered,
                             "collective_wait_mass_us": c["per_kernel"].get(WAIT_KERNEL, 0.0) * inst,
                             "max_shape_ratio": p["represented"]["max_shape_ratio"]})

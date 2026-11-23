@@ -441,7 +441,7 @@ class RunPointsTest(unittest.TestCase):
         self.assertTrue(att[0]["graph_hidden"])
         self.assertIn("--disable-cuda-graph", att[0]["reason"])
 
-    def test_graph_server_defers_decode_to_eager_without_a_capture(self):
+    def graph_server_run(self, *extra):
         graph = FakeServer(graph=True)
         self.addCleanup(graph.close)
         state = self.root / "probe_server.json"
@@ -450,16 +450,29 @@ class RunPointsTest(unittest.TestCase):
                                      "decode_eager": False}))
         p = subprocess.run(
             [sys.executable, str(SCRIPTS / "run_points.py"), "--points", str(self.root / "points.json"),
-             "--server-state", str(state), "--eval-dir", str(self.root / "eval"), *FAST],
+             "--server-state", str(state), "--eval-dir", str(self.root / "eval"), *FAST, *extra],
             capture_output=True, text=True, timeout=300)
         self.assertNotEqual(p.returncode, 0)
-        ev = self.root / "eval"
-        run = json.loads((ev / "profile_run.json").read_text())
+        run = json.loads((self.root / "eval" / "profile_run.json").read_text())
         self.assertEqual(run["status"], "decode deferred to eager")
+        return graph, run
+
+    def test_defer_decode_captures_no_decode_on_the_graph_server(self):
+        graph, run = self.graph_server_run("--defer-decode")
         for pid in ("de_1", "de_2"):
             (att,) = run["points"][pid]["attempts"]
             self.assertEqual((att["status"], att["graph_hidden"]), ("deferred", True))
         self.assertEqual(len(graph.profile_bodies), 2)            # the two prefill windows only
+
+    def test_graph_server_tries_one_decode_then_defers_to_eager(self):
+        graph, run = self.graph_server_run()
+        ev = self.root / "eval"
+        (tried,) = run["points"]["de_1"]["attempts"]
+        self.assertTrue(tried["graph_hidden"])
+        self.assertNotEqual(tried["status"], "deferred")
+        (att,) = run["points"]["de_2"]["attempts"]
+        self.assertEqual((att["status"], att["graph_hidden"]), ("deferred", True))
+        self.assertEqual(len(graph.profile_bodies), 3)            # two prefill + the one decode try
         self.assertFalse((ev / "kernel_ranking.json").exists())   # no ranking without decode
         sys.path.insert(0, str(SCRIPTS))
         import probe_server

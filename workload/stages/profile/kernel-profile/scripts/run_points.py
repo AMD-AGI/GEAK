@@ -91,11 +91,10 @@ def main():
     ap.add_argument("--decode-eager", action="store_true",
                     help="decode is graph-deployed but this server runs eagerly: decode "
                          "collective wait is excluded from the ranking denominator")
-    ap.add_argument("--decode-on-graph", action="store_true",
-                    help="try DECODE points on this graph-mode server too (old behaviour). "
-                         "Default: when --server-state says the server keeps the decode CUDA "
-                         "graph, it captures PREFILL only and every DECODE point is deferred "
-                         "to the eager server without a capture")
+    ap.add_argument("--defer-decode", action="store_true",
+                    help="on a graph-mode server, capture PREFILL only and defer every DECODE "
+                         "point to the eager server. Default: try the first DECODE point here "
+                         "and defer the rest only if it is graph-hidden")
     ap.add_argument("--draft-shares-name", action="store_true",
                     help="passed to point_census.py for PREFILL points")
     ap.add_argument("--observed", default=None,
@@ -161,15 +160,17 @@ def main():
     timeline = {"started": time.strftime("%Y-%m-%dT%H:%M:%S"), "points": {},
                 "server": a.base_url, "decode_eager": a.decode_eager}
     t_all = time.time()
-    # Decode on a graph-mode server: under spec decoding the profiler drops most VERIFY
-    # replays (sglang 0.5.21/ROCm 7.2: 1 of 8 kept on most ranks), so every decode point
-    # was refused as graph-hidden and recaptured eagerly anyway -- after a failed attempt
-    # that cost up to the window timeout. Defer them to the eager server up front.
+    # Decode on a graph-mode server is timed as deployed (probe_server.py sets
+    # DEBUG_CLR_GRAPH_PACKET_CAPTURE=0 so ROCm traces every VERIFY replay). Without it the
+    # profiler dropped most VERIFY replays under spec decoding (sglang 0.5.21/ROCm 7.2) and
+    # every decode point failed once before its eager recapture. So the first decode point
+    # is censused before the next is tried; if it is graph-hidden the rest are deferred.
     # Only when the server state says the decode graph is on: without --server-state the
     # server's mode is unknown, and an "as_declared" deployment may not be graph-launched.
-    defer_decode = (st.get("framework", "sglang") == "sglang" and server_capture == "profile_cuda_graph" and not a.decode_eager
-                    and not a.decode_on_graph)
-    timeline["decode_deferred_to_eager"] = defer_decode
+    graph_server = (st.get("framework", "sglang") == "sglang" and server_capture == "profile_cuda_graph"
+                    and not a.decode_eager)
+    defer_decode = graph_server and a.defer_decode
+    probe_decode = graph_server and not a.defer_decode
     deferred = []
 
     def census_job(pt, trace_dir):
@@ -216,8 +217,7 @@ def main():
                 # graph_hidden is the contract probe_server.py (and any group driver) reads
                 # to restart eagerly and --redo exactly these points.
                 rec["attempts"].append({"tag": pid, "status": "deferred", "graph_hidden": True,
-                                        "reason": "decode is captured on the eager server "
-                                                  "(--decode-on-graph tries it here)",
+                                        "reason": "decode is captured on the eager server",
                                         "probe_wall_s": 0})
                 deferred.append(pid)
                 continue
@@ -251,6 +251,10 @@ def main():
                     rec["capture_mode"] = ("eager" if a.decode_eager else "profile_cuda_graph") \
                         if pt["phase"] == "DECODE" else "eager_prefill"
                     futures[pid] = census_pool.submit(census_job, pt, trace_dir)
+                    if probe_decode and pt["phase"] == "DECODE":
+                        # The census, not the probe, sees a rank that dropped replays.
+                        probe_decode = False
+                        defer_decode = bool(futures[pid].result().get("graph_hidden"))
                     break
                 if res.get("server_down"):
                     # Every later point would fail the same way; a rerun resumes from here.
@@ -262,6 +266,7 @@ def main():
                     # Recapturing on the same graph-mode server would fail the same way.
                     print("[%s]   graph-hidden decode; needs an eager server "
                           "(probe_server.py run does that itself)" % now(), flush=True)
+                    probe_decode, defer_decode = False, graph_server
                     break
         print("[%s] captures done in %.0fs; waiting for %d census job(s)"
               % (now(), time.time() - t_all, sum(not f.done() for f in futures.values())),
@@ -324,6 +329,13 @@ def main():
     for pid, path in censuses.items():
         cmd += ["--census", "%s=%s" % (pid, path)]
     steps.append(("coverage_ledger", cmd))
+    if os.path.exists(os.path.join(ev, "sampling_plan.json")):
+        variants = os.path.join(ev, "evidence", "compile_variants.json")
+        steps.append(("important_shapes", [py, os.path.join(HERE, "important_shapes.py"),
+                                           "--plan", os.path.join(ev, "sampling_plan.json"),
+                                           "--coverage", cov, "--out",
+                                           os.path.join(ev, "evidence", "important_shapes.json")]
+                      + (["--compile-variants", variants] if os.path.exists(variants) else [])))
     rank = os.path.join(ev, "kernel_ranking.json")
     cmd = [py, os.path.join(HERE, "build_ranking.py"), "--coverage", cov, "--out", rank,
            "--probe-result", os.path.join(probe_dir, "*.json")]
@@ -433,6 +445,17 @@ def eager_window(a, ev, plan, py, log, timeline, pid, kernels):
         {"point": pid, "rc": rc, "wall_s": took, "message": msg.splitlines()[-1] if msg else ""})
     timeline["eager_evidence"] = timeline["eager_evidence_windows"][0]
     print("[%s] eager evidence window %s: rc=%d in %.0fs" % (now(), tag, rc, took), flush=True)
+
+
+def phases_arg(select_arg):
+    """`--phases` and its values from --select-arg, given as `--phases=A` or `--phases A B`."""
+    out, keep = [], False
+    for x in select_arg:
+        if x.startswith("--"):
+            keep = x.split("=")[0] == "--phases"
+        if keep:
+            out.append(x)
+    return out
 
 
 def flag_value(cmd, flag):
@@ -557,8 +580,7 @@ def evidence(a, ev, censuses, points, sel, py, log, timeline, run_steps):
         cand = os.path.join(ev, "attribution_candidates.json")
         if not run_steps([("attribution_candidates",
                            [py, os.path.join(HERE, "select_targets.py"), rank, "--candidates",
-                            "--output", cand] + [x for x in a.select_arg
-                                                  if x.split("=")[0] in ("--phases",)])]):
+                            "--output", cand] + phases_arg(a.select_arg))]):
             return False
     shapes_dir = os.path.join(ev, "evidence", "shapes")
     os.makedirs(shapes_dir, exist_ok=True)

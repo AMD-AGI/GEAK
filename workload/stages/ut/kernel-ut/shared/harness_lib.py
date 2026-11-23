@@ -1033,6 +1033,16 @@ def serving_weighted_speedup(per_case, meta, *, identity_eps=1e-4, geomean=True)
     out = {"weighted": weighted, "geomean": gm, "primary": weighted, "included": len(included),
            "dropped_unserved": dropped_unserved, "suspect_identity": suspect, "per_case": rows,
            "reason": ""}
+    # One figure per phase as well: a decode gain must not hide a prefill loss (or the
+    # reverse), and a later stage may keep the candidate for one phase only.
+    per_phase = {}
+    for r in included:
+        p = per_phase.setdefault(r["regime"], {"W": 0.0, "D": 0.0, "cases": 0})
+        p["W"] += r["weight"]
+        p["D"] += r["weight"] / r["speedup"]
+        p["cases"] += 1
+    out["per_phase"] = {k: {"weighted": v["W"] / v["D"] if v["D"] else None, "cases": v["cases"]}
+                        for k, v in per_phase.items()}
     # Cases labelled with a branch (one UT covering several dispatch branches): one figure per
     # branch, so a gain on one branch cannot hide a loss on another. Baseline time x calls
     # weights each branch's own cases; `worst_branch` is what a keep decision must look at.

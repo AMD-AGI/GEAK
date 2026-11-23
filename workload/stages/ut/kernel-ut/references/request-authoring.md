@@ -22,6 +22,8 @@ source and writes the request; every decision in it keeps its basis on record.
   - `evidence/adjacency.json`: kernels launched back to back;
   - `sampling_points_final.json`: each point's phase, achieved shape and context, and the
     instances it represents, plus the bands no point covers;
+  - `evidence/important_shapes.json`: the observed cells worth a case, ranked by estimated
+    device time, each with its `launch` (graph or eager, and the padded `capture_bs`);
   - `evidence/compile_variants.json`: what the server compiled, and the calls that built it.
 - The serving image's installed source, read in a CPU-only container. A frame proves a call
   reached a file; it does not prove the boundary. Read the code.
@@ -60,6 +62,17 @@ reason, or a companion of a task with its reason.
      overstates calls by the kernels per call.
    - Check conservation: in every phase a task runs, its cases' instances add up to the
      phase's observed total.
+   - Add one correctness case (`random: true`, `timed: false`, `effective_calls: 0`, no
+     `instances`, so conservation is unchanged) per
+     important cell of the task's phases that no point or bucket case already exercises,
+     and name the cell in every case built from one (`important_cell: <id>`). A cell the
+     task's kernels never run at gets a reason in `important_waivers`. Weights stay on the
+     point and bucket cases: important cells widen what is checked, not what is timed.
+     A prefill cell may stand for a band (`shape_range`, `context_range`): build it at the
+     cell's own observed shape; its range ends are cheap extra correctness cases.
+   - Copy the cell's `launch` into the case. A graph case's axes use `capture_bs`, the
+     batch the server replays, not the logical batch. A case without `launch` follows its
+     phase's `phase_regimes`.
 7. **Case axes.** Derive each axis from the host-op dims in `evidence/shapes`, as an
    expression in the phase shape and context. Under speculation, decode rows are
    requests × tokens per step. Kernels launched straight through `hipModuleLaunchKernel` (FlyDSL,
@@ -94,8 +107,12 @@ reason, or a companion of a task with its reason.
     and `attrs`, and `phase_regimes` (`{"DECODE": {"cuda_graph": true}}` when decode is
     graph-launched).
   - `manifest.cases[]`: a unique `sig`, `regime` (phase or branch), `axes`, and a finite,
-    nonnegative `effective_calls`. Also `kind` (`point` or `bucket`) and the evidence it
-    came from. `manifest.replay_sigs` lists the graph-phase cases to replay.
+    nonnegative `effective_calls`. Also `kind` (`point`, `bucket` or `important`), the
+    evidence it came from, and `important_cell` / `launch` where §6 asks for them.
+    `manifest.replay_sigs` lists the graph-phase cases to replay.
+  - `important_waivers`: `{cell id: reason}` for important cells the task does not run at.
+- `important_shapes`: the path of the profile's `evidence/important_shapes.json`. With it,
+  `--check` fails a task whose phases have an important cell no case names.
   - `server_preimports`, `server_evidence` (`run/server_variants.json`,
     `run/server_calls.json`), `expected_launches` per phase, and
     `compile_variant_waivers` with a reason for each.

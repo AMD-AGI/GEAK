@@ -28,8 +28,20 @@ environment receipt, not placeholders from this example.
 
 ```bash
 python3 "$SKILL_ROOT/scripts/plan_points.py" --eval-dir "$EVAL_DIR" \
-  --num-points 24 --context-tolerance 1.5 --target-pct 90
+  --num-points 24 --prefill-points 6 --context-tolerance 1.5 --target-pct 90
 ```
+
+Budget by time, not habit. Measured on a TP4 MXFP4 deployment (2026-11-20): graph server
+start 325 s with a warm page cache, decode points 36-53 s each, a 16k-token prefill point
+11 s without a cached prefix (a cached prefix adds the prefill that fills it). By that
+estimate ~20 decode and ~6 prefill points fit a 30-minute profile. Do not cut the budget
+below what the phases need to meet the target; `budget_limited` is reported downstream as
+missing coverage.
+
+`--prefill-points` spreads prefill over its observed range (quantiles of prefill new tokens,
+ordered by shape and context) rather than spending it on the heaviest cells: new tokens say
+little about prefill time once most of the context is cached, so `important_shapes.py`
+needs measured points on both sides of every cell it estimates.
 
 Planning is CPU-only. Observed rows are grouped by phase, exact shape, sequence count,
 observed graph mode and a context band; adjacent M values are never assumed to share a

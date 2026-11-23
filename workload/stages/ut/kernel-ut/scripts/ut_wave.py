@@ -175,7 +175,8 @@ def task_rows(eval_dir, only=None):
         if only and t["label"] not in only:
             continue
         req = load(os.path.join(t["task_dir"], "run", "requested_kernel.json"), {})
-        cases = (t.get("planned_cases") or {}).get("total") or 1
+        planned = t.get("planned_cases")
+        cases = (planned.get("total") if isinstance(planned, dict) else planned) or 1
         calls = ((t.get("server_evidence") or {}).get("calls") or 0)
         cost = (cases + calls / 4.0) * FAMILY_WEIGHT.get(t.get("ut_family"), 1.0)
         rows.append({"label": t["label"], "task_dir": t["task_dir"], "family": t.get("ut_family"),
@@ -642,9 +643,9 @@ def lane_run(a):
     done = heartbeat(wave, row["label"])
     st = status_of(wave, row["label"])
     deadline = (st.get("started") or now()) + cfg["lane_sec"] * cfg["attempts"]
+    limit = int(st.get('attempt_limit') or cfg['attempts'])
     try:
-        for attempt in range(int(st.get("attempts") or 0) + 1,
-                             int(st.get('attempt_limit') or cfg['attempts']) + 1):
+        for attempt in range(int(st.get("attempts") or 0) + 1, limit + 1):
             left = int(min(cfg["lane_sec"], deadline - now()))
             if left < 120:
                 set_status(wave, row["label"], status="failed", why="lane budget spent")
@@ -664,11 +665,19 @@ def lane_run(a):
                                      env=env)
             finally:
                 GPU.drain_owner(wave, row['label'])
-            blocker = load(os.path.join(tdir, "run", "lane_blocked.json"))
+            blocked = os.path.join(tdir, "run", "lane_blocked.json")
+            blocker = load(blocked)
             if rc == 78:
                 set_status(wave, row["label"], status="blocked",
                            why="runner precondition unmet (exit 78); see %s" % logf)
                 return 0
+            if blocker and attempt < limit:
+                # Lanes block on guesses too (a time estimate, an unfamiliar family): the next
+                # attempt reads the reason and continues; only the last attempt's block stands.
+                os.replace(blocked, blocked[:-len(".json")] + ".attempt%d.json" % attempt)
+                st = set_status(wave, row["label"], why="attempt %d blocked itself: %s"
+                                % (attempt, blocker.get("reason")))
+                continue
             if blocker:
                 set_status(wave, row["label"], status="blocked", why=blocker.get("reason"))
                 return 0

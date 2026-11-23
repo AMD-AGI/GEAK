@@ -40,13 +40,12 @@ command is run_points.py and a decode point comes back graph_hidden, `run` resta
 eagerly and runs the command again; run_points.py resumes and recaptures only what is
 missing. probe_server.json records the mode that was actually used.
 
-With the default "profile_cuda_graph", run_points.py does not try decode on the graph
-server at all: the graph server captures PREFILL (and records the deployment's compile
-variants), every DECODE point is reported deferred (graph_hidden) without a capture, and
-the eager restart above captures them. Under spec decoding the profiler kept 1 of 8
-VERIFY replays on most ranks (sglang 0.5.21, ROCm 7.2), so every decode point was refused
-and recaptured eagerly anyway, after a failed attempt each. run_points.py --decode-on-graph
-restores trying decode on the graph server first.
+With the default "profile_cuda_graph", decode is timed as deployed: the server runs with
+DEBUG_CLR_GRAPH_PACKET_CAPTURE=0 (unless serving.json sets it), which on ROCm keeps every
+VERIFY replay in the trace. Without it the profiler kept 1 of 8 VERIFY replays on most
+ranks under spec decoding (sglang 0.5.21, ROCm 7.2). run_points.py tries the first decode
+point on this server; if it is still graph-hidden, the remaining decode points are deferred
+and the eager restart above captures them. run_points.py --defer-decode skips the try.
 
 The first server started is the deployment's; its compile variants are also written to
 <eval-dir>/evidence/compile_variants.json when the command names an --eval-dir. Variants of
@@ -251,6 +250,7 @@ def command(cfg, mode, trace_root, watch_dir=None):
                                                         if env.get("PYTHONPATH") else "")
     if framework == "sglang" and mode == "profile_cuda_graph":
         env["PROBE_GUARD_GRAPH_SNAPSHOT"] = "1"
+        env.setdefault("DEBUG_CLR_GRAPH_PACKET_CAPTURE", "0")
     if watch_dir or mode == "profile_cuda_graph":
         env["PYTHONPATH"] = watch_overlay(os.path.dirname(trace_root)) + (
             ":" + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
@@ -451,6 +451,7 @@ class Server:
                     os.makedirs(os.path.join(eval_dir, "evidence"), exist_ok=True)
                     json.dump(doc, open(os.path.join(eval_dir, "evidence", "compile_variants.json"),
                                         "w"), indent=1)
+                    refresh_important_shapes(eval_dir)
         return out
 
     def stop(self, wait=120):
@@ -488,6 +489,18 @@ def start_with_fallback(srv, mode, ready_timeout):
         raise SystemExit("probe_server: the server did not come up (%s); see %s"
                          % ("timeout" if res.get("timeout") else "rc=%s" % res.get("rc"), res["log"]))
     return res
+
+
+def refresh_important_shapes(eval_dir):
+    """run_points.py ranked the shapes while the server ran; the compile variants that cut
+    prefill bands exist only now that it has stopped."""
+    paths = [os.path.join(eval_dir, f) for f in
+             ("sampling_plan.json", "coverage.json", "evidence/compile_variants.json")]
+    if all(os.path.exists(p) for p in paths):
+        sys.path.insert(0, HERE)
+        import important_shapes
+        important_shapes.main(["--plan", paths[0], "--coverage", paths[1], "--compile-variants",
+                               paths[2], "--out", os.path.join(eval_dir, "evidence", "important_shapes.json")])
 
 
 def graph_hidden_points(cmd):
