@@ -21,7 +21,7 @@ design a bounded probe per [capture](capture.md) rather than a new full replay.
 `params.max_targets` narrows the default selection after it is computed (keep the
 first N by overall share); it never widens it or backfills rank 6.
 
-Pass `params.sampling` (`num_points`, `prefill_points`, `context_tolerance`, `target_pct`) to
+Pass `params.sampling` (`num_points`, `prefill_points`, `important_cells`, `context_tolerance`, `target_pct`) to
 `plan_points.py` ([sampling](sampling.md)), and `params.reuse_capture` (another profile's
 `EVAL_DIR` of the identical deployment) as `--reuse-capture`.
 

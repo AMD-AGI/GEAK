@@ -49,7 +49,8 @@ each verified invocation. Distinct branches with different mandatory members
 need their own labels and evidence. Return matching `phase_selection_validations`.
 
 Each `dispatch_ut.phases[]` row contains unique branch `regime`, exact
-`device_kernel` and `seam_candidates`. All branch verdicts verify the same whole
+`device_kernel` and `seam_candidates`, and `required_device_kernels` when the branch
+launches more than one selected kernel. All branch verdicts verify the same whole
 operation. Retain actual PREFILL/DECODE phase separately in case metadata when
 branch labels subdivide a phase. Do not combine `joint_ut` and `dispatch_ut`.
 Do not list mutually exclusive branches as simultaneous mandatory members.

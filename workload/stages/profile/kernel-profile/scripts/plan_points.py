@@ -3,7 +3,7 @@
 captures of another profile of the same deployment.
 
     python3 plan_points.py --eval-dir "$EVAL_DIR" --num-points 24 \
-        [--prefill-points 6] [--context-tolerance 1.5] [--target-pct 90] \
+        [--prefill-points 6] [--important-cells 24] [--context-tolerance 1.5] [--target-pct 90] \
         [--runtime-identity identity.json] [--reuse-capture <another profile's EVAL_DIR>]
 
 reads   $EVAL_DIR/serving.json  $EVAL_DIR/evidence/observed_workload.json
@@ -328,6 +328,9 @@ def main(argv=None):
     ap.add_argument("--prefill-points", type=int, default=None,
                     help="spend exactly this many of the budget on PREFILL, spread over its "
                          "observed range (default: PREFILL competes greedily with DECODE)")
+    ap.add_argument("--important-cells", type=int, default=24,
+                    help="per phase, the most cells important_shapes.py hands to UT (each becomes "
+                         "a correctness case per stream of every task); recorded in sampling_plan.json")
     ap.add_argument("--runtime-identity", help="default: $EVAL_DIR/runtime_identity.json")
     ap.add_argument("--reuse-capture", help="another profile EVAL_DIR of the same deployment")
     a = ap.parse_args(argv)
@@ -346,6 +349,7 @@ def main(argv=None):
         print("plan_points: %s" % exc, file=sys.stderr)
         return 1
     doc["boundaries"] = boundaries(serving, ev)
+    doc["important_cells"] = a.important_cells
     points = [c["point"] for c in doc["reused"]] + [c["point"] for c in doc["captures"]]
     write(ev / "sampling_points.json", {"contract": "kernel_extract/sampling_points/v2",
                                         "context_tolerance": a.context_tolerance, "points": points})

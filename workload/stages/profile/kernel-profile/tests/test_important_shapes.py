@@ -76,10 +76,13 @@ class ImportantTest(unittest.TestCase):
         self.assertIsNone(important_shapes.capture_bs(9, [1, 2, 4, 8]))
 
     def test_a_long_tail_is_capped_and_says_so(self):
-        doc = important_shapes.rank(self.plan, self.coverage([(1, 100.0)]), 90, max_cells=3)
+        self.plan["important_cells"] = 3          # plan_points.py --important-cells
+        doc = important_shapes.rank(self.plan, self.coverage([(1, 100.0)]), 90)
         pre = [c for c in doc["cells"] if c["phase"] == "PREFILL" and "time" in c["why"]]
-        self.assertEqual(len(pre), 3)
+        self.assertEqual((len(pre), doc["max_cells"]), (3, 3))
         self.assertTrue(doc["calibration"]["PREFILL"]["capped"])
+        self.assertEqual(important_shapes.rank(self.plan, self.coverage([(1, 100.0)]), 90,
+                                               max_cells=5)["max_cells"], 5)
 
     def test_prefill_bands_merge_neighbours_but_not_across_cuts(self):
         doc = important_shapes.rank(self.plan, self.coverage([(1, 100.0)]), 100)

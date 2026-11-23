@@ -551,11 +551,13 @@ def _needs_noise(T):
     return any(o["bound"]["kind"] == "noise_relative" for o in T.doc["outputs"].values())
 
 
-def _important(spec):
+def _important(T, spec):
     """A correctness-only case built from the profile's important_shapes.json: it widens the shapes
     checked, so it is judged against the baseline leg only -- a float64 reference or oracle leg on
-    every long-context prefill cell made the correctness gate outlast the lane (PR #643 GPU test)."""
-    return spec.get("kind") == "important"
+    every long-context prefill cell made the correctness gate outlast the lane (PR #643 GPU test).
+    Not when a bound reads the reference itself (dot_product, ...): those keep it."""
+    return spec.get("kind") == "important" and not any(
+        o["bound"]["kind"] in T.U.BOUNDS_NEEDING_REFERENCE for o in T.doc["outputs"].values())
 
 
 def compare_blobs(T, cand_blob, base_blob, seed, draws, noise_blob=None, only_draw=None):
@@ -573,7 +575,7 @@ def compare_blobs(T, cand_blob, base_blob, seed, draws, noise_blob=None, only_dr
                     "candidate" if key not in cand_blob else "baseline")})
                 ok = False
                 continue
-            f64 = bool(T.U.f64_reference(T.doc)) and not _important(spec)
+            f64 = bool(T.U.f64_reference(T.doc)) and not _important(T, spec)
             args = T.cases.make_args(spec, gen=_gen(torch, device, seed + i), with_logical=f64)
             refs, mags, sel = _references(T, args) if f64 else (None, None, None)
             score_inputs = {o["bound"].get("scores") for o in T.doc["outputs"].values()
@@ -602,7 +604,7 @@ def oracle_legs(T):
 
 def oracle_case_sigs(T, o):
     """The random cases (manifest order) an oracle leg runs on; never an important case."""
-    specs = [s for s in T.random_specs() if not _important(s)]
+    specs = [s for s in T.random_specs() if not _important(T, s)]
     if o.get("cases", "all") == "all":
         return [s["sig"] for s in specs]
     best = {}
@@ -694,7 +696,7 @@ def _correctness_vs_oracles(T, a, state, base, cand, oracles):
                             ok = False
                             continue
                         names = [n for n in oracles if spec["sig"] in covered[n]]
-                        if _important(spec):
+                        if _important(T, spec):
                             sym = T.cases.make_args(spec, gen=_gen(torch, device, seed + i), with_logical=False)["_sym"]
                             rc = T.U.compare_outputs(T.doc, blobs["cand"][key], blobs["base"][key], sym=sym)
                             row.update(_summarize(rc))      # the direct path's row shape

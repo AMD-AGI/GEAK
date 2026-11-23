@@ -42,6 +42,10 @@ reason, or a companion of a task with its reason.
    per call, from the source dispatch (row count, N/K, request count) or a strict-launch
    trace. Getting this wrong is the commonest blocker
    (`kernel_selection.py --strict-launch` fails `joint_member_missing_in_call`).
+   A branch that itself launches several selected kernels (a 3D attention kernel and its
+   segment reduce) lists all of them in that row's `required_device_kernels`. Every selected
+   identity must be some row's `device_kernel` or `required_device_kernels`; a selected kernel
+   listed only as a companion fails delivery (`dispatch branches omit a selected device kernel`).
 3. **Kernels without frames.** These are kernels that only graph replay or a micro-batch
    thread launches, such as graph-capture all-reduce tiers and DBO-only hand-offs. Assign them
    from source to the entry that launches them, and say so. The UT seam trace must then

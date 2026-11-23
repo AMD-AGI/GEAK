@@ -3,7 +3,7 @@
 
     python3 important_shapes.py --plan sampling_plan.json --coverage coverage.json \
         [--compile-variants evidence/compile_variants.json] \
-        --out evidence/important_shapes.json [--target-pct 90] [--max-cells 24]
+        --out evidence/important_shapes.json [--target-pct 90] [--max-cells N]
 
 Every observed cell of the plan (captured or not) gets an estimated time: its instances x
 the measured per-instance device time of the nearest captured point of its phase (log
@@ -18,9 +18,9 @@ of one of its kernels (compile_variants.json); context within a factor 2. A band
 represented by its heaviest observed cell. Decode cells stay as planned (exact batch).
 
 Per phase, cells are taken heaviest first until `--target-pct` of the phase's estimated
-time or `--max-cells`, plus the smallest/largest shape and context cells (boundaries:
-correctness only). Each cell carries its launch as observed in the serving log: graph or
-eager, and for graph the capture size the scheduler pads to.
+time or the plan's `important_cells` (`--max-cells`), plus the smallest/largest shape and
+context cells (boundaries: correctness only). Each cell carries its launch as observed in
+the serving log: graph or eager, and for graph the capture size the scheduler pads to.
 
 `calibration` lists each measured point's time per proxy unit (prefill new token, decode
 iteration): a wide range is how much the proxy alone would have misranked. Stdlib only.
@@ -81,7 +81,8 @@ def merge(rows, key):
     return out
 
 
-def rank(plan, coverage, target_pct=90.0, max_cells=24, variants=None):
+def rank(plan, coverage, target_pct=90.0, max_cells=None, variants=None):
+    max_cells = max_cells or plan.get("important_cells") or 24
     cells = plan.get("captures", []) + plan.get("reused", []) + plan.get("unselected", [])
     graph_bs = (plan.get("boundaries") or {}).get("graph_bs") or []
     chunk, cuts = (plan.get("boundaries") or {}).get("prefill_chunk"), variant_cuts(variants)
@@ -142,6 +143,7 @@ def rank(plan, coverage, target_pct=90.0, max_cells=24, variants=None):
         calibration["note"] = ("graph capture sizes unknown (no server_info): capture_bs is "
                                "null; the UT must use the padded size the server replays")
     return {"contract": "kernel_profile/important_shapes/v1", "target_pct": target_pct,
+            "max_cells": max_cells,
             "graph_bs": graph_bs, "cells": out, "calibration": calibration}
 
 
@@ -151,10 +153,11 @@ def main(argv=None):
     ap.add_argument("--coverage", required=True, help="coverage.json from coverage_ledger.py")
     ap.add_argument("--compile-variants", help="the server's compile_variants.json (prefill band cuts)")
     ap.add_argument("--target-pct", type=float, default=90.0)
-    ap.add_argument("--max-cells", type=int, default=24,
-                    help="per phase. Every cell becomes a correctness case per stream of each task "
-                         "(layer kind, site, quant): 66 prefill cells made 330 attention cases and "
-                         "an unfinishable correctness gate (`capped` says the target was not met)")
+    ap.add_argument("--max-cells", type=int, default=None,
+                    help="per phase; default the plan's important_cells (plan_points.py "
+                         "--important-cells, 24). Every cell becomes a correctness case per stream "
+                         "of each task: 66 prefill cells made 330 attention cases and an "
+                         "unfinishable correctness gate (`capped` says the target was not met)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args(argv)
     variants = json.load(open(a.compile_variants)) if a.compile_variants else None
@@ -166,7 +169,7 @@ def main(argv=None):
             n = sum(x["phase"] == phase for x in doc["cells"])
             print("%s: %d important cell(s), %.1f%% of estimated time (%s)%s"
                   % (phase, n, c["time_covered_pct"], c["basis"],
-                     "; capped at --max-cells %d" % a.max_cells if c["capped"] else ""))
+                     "; capped at %d cells" % doc["max_cells"] if c["capped"] else ""))
     return 0
 
 
