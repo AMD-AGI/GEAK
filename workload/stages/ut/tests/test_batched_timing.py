@@ -126,6 +126,10 @@ class DriverTimingTest(unittest.TestCase):
         (bad, _) = D.timing_basis_defects(T, [dict(eager, sig='small', regime='DECODE')])
         self.assertIn('deploys under a CUDA graph', bad)
 
+    def test_important_cases_run_no_oracle_leg(self):
+        T = SimpleNamespace(random_specs=lambda: [{'sig': 'pt', 'axes': {}}, {'sig': 'imp', 'kind': 'important', 'axes': {}}])
+        self.assertEqual(D.oracle_case_sigs(T, {'cases': 'all'}), ['pt'])
+
     def test_host_bound_buckets_are_measured_again_before_refusal(self):
         T = self.task([{'sig': 'a'}, {'sig': 'b'}], {'DECODE': {'cuda_graph': True}})
         calls = []

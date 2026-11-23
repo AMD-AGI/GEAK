@@ -3,7 +3,7 @@
 
     python3 important_shapes.py --plan sampling_plan.json --coverage coverage.json \
         [--compile-variants evidence/compile_variants.json] \
-        --out evidence/important_shapes.json [--target-pct 90] [--max-cells 64]
+        --out evidence/important_shapes.json [--target-pct 90] [--max-cells 24]
 
 Every observed cell of the plan (captured or not) gets an estimated time: its instances x
 the measured per-instance device time of the nearest captured point of its phase (log
@@ -81,7 +81,7 @@ def merge(rows, key):
     return out
 
 
-def rank(plan, coverage, target_pct=90.0, max_cells=64, variants=None):
+def rank(plan, coverage, target_pct=90.0, max_cells=24, variants=None):
     cells = plan.get("captures", []) + plan.get("reused", []) + plan.get("unselected", [])
     graph_bs = (plan.get("boundaries") or {}).get("graph_bs") or []
     chunk, cuts = (plan.get("boundaries") or {}).get("prefill_chunk"), variant_cuts(variants)
@@ -151,9 +151,10 @@ def main(argv=None):
     ap.add_argument("--coverage", required=True, help="coverage.json from coverage_ledger.py")
     ap.add_argument("--compile-variants", help="the server's compile_variants.json (prefill band cuts)")
     ap.add_argument("--target-pct", type=float, default=90.0)
-    ap.add_argument("--max-cells", type=int, default=64,
-                    help="per phase: a long tail of unique prefill shapes would otherwise turn "
-                         "into hundreds of correctness cases (`capped` says the target was not met)")
+    ap.add_argument("--max-cells", type=int, default=24,
+                    help="per phase. Every cell becomes a correctness case per stream of each task "
+                         "(layer kind, site, quant): 66 prefill cells made 330 attention cases and "
+                         "an unfinishable correctness gate (`capped` says the target was not met)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args(argv)
     variants = json.load(open(a.compile_variants)) if a.compile_variants else None

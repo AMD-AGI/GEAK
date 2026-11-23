@@ -68,8 +68,9 @@ reason, or a companion of a task with its reason.
      and name the cell in every case built from one (`important_cell: <id>`). A cell the
      task's kernels never run at gets a reason in `important_waivers`. Weights stay on the
      point and bucket cases: important cells widen what is checked, not what is timed.
-     A prefill cell may stand for a band (`shape_range`, `context_range`): build it at the
-     cell's own observed shape; its range ends are cheap extra correctness cases.
+     A prefill cell may stand for a band (`shape_range`, `context_range`): build one case at
+     the cell's own observed shape, not one per range end. Important cases are judged against
+     the baseline only (no float64 reference, no oracle leg), so they stay cheap.
    - Copy the cell's `launch` into the case. A graph case's axes use `capture_bs`, the
      batch the server replays, not the logical batch. A case without `launch` follows its
      phase's `phase_regimes`.
