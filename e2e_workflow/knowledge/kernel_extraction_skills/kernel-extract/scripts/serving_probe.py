@@ -39,9 +39,8 @@ Four rules, each of which was learned by a window failing
 
 A multi-node server (bench_e2e.sh PROFILE_PROBE_POINTS) runs these same rules with
 --mode multinode: requests go to the router (--base-url), the window opens on the
-point's engine (--profile-url) and occupancy is that engine's /metrics (or its log,
---occupancy-log, when the leg could not add --enable-metrics), every rank writes a trace
-(--expect-traces), and the drives keep a PD engine's batch intact (see --mode).
+point's engine (--profile-url) and occupancy is that engine's /metrics, every rank writes
+a trace (--expect-traces), and the drives keep a PD engine's batch intact (see --mode).
 
 Stdlib only.
 """
@@ -62,7 +61,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from observed_workload import parse_line, use_multinode_dialects  # noqa: E402
+from observed_workload import use_multinode_dialects  # noqa: E402
 
 
 def post(base, path, obj=None, timeout=1800):
@@ -135,41 +134,6 @@ def scrape_metrics(base, timeout=30):
     return out, None
 
 
-def metrics_occupancy(base):
-    """scrape_metrics as an occupancy callable -> (num_running_reqs, gen_throughput, err)."""
-    def read():
-        cur, err = scrape_metrics(base)
-        return cur.get("num_running_reqs"), cur.get("gen_throughput"), err
-    return read
-
-
-class LogOccupancy:
-    """The same (num_running_reqs, gen_throughput) from the scheduler's own decode rows,
-    for a server without /metrics. Parsed by observed_workload's dialects, the parser the
-    replay weights come from. Only rows logged after this probe started count; a row is
-    logged every decode_log_interval forwards, so the latest one stands until the next."""
-
-    def __init__(self, path, rank=0):
-        self.path, self.rank = path, rank
-        self.offset = os.path.getsize(path)
-        self.last = (None, None)
-
-    def __call__(self):
-        try:
-            with open(self.path, "rb") as fh:
-                fh.seek(self.offset)
-                chunk = fh.read()
-        except OSError as exc:
-            return None, None, str(exc)
-        complete = chunk[:chunk.rfind(b"\n") + 1]
-        self.offset += len(complete)
-        for line in complete.decode("utf-8", "replace").splitlines():
-            rec = parse_line(line)
-            if rec and rec["kind"] == "decode" and rec["rank"] == self.rank:
-                self.last = (rec["running"], rec["gen_tps"])
-        return self.last[0], self.last[1], None
-
-
 def fresh_seed(seed=None):
     """`seed`, or a new one per invocation. Prompts from one seed are prefixes of each
     other, so a repeated or retried probe is answered from the prefix cache and its
@@ -210,24 +174,19 @@ def generate(base, ids, max_new_tokens, journal, label, timeout=1800, rid=None):
         return False
 
 
-def wait_for_occupancy(occupancy, want_bs, journal, timeout, poll=0.5, tolerance=0,
+def wait_for_occupancy(base, want_bs, journal, timeout, poll=0.5, tolerance=0,
                        alive=None):
     """Block until the scheduler holds the intended batch AND is past prefill.
 
-    `occupancy` is the engine's base URL, read through its /metrics phase counters, or a
-    LogOccupancy -> (bs, tps, err) for a server without /metrics.
-
     Occupancy alone is not steady state: a request with a 234k-token prompt counts as
     running from admission while the scheduler spends the next ten seconds chunk-ingesting
-    it, and a window armed then carried no decode step at all. With a URL, arm only once
-    the decode counter has advanced by at least one token per resident request since the
-    last reading AND the prefill counter has not moved. Counters that update in steps
-    (every decode_log_interval iterations) simply take a few polls to show the advance.
-    A callable carries no phase counter: it arms on the intended batch with non-zero
-    throughput, and verify_trace is the guard against a prefill window.
+    it, and a window armed then carried no decode step at all. Arm only once the decode
+    counter has advanced by at least one token per resident request since the last
+    reading AND the prefill counter has not moved. Counters that update in steps (every
+    decode_log_interval iterations) simply take a few polls to show the advance.
 
-    `alive()` -> False once a driven request has returned: a LogOccupancy row outlives
-    the batch it describes, so without it an idle engine reads as the intended batch.
+    `alive()` -> False once a driven request has failed: the batch can no longer be the
+    intended one, so the window is not armed.
     Returns (ok, observed_bs, observed_tps). Never arms on a guess.
     """
     t0 = time.time()
@@ -259,32 +218,6 @@ def wait_for_occupancy(occupancy, want_bs, journal, timeout, poll=0.5, tolerance
             time.sleep(poll)
         journal.append({"event": "steady_state_NOT_confirmed", "want_bs": want_bs})
         return False, None, None
-    if callable(occupancy):
-        last = (None, None)
-        while time.time() - t0 < timeout:
-            if alive is not None and not alive():
-                journal.append({"event": "steady_state_NOT_confirmed", "want_bs": want_bs,
-                                "observed_bs": last[0], "gen_throughput": last[1],
-                                "waited_s": round(time.time() - t0, 1),
-                                "consequence": "a driven request returned before the batch "
-                                               "was confirmed; window NOT armed"})
-                return False, last[0], last[1]
-            bs, tps, err = occupancy()
-            last = (bs, tps)
-            if err is None and bs is not None and abs(bs - want_bs) <= tolerance \
-                    and (tps or 0) > 0:
-                journal.append({"event": "steady_state_confirmed", "want_bs": want_bs,
-                                "observed_bs": bs, "gen_throughput": tps,
-                                "waited_s": round(time.time() - t0, 1),
-                                "basis": "occupancy+throughput only"})
-                return True, bs, tps
-            time.sleep(poll)
-        journal.append({"event": "steady_state_NOT_confirmed", "want_bs": want_bs,
-                        "observed_bs": last[0], "gen_throughput": last[1],
-                        "waited_s": round(time.time() - t0, 1),
-                        "consequence": "window NOT armed; arming here would capture the ramp "
-                                       "or an unrelated batch and label it as this point"})
-        return False, last[0], last[1]
     prev, last = None, {}
     while time.time() - t0 < timeout:
         if alive is not None and not alive():
@@ -295,7 +228,7 @@ def wait_for_occupancy(occupancy, want_bs, journal, timeout, poll=0.5, tolerance
                             "consequence": "a driven request failed before the batch "
                                            "was confirmed; window NOT armed"})
             return False, last.get("num_running_reqs"), last.get("gen_throughput")
-        cur, err = scrape_metrics(occupancy)
+        cur, err = scrape_metrics(base)
         last = cur or last
         bs, tps = cur.get("num_running_reqs"), cur.get("gen_throughput")
         if err is None and bs is not None and abs(bs - want_bs) <= tolerance:
@@ -684,9 +617,6 @@ def build_parser():
     ap.add_argument("--profile-url", default=None,
                     help="where /start_profile and /stop_profile go, if not --base-url "
                          "(PD: the engine of this point's phase; requests go to the router)")
-    ap.add_argument("--occupancy-log", default=None,
-                    help="read occupancy from this scheduler log instead of /metrics "
-                         "(the decode engine's log on a server without --enable-metrics)")
     ap.add_argument("--expect-traces", type=int, default=0,
                     help="after the window closes, wait for this many trace files (one per "
                          "rank) to finish exporting before verifying")
@@ -764,8 +694,7 @@ def main():
     phase = point["phase"]
 
     journal = [{"event": "begin", "point": point, "base_url": args.base_url,
-                **({"profile_url": profile_url, "occupancy": args.occupancy_log or "/metrics"}
-                   if multinode else {}),
+                **({"profile_url": profile_url} if multinode else {}),
                 "request_seed": args.seed, "cache_salt": CACHE_SALT,
                 "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}]
     t_start = time.time()
@@ -779,9 +708,6 @@ def main():
     stop_decode = threading.Event()
 
     try:
-        # /metrics of the engine the window opens on: a PD router serves no engine counters.
-        occupancy = LogOccupancy(args.occupancy_log) if args.occupancy_log else profile_url
-        occupancy_now = occupancy if callable(occupancy) else metrics_occupancy(occupancy)
         if phase == "DECODE":
             # Steady state FIRST (rule 1): put the batch on, confirm the scheduler has
             # admitted it and is generating, and only then pay for the arm.
@@ -792,8 +718,9 @@ def main():
             else:
                 ex = drive_decode(args.base_url, point, args, journal)
                 alive = None
+            # /metrics of the engine the window opens on: a PD router serves no engine counters.
             confirmed, obs_bs, _ = wait_for_occupancy(
-                occupancy, want, journal, args.steady_timeout, alive=alive)
+                profile_url, want, journal, args.steady_timeout, alive=alive)
             if not confirmed:
                 raise RuntimeError(
                     "steady state not reached: wanted bs=%s, scheduler reported %s. Not "
@@ -820,7 +747,8 @@ def main():
                 # the batch is already resident, so the steps are the intended shape.
                 while time.time() < deadline:
                     time.sleep(5)
-                    bs, _, _ = occupancy_now()
+                    metrics, _ = scrape_metrics(profile_url)
+                    bs = metrics.get("num_running_reqs")
                     if bs == 0:
                         journal.append({"event": "batch_drained", "note": "requests finished "
                                         "before the window closed; shorten --decode-tokens "

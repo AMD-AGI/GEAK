@@ -1,5 +1,5 @@
 """serving_probe.py against fake HTTP servers: a router that admits requests and an engine
-whose scheduler log and profiler are separate, as on a PD deployment without /metrics."""
+that serves /metrics and the profiler, as on a PD deployment."""
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -23,22 +23,19 @@ SWA_DECODE = ('[2026-10-27 03:15:48 TP0] Decode batch, #running-req: 3, #full to
               '#retracted-req: 0, cuda graph: True, gen throughput (token/s): 11.54, #queue-req: 0')
 
 
-def decode_line(running, rank=0):
-    return ('[2026-10-01 00:00:00 TP%d] Decode batch, #running-req: %d, #token: 64, '
-            'cuda graph: True, gen throughput (token/s): 50.0, #queue-req: 0\n' % (rank, running))
-
-
 class FakeDeployment:
-    """`running` requests are resident while /generate sleeps; a thread logs them like the
-    scheduler. The engine writes one trace per rank when /stop_profile closes the window."""
+    """`running` requests are resident while /generate sleeps; a thread advances the engine's
+    decode counter like the scheduler. The engine writes one trace per rank when
+    /stop_profile closes the window."""
 
-    def __init__(self, log, ranks, request_s=8.0, bs_cap=None):
-        self.log, self.ranks, self.request_s, self.bs_cap = log, ranks, request_s, bs_cap
+    def __init__(self, ranks, request_s=8.0, bs_cap=None):
+        self.ranks, self.request_s, self.bs_cap = ranks, request_s, bs_cap
         self.running, self.lock, self.calls, self.window = 0, threading.Lock(), [], None
+        self.decode_tokens = 0
         self.stop = threading.Event()
         self.router = self._serve(self._router_handler())
         self.engine = self._serve(self._engine_handler())
-        threading.Thread(target=self._logger, daemon=True).start()
+        threading.Thread(target=self._scheduler, daemon=True).start()
 
     def url(self, server):
         return 'http://127.0.0.1:%d' % server.server_address[1]
@@ -54,14 +51,21 @@ class FakeDeployment:
         threading.Thread(target=server.serve_forever, daemon=True).start()
         return server
 
-    def _logger(self):
+    def resident(self):
+        return self.running if self.bs_cap is None else min(self.running, self.bs_cap)
+
+    def _scheduler(self):
         while not self.stop.wait(0.2):
             with self.lock:
-                running = self.running if self.bs_cap is None else min(self.running, self.bs_cap)
-            if running:
-                with open(self.log, 'a') as fh:
-                    fh.write(decode_line(running, rank=1))
-                    fh.write(decode_line(running))
+                self.decode_tokens += self.resident()
+
+    def metrics(self):
+        with self.lock:
+            running, decode = self.resident(), self.decode_tokens
+        return ('sglang:num_running_reqs %d\nsglang:gen_throughput %.1f\n'
+                'sglang:realtime_tokens_total{mode="decode"} %d\n'
+                'sglang:realtime_tokens_total{mode="prefill_compute"} 0\n'
+                % (running, 50.0 if running else 0.0, decode))
 
     def _reply(self, handler, text='{}'):
         handler.send_response(200)
@@ -94,6 +98,12 @@ class FakeDeployment:
             def log_message(self, *_):
                 pass
 
+            def do_GET(self):
+                if self.path != '/metrics':
+                    self.send_error(404)
+                    return
+                dep._reply(self, dep.metrics())
+
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers['Content-Length'] or 0)) or b'{}')
                 dep.calls.append(('engine', self.path, body))
@@ -115,13 +125,11 @@ class FakeDeployment:
                 json.dump({'traceEvents': events}, fh)
 
 
-class ProbeOverLogTest(unittest.TestCase):
+class ProbeOverRouterTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='probe ')
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.log = self.root / 'decode.log'
-        self.log.write_text(decode_line(2))          # before the probe: must not arm it
         self.points = self.root / 'points.json'
         self.points.write_text(json.dumps({'points': [
             {'point_id': 'de_2', 'phase': 'DECODE', 'batch_size': 2, 'context_tokens': 8}]}))
@@ -131,7 +139,7 @@ class ProbeOverLogTest(unittest.TestCase):
         proc = subprocess.run(
             [sys.executable, str(SCRIPTS / 'serving_probe.py'), '--points', self.points,
              '--point-id', 'de_2', '--base-url', dep.url(dep.router),
-             '--profile-url', dep.url(dep.engine), '--occupancy-log', self.log, *drive,
+             '--profile-url', dep.url(dep.engine), *drive,
              '--trace-dir', self.root / 'traces', '--expect-traces', '2', '--trace-settle', '1',
              '--steady-timeout', '8', '--decode-tokens', '4',
              '--record-shapes', '--with-stack', 'false', '--out', out, *map(str, extra)],
@@ -141,8 +149,8 @@ class ProbeOverLogTest(unittest.TestCase):
     def events(self, result, name):
         return [e for e in result['journal'] if e['event'] == name]
 
-    def test_arms_on_the_logged_batch_and_profiles_the_engine_not_the_router(self):
-        dep = FakeDeployment(self.log, ranks=2)
+    def test_arms_on_the_engines_batch_and_profiles_the_engine_not_the_router(self):
+        dep = FakeDeployment(ranks=2)
         self.addCleanup(dep.close)
         proc, result = self.probe(dep)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
@@ -160,9 +168,8 @@ class ProbeOverLogTest(unittest.TestCase):
         self.assertEqual((start['record_shapes'], start['with_stack']), (True, False))
 
     def test_the_default_drive_sends_the_batch_once_at_full_context(self):
-        dep = FakeDeployment(self.log, ranks=2, request_s=4)
+        dep = FakeDeployment(ranks=2, request_s=4)
         self.addCleanup(dep.close)
-        # A log row never reads 0 here, so the single-host window runs to --window-timeout.
         proc, result = self.probe(dep, '--window-timeout', '6', drive=())
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         sent = [body for who, path, body in dep.calls if path == '/generate']
@@ -172,10 +179,9 @@ class ProbeOverLogTest(unittest.TestCase):
         begin = self.events(result, 'begin')[0]
         self.assertEqual(begin['request_seed'], 1234)
         self.assertNotIn('profile_url', begin)
-        self.assertNotIn('occupancy', begin)
 
     def test_a_batch_the_scheduler_never_reaches_is_not_armed(self):
-        dep = FakeDeployment(self.log, ranks=2, request_s=12, bs_cap=1)
+        dep = FakeDeployment(ranks=2, request_s=12, bs_cap=1)
         self.addCleanup(dep.close)
         proc, result = self.probe(dep)
         self.assertEqual(proc.returncode, 1)
@@ -184,7 +190,7 @@ class ProbeOverLogTest(unittest.TestCase):
         self.assertNotIn('/start_profile', [path for _w, path, _b in dep.calls])
 
     def test_a_rank_that_never_exports_fails_the_point(self):
-        dep = FakeDeployment(self.log, ranks=1)
+        dep = FakeDeployment(ranks=1)
         self.addCleanup(dep.close)
         proc, result = self.probe(dep, '--window-timeout', '8')
         self.assertEqual(proc.returncode, 1)
@@ -377,21 +383,7 @@ class VerifyTraceTest(unittest.TestCase):
         self.assertNotIn('prefill_tokens_computed', res)
 
 
-class LogOccupancyTest(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix='occupancy ')
-        self.addCleanup(self.tmp.cleanup)
-        self.log = Path(self.tmp.name) / 'decode.log'
-
-    def test_reads_only_rows_written_after_it_started(self):
-        self.log.write_text(decode_line(7) + decode_line(5)[:30])
-        occupancy = serving_probe.LogOccupancy(str(self.log))
-        self.assertEqual(occupancy(), (None, None, None))
-        with open(self.log, 'a') as fh:
-            fh.write(decode_line(5)[30:] + decode_line(3, rank=1) + decode_line(2))
-        self.assertEqual(occupancy(), (2, 50.0, None))
-        self.assertEqual(occupancy(), (2, 50.0, None))
-
+class EngineLogDialectTest(unittest.TestCase):
     def test_pd_engine_lines_parse(self):
         decode = ('[2026-10-21 07:43:45 TP0] Decode batch, #running-req: 4, #token: 512, '
                   'token usage: 0.00, pre-allocated usage: 0.00, #prealloc-req: 0, #transfer-req: 0, '
@@ -418,17 +410,12 @@ class LogOccupancyTest(unittest.TestCase):
         rec = observed_workload.parse_line(line)
         self.assertEqual((rec['rank'], rec['running']), (0, 4))
 
-    def test_the_pd_swa_dialect_parses_for_arming_and_for_the_weights(self):
+    def test_the_pd_swa_dialect_parses_for_the_weights(self):
         self.assertIsNone(observed_workload.parse_line(SWA_DECODE))
         self.multinode_dialects()
         rec = observed_workload.parse_line(SWA_DECODE)
         self.assertEqual((rec['kind'], rec['running'], rec['gen_tps'], rec['token']),
                          ('decode', 3, 11.54, 210944))
-        self.log.write_text('')
-        occupancy = serving_probe.LogOccupancy(str(self.log))
-        with open(self.log, 'a') as fh:
-            fh.write(SWA_DECODE + '\n')
-        self.assertEqual(occupancy()[:2], (3, 11.54))
 
 
 class MetricsOccupancyTest(unittest.TestCase):

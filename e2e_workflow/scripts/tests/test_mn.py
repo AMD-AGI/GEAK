@@ -1888,20 +1888,10 @@ class ProbeArgsTest(unittest.TestCase):
             args = self.parsed(flags)
             self.assertEqual(args.base_url, "http://10.10.0.32:30890", phase)
             self.assertEqual(args.profile_url, url, phase)
-            self.assertIsNone(args.occupancy_log, phase)
             self.assertEqual(args.expect_traces, ranks, phase)
             self.assertEqual(args.trace_dir, os.path.join(self.point, sub), phase)
             self.assertEqual((args.record_shapes, args.with_stack), (True, "false"), phase)
             self.assertEqual(args.mode, "multinode", phase)
-
-    def test_an_sglang_probe_reads_the_engine_metrics_not_a_log(self):
-        self.launch_json()
-        rc, flags, proc = self.call("adapter_probe_args", "DECODE", facts=self.PD_FACTS,
-                                    backend="sglang")
-        self.assertEqual(rc, 0, proc.stdout + proc.stderr)
-        args = self.parsed(flags)
-        self.assertIsNone(args.occupancy_log)
-        self.assertEqual(args.profile_url, "http://10.0.0.2:30892")
 
     def test_atom_offers_no_probe_so_bench_refuses_it_before_the_boot(self):
         self.launch_json()
@@ -1924,7 +1914,7 @@ class ProbeArgsTest(unittest.TestCase):
         self.assertEqual(rc, 0, proc.stdout + proc.stderr)
         args = self.parsed(flags)
         self.assertEqual((args.base_url, args.profile_url), ("http://10.10.0.32:30890",) * 2)
-        self.assertEqual((args.occupancy_log, args.expect_traces), (None, 16))
+        self.assertEqual(args.expect_traces, 16)
         self.assertEqual(args.trace_dir, self.point)
 
     def test_a_pd_point_without_the_launch_record_prints_no_flags(self):
@@ -1932,15 +1922,6 @@ class ProbeArgsTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertEqual(flags, [])
         self.assertIn("no decode engine url/tp", proc.stderr)
-
-    def test_the_single_host_sglang_adapter_speaks_the_same_flags(self):
-        rc, flags, proc = self.call("adapter_probe_args", "DECODE",
-                                    adapter=os.path.join(SCRIPTS_DIR, "adapters", "sglang.sh"))
-        self.assertEqual(rc, 0, proc.stdout + proc.stderr)
-        args = self.parsed(flags)
-        self.assertEqual((args.base_url, args.profile_url), ("http://10.10.0.32:30890", None))
-        self.assertEqual((args.occupancy_log, args.expect_traces), ("/fs/server.log", 16))
-        self.assertEqual(args.mode, "single")
 
     def test_after_a_pd_point_the_gate_indexes_that_engine_alone(self):
         self.launch_json()

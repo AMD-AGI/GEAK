@@ -173,8 +173,8 @@ and opens its own window, which spans every rank. Sampling points (`PROFILE=1 RE
 PROFILE_PROBE_POINTS=<points> PROFILE_PROBE_IDS=<ids> SKILL_ROOT=<kernel-extract>`) are not
 such a round: one boot, then the kernel-extract skill's `serving_probe.py` per point, on the
 driver like the client. `adapter_probe_args` says where: requests to the client port (the LB),
-the window on the engine of the point's phase, occupancy from the decode engine's TP-0 log
-(no engine serves `/metrics`), one trace expected per rank of that engine;
+the window on the engine of the point's phase, occupancy from that engine's `/metrics` (the
+probe leg starts sglang engines with `--enable-metrics`), one trace expected per rank of that engine;
 `adapter_probe_after` runs `trace-gate --role` on that engine. The result line lands in
 `RESULT_JSONL` on the shared mount. The single-host memory-parity guard is skipped: the driver's `rocm-smi`
 cannot see the nodes' cards.
