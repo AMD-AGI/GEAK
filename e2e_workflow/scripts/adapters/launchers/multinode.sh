@@ -243,6 +243,12 @@ adapter_probe_args() {
   [ "${BACKEND:-}" = vllm ] && printf '%s\n' --framework vllm \
     --profiler-root "$PROFILE_DIR${_role:+/$_role}" --served-model \
     "$(curl -sf -m 30 "$_url/v1/models" | python3 -c 'import json,sys;print(json.load(sys.stdin)["data"][0]["id"])')"
+  # ATOM writes every window into the dir mn.py launched the engine with (<profile>/<role>);
+  # the probe links each point's new files out of it. No step counter: the decode window is a
+  # short timed one, so each generation must outlast it (no request turns over inside).
+  [ "${BACKEND:-}" = atom ] && printf '%s\n' --framework atom \
+    --profiler-root "$PROFILE_DIR${_role:+/$_role}" --decode-tokens "${ATOM_PROBE_DECODE_TOKENS:-1024}" --served-model \
+    "$(curl -sf -m 30 "$_url/v1/models" | python3 -c 'import json,sys;print(json.load(sys.stdin)["data"][0]["id"])')"
   return 0
 }
 
@@ -258,8 +264,6 @@ adapter_probe_after() {
     --nodes "$_MN_NNODES" \
     ${_role:+--launch-json "${OUT_DIR:-.}/mn_launch.json" --role "$_role"}
 }
-# serving_probe.py speaks sglang and vllm; bench_e2e.sh refuses ATOM's PROFILE_PROBE_POINTS.
-case "${BACKEND:-}" in atom) unset -f adapter_probe_args adapter_probe_after ;; esac
 
 # adapter_profile_window: the backend's version returns on ONE new trace; here
 # every rank's trace must finish flushing before the gate runs.

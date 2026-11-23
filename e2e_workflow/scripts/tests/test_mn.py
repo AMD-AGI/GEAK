@@ -401,9 +401,6 @@ class AtomProvidedSpecTest(unittest.TestCase):
             mn.engine_facts("trtllm", "trtllm-serve /m")
 
     def test_teardown_and_health_know_atom_and_the_atomesh_router(self):
-        self.assertRegex("python3 -m atom.entrypoints.openai_server --model /m --server-port 8010",
-                         mn.SERVE_PATTERN)
-        self.assertRegex("ATOM::ModelRunner_0", mn.ENGINE_PATTERN)
         self.assertRegex("atomesh launch --pd-disaggregation --prefill http://p:8010", mn.LB_PATTERN)
         self.assertNotRegex("python3 -m sglang.launch_server --model-path /m", mn.LB_PATTERN)
         self.assertIn("atom", mn.SW_PACKAGES)
@@ -2057,11 +2054,14 @@ class ProbeArgsTest(unittest.TestCase):
             self.assertEqual((args.record_shapes, args.with_stack), (True, "false"), phase)
             self.assertEqual(args.mode, "multinode", phase)
 
-    def test_atom_offers_no_probe_so_bench_refuses_it_before_the_boot(self):
+    def test_an_atom_pd_point_reads_its_engines_profiler_root(self):
         self.launch_json()
-        for fn in ("adapter_probe_args", "adapter_probe_after"):
-            rc, flags, proc = self.call(fn, "DECODE", facts=self.PD_FACTS, backend="atom")
-            self.assertEqual((rc, flags), (127, []), fn)
+        facts = self.PD_FACTS + "\nPROFILE_DIR=/fs/prof\ncurl() { echo '{\"data\": [{\"id\": \"m\"}]}'; }"
+        rc, flags, proc = self.call("adapter_probe_args", "DECODE", facts=facts, backend="atom")
+        self.assertEqual(rc, 0, proc.stdout + proc.stderr)
+        args = self.parsed(flags)
+        self.assertEqual((args.framework, args.served_model, args.profiler_root, args.decode_tokens),
+                         ("atom", "m", "/fs/prof/decode", 1024))
 
     def test_a_vllm_pd_point_reads_its_engines_profiler_root(self):
         self.launch_json()

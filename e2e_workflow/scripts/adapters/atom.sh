@@ -111,8 +111,11 @@ adapter_launch() {
   # --max-model-len: mirror the InferenceX fixed_seq_len recipes, which pin 10240 for every shape
   # EXCEPT 1k/1k (where they leave the model default). Explicit MAX_MODEL_LEN always wins. This keeps
   # GEAK numbers comparable to the InferenceX baseline instead of silently sizing KV differently.
+  # Only for a known fixed-length sweep: a trace replay (AgentX) sends 100k+ prompts, and a
+  # multinode rank is not told ISL/OSL -- both keep the model's own limit.
   local _mml="${MAX_MODEL_LEN:-}"
-  if [ -z "$_mml" ] && ! { [ "${ISL:-}" = "1024" ] && [ "${OSL:-}" = "1024" ]; }; then
+  if [ -z "$_mml" ] && [ -n "${ISL:-}" ] && [ -n "${OSL:-}" ] && [ "${BENCH_CLIENT:-}" != "agentx" ] \
+     && ! { [ "$ISL" = "1024" ] && [ "$OSL" = "1024" ]; }; then
     _mml=10240
   fi
 
@@ -133,7 +136,10 @@ adapter_launch() {
   if [ -n "${PROFILE_DIR:-}" ]; then
     mkdir -p "$PROFILE_DIR"
     _prof=(--torch-profiler-dir "$PROFILE_DIR")
-    _prof_env=(ATOM_PROFILER_MORE="${ATOM_PROFILER_MORE:-1}")
+    # Shapes yes, Python stacks / memory no -- what sglang.sh and vllm.sh ask for: stacks are most
+    # of the events and slow the profiled steps. An ATOM without the split flags falls back to MORE.
+    _prof_env=(ATOM_PROFILER_MORE="${ATOM_PROFILER_MORE:-1}" ATOM_PROFILER_RECORD_SHAPES="${ATOM_PROFILER_RECORD_SHAPES:-1}"
+               ATOM_PROFILER_WITH_STACK="${ATOM_PROFILER_WITH_STACK:-0}" ATOM_PROFILER_PROFILE_MEMORY="${ATOM_PROFILER_PROFILE_MEMORY:-0}")
   fi
 
   _atom_server_argv "${EXTRA_SERVER_ARGS:-}" || return 2
