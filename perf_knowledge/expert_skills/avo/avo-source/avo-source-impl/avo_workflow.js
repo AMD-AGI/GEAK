@@ -68,7 +68,7 @@ const {
   normalizeCommitScoreField, verifiedCommitScore, withCommitScore,
 } = await import('./lib/score_metric.mjs');
 const { readFileSync: readPatchFileSync, existsSync: reportExists } = await import('node:fs');
-const { createHash } = await import('node:crypto');
+const { createHash, randomUUID } = await import('node:crypto');
 const { execFileSync } = await import('node:child_process');
 
 // ---------------------------------------------------------------------------
@@ -675,12 +675,7 @@ function enforceAsmPatchScope(checked) {
 function enforceWorkerLanguageScope(result) {
   return enforceAsmPatchScope(enforceLanguageKnowledgeEvidence(result));
 }
-const newPersistentScreeningSession = () => {
-  if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
-    return globalThis.crypto.randomUUID();
-  }
-  return `${LANGUAGE_MODE}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-};
+const newPersistentScreeningSession = () => randomUUID();
 
 function normalizePersistentScreening(
   ver, sessionPrefix, workspace, expectedRepeats = VERIFY_REPEATS,
