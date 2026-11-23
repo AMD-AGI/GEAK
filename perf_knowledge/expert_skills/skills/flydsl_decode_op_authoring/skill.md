@@ -51,7 +51,7 @@ rounding points from the backend source.
 **Maturity, read before trusting a number.** Every design here was gated on gfx942 only, with FlyDSL 0.4.x;
 gfx950 is untested. Five of the ten designs have **no timing against the deployed kernel** (GEMV, RMSNorm,
 RoPE / KV write, MoE experts, gated delta rule). Several are **slower** than the deployed kernel on some
-shapes; the operator map says which. Treat every design as a correct, parallel starting point.
+shapes; the operator map says which. Treat every design as a correct, parallel starting point. For a standalone add + RMSNorm or RoPE + KV-write launch, the references carry what kernel lanes measured.
 
 ## Mechanism
 At 1 to 8 rows an operator is latency-bound, not throughput-bound. Its time is set by the longest chain of
@@ -94,9 +94,10 @@ have to rebuild.
 3. *Grid check.* Give the launcher a workgroup-count override and pass at 1, at 7 and at the full grid.
 4. *Resource check.* ISA: registers per wave under the cap for your thread count, scratch 0, LDS under 64 KiB. A *spill* here always means non-zero scratch; values parked in the accumulator file are not a spill, but they cost issue slots. [`flydsl_idioms_and_resources.md`](references/flydsl_idioms_and_resources.md).
 5. *First three speed moves, in this order, one per saved patch, measured each time* (save `best_patch.diff` as your role file says and re-save it whenever your best improves; do not commit in an optimize round: that patch is a `git diff` of the workspace against its HEAD, so a commit empties it, and Verify returns `apply_failed` for an empty patch):
-   (a) spread one row over at least 64 tasks, up to about the CU count (*measured:* 5x to 11x on the router, 36x on the MoE experts, 2x to 2.6x on the delta rule);
-   (b) read each byte once with 8- or 16-byte loads, all loads of a step issued before its arithmetic (*measured:* 1.18x to 1.29x on fp8 GEMVs from halving the K steps);
-   (c) remove per-element serial chains: lane = position, one cross-lane reduction per tile, all waves working (*measured:* about 40x on attention).
+   (a) spread one row over at least 64 tasks, up to about the CU count, when the row is megabytes of weights or thousands of positions (*measured:* 5x to 11x on the router, 36x on the MoE experts, 2x to 2.6x on the delta rule). Not when the whole row is a few KiB: *measured in kernel lanes* (one run each), an add + RMSNorm of 2880 columns was best at one or two workgroups per row, and three or more lost 0.4 % to 2.7 %;
+   (b) read each byte once, all loads of a step issued before its arithmetic; 8- or 16-byte loads for a weight stream (*measured:* 1.18x to 1.29x on fp8 GEMVs from halving the K steps). Wide lanes are not a goal in themselves: *measured in a kernel lane* (one run), a RoPE + KV write with one rotation pair per lane beat two pairs by 1.9 % and four by 7 %;
+   (c) remove per-element serial chains: lane = position, one cross-lane reduction per tile, all waves working (*measured:* about 40x on attention);
+   (d) for an op that already sits near the launch floor, work on the tail. On a standalone add + RMSNorm and a RoPE + KV write (*measured in kernel lanes*, one run each way, gfx942): time an empty kernel under the oracle's own timing first; cut the instructions after the last load (13 % to 19 % of the launch time on the norm, 7 % on the KV write); put a device-scope cache policy on every store of the decode path (2 % to 5 %; on one store only it lost); pass a few raw pointers and make strides build constants. See [`rmsnorm.md`](references/rmsnorm.md) and [`rope_kv_write.md`](references/rope_kv_write.md).
 6. *Where the time is, not when to stop* (*derived* from the fixed-chain measurements in the references). When the op's time is close to an empty launch plus its two or three dependent round trips, what is left is a fixed chain: structural moves stop paying, but the chain itself can still be shortened (one dependent round trip less, loads issued at entry, store and load policy, fewer instructions on the tail), so keep taking measured steps until the round ends. Stop a *direction* at the first spill. Take structural moves one at a time, each measured; several in one round is fine. Skip thread-count and unroll tuning until moves (a) to (c) are in.
 7. *Report* the design choices, the ISA numbers, the per-width ratio against the oracle's baseline, and which parity switches were taken from source rather than proven by the test.
 
@@ -106,8 +107,8 @@ Speed is the deployed kernel's time over this design's (above 1 = this design is
 | operator (capability ids) | reference | decisions that matter most | speed vs deployed kernel |
 |---|---|---|---|
 | GEMV / linear (`skinny_gemv_decode`, `scaled_quant_gemm`, `dense_gemm`) | [`gemv_linear.md`](references/gemv_linear.md) | task = 16 output columns; lanes stride over K with 8-byte loads; FMAs, no matrix cores | not measured |
-| RMSNorm (`rmsnorm`, `fused_add_rmsnorm`, `fused_norm_quant`) | [`rmsnorm.md`](references/rmsnorm.md) | task = 16-column tile; statistic recomputed per wave (no sync, and the first thing to remove) | not measured |
-| RoPE / KV write (`rope`, `kv_cache_quant`) | [`rope_kv_write.md`](references/rope_kv_write.md) | task = query head; read the layer's cos / sin table, never compute angles; the cache is the product | not measured |
+| RMSNorm (`rmsnorm`, `fused_add_rmsnorm`, `fused_norm_quant`) | [`rmsnorm.md`](references/rmsnorm.md) | inside a larger kernel: task = 16-column tile, statistic recomputed per wave; as a standalone launch: one or two workgroups per row | reference design not measured; lane-written add + RMSNorm kernels 1.26x to 1.30x weighted (*measured in kernel lanes*, one run each) |
+| RoPE / KV write (`rope`, `kv_cache_quant`) | [`rope_kv_write.md`](references/rope_kv_write.md) | query heads and kv heads in separate single-wave tasks; read the layer's cos / sin table, never compute angles; the cache is the product | reference design not measured; lane-written RoPE + KV-write kernels 1.30x to 1.40x weighted (*measured in kernel lanes*, one run each) |
 | decode attention (`attention_decode_paged`, `gqa_mqa_attention`, `sliding_window_attention`) | [`decode_attention.md`](references/decode_attention.md) | lane = position; matrix-core chains for scores and `P.V`; K / V read once per kv head; the backend's segments split over tasks with an owner merge | 0.67x to 0.83x at 1k context, 1.13x to 1.34x at 20k, 1.48x to 1.85x at 131k; windowed 1.06x; block-sparse 0.47x to 0.60x |
 | MLA decode (`mla_attention`) | [`mla_decode.md`](references/mla_decode.md) | absorb / attention / finish tasks; waves split the latent dims; a backend split is never cut | 1.5x to 1.8x vs the Triton path; 0.6x at 1k and on par from 8k vs the assembly path; sparse 0.95x to 0.99x |
 | MoE experts (`fused_moe_grouped_gemm`, `grouped_gemm_moe`) | [`moe_experts.md`](references/moe_experts.md) | task = (row, pick, 32 intermediate columns); last arrival finishes; 4-bit decode in software | not measured |
@@ -120,7 +121,7 @@ Speed is the deployed kernel's time over this design's (above 1 = this design is
 |---|---|---|---|
 | time proportional to one row's bytes, flat in the width | split the row into tasks with exclusive outputs | 64 or more tasks per row, or about the CU count | the op's reference |
 | time proportional to context or window, unchanged by the thread count | lane = position, all waves take tiles, matrix cores for position x head | matrix-core instructions in the hot loop; K loaded once per tile | [`decode_attention.md`](references/decode_attention.md), [`mla_decode.md`](references/mla_decode.md) |
-| 1- or 2-byte loads in the hot loop | a thread owns a contiguous run; 8- or 16-byte loads | wide loads in the ISA | [`gemv_linear.md`](references/gemv_linear.md), [`rope_kv_write.md`](references/rope_kv_write.md) |
+| 1- or 2-byte loads in the hot loop of a weight-streaming op | a thread owns a contiguous run; 8- or 16-byte loads | wide loads in the ISA | [`gemv_linear.md`](references/gemv_linear.md); not for RoPE / KV write, see [`rope_kv_write.md`](references/rope_kv_write.md) |
 | scratch above 0, or registers at the cap | keep less in flight per round; rows as runtime loops; 256 threads | scratch 0 | [`flydsl_idioms_and_resources.md`](references/flydsl_idioms_and_resources.md) |
 | right at the full grid, wrong at 1 or 7 workgroups | fix ownership or wait order | passes at 1, 7 and full | [`single_op_shape_rules.md`](references/single_op_shape_rules.md) |
 | wrong only now and then | look for LDS reuse without a barrier, an LDS flag under a divergent branch, a stale workspace | bit-exact over repeats | [`flydsl_idioms_and_resources.md`](references/flydsl_idioms_and_resources.md) |
@@ -140,8 +141,8 @@ Speed is the deployed kernel's time over this design's (above 1 = this design is
 - If the task lets a FlyDSL library kernel serve as the seed and the oracle passes with it, keep it until a
   design here is *measured* faster on the same oracle. For a plain GEMM the library call stays the default.
 - Do not present a design whose row in the operator map is below 1 or "not measured" as a win. It is a seed.
-- These designs are for 1 to 8 rows. At larger widths and in prefill, matrix-core library kernels win; leave
-  that path alone.
+- These designs are measured at 1 to 8 rows. That is no reason to leave wider or prefill cases alone when the task times them. A GEMM-class op keeps the matrix-core library kernel at those widths. A norm, RoPE or KV write has none: dispatch on the row count and give the wide cases their own kernel.
+  *Measured in kernel lanes* on gfx942 (one run each way): for an add + RMSNorm, a second, streaming kernel for the wide cases reached 1.21x to 1.32x of the deployed kernel on the three widest cases, against 1.04x to 1.08x for one kernel with a per-width cache policy; for a RoPE + KV write, the decode kernel left on wide inputs ran at 0.27x to 0.84x of the deployed kernel from 128 rows up, and a rows-per-wave kernel at 1.4x to 2.3x.
 - Do not apply the register, LDS or thread-count figures to gfx950: none was measured there.
 - Never change the backend's tile, segment or rounding layout to gain speed; that trades parity for time.
 - A change that removes instructions but spills is a regression. Check the ISA, not only the timing.
@@ -163,3 +164,4 @@ Speed is the deployed kernel's time over this design's (above 1 = this design is
   as read at FlyDSL 0.5.0, not re-checked against later versions): `attention/pa_decode_fp8.py`,
   `attention/pa_decode_swa.py`, `attention/fused_rope_cache_kernel.py`, `attention/mla_fwd_decode.py`,
   `gemm/fp8_gemm_4wave.py`, `norm/rmsnorm_kernel.py`, `moe/topk_gating_softmax_kernel.py`.
+- GEAK kernel-lane runs that authored an add + RMSNorm and a RoPE + KV-write operator in FlyDSL on gfx942 (one optimisation round, one run each way, results re-measured): the figures marked *measured in kernel lanes*.
