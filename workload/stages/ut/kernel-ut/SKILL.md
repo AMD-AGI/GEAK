@@ -96,8 +96,9 @@ tasks into the report with their reasons. `start` again resumes an interrupted w
 
 ## 3. Extract source and build the standalone UT
 
-Read [source extraction](references/source-extraction.md) and
-[task authoring](references/task-authoring.md). Default to fixed-seed generated inputs
+Read [source extraction](references/source-extraction.md). Before writing fixtures or an
+oracle, [check the deployed implementation's upstream tests](references/task-authoring.md#reuse-an-upstream-test)
+and adapt them to the task's uncovered cases. Default to fixed-seed generated inputs
 at shapes/dtypes/layouts established from existing workload evidence. Run one such
 baseline case per phase, then expand cases and editable leaves. The UT reads its
 frozen case manifest; it never launches serving, profiles, or captures shapes.
