@@ -697,7 +697,7 @@ def _correctness_vs_oracles(T, a, state, base, cand, oracles):
                         if _important(spec):
                             sym = T.cases.make_args(spec, gen=_gen(torch, device, seed + i), with_logical=False)["_sym"]
                             rc = T.U.compare_outputs(T.doc, blobs["cand"][key], blobs["base"][key], sym=sym)
-                            row.update(vs_baseline=_summarize(rc), ok=rc["ok"])
+                            row.update(_summarize(rc))      # the direct path's row shape
                             ok = ok and rc["ok"]
                             continue
                         if not names:

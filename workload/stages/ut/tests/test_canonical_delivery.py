@@ -187,6 +187,22 @@ class CanonicalDeliveryTest(unittest.TestCase):
         self.report['gates']['correctness']['latency_ms'] = float('inf')
         self.assertFalse(self.check()['ok'])
 
+    def test_exact_sqnr_against_an_oracle_leg_delivers(self):
+        # cases/<i>/vs_<oracle>/<cand|base>/<output>: both legs bitwise equal to the oracle
+        comparison = dict(kind='sqnr', ok=True, nonfinite_mismatches=0, min_db=30.0,
+                          against='reference', sqnr_db=float('inf'), baseline_sqnr_db=float('inf'))
+        row = {'case': 'fixture', 'ok': True,
+               'vs_f32': {'cand': {'ok': True, 'out': dict(comparison)},
+                          'base': {'ok': True, 'out': dict(comparison)}}}
+        self.report = copy.deepcopy(self.report)
+        self.report['gates']['correctness'] = {'status': 'pass', 'judged_against': 'oracles', 'cases': [row]}
+        self.assertTrue(self.check()['ok'])
+        row['ok'] = False
+        self.assertFalse(self.check()['ok'])
+        row['ok'] = True
+        row['vs_f32']['cand']['out']['against'] = 'unknown'
+        self.assertFalse(self.check()['ok'])
+
 
 if __name__ == '__main__':
     unittest.main()
