@@ -94,7 +94,7 @@ have to rebuild.
    (a) spread one row over at least 64 tasks, up to about the CU count (*measured:* 5x to 11x on the router, 36x on the MoE experts, 2x to 2.6x on the delta rule);
    (b) read each byte once with 8- or 16-byte loads, all loads of a step issued before its arithmetic (*measured:* 1.18x to 1.29x on fp8 GEMVs from halving the K steps);
    (c) remove per-element serial chains: lane = position, one cross-lane reduction per tile, all waves working (*measured:* about 40x on attention).
-6. *Stop rule* (*derived* from the fixed-chain measurements in the references). Stop when the op's time is close to an empty launch plus its two or three dependent round trips: what is left is a fixed chain that in-kernel tuning does not shorten. Stop a direction at the first spill. A round is one to two hours: one structural move per round, not three; skip thread-count and unroll tuning until moves (a) to (c) are in.
+6. *Where the time is, not when to stop* (*derived* from the fixed-chain measurements in the references). When the op's time is close to an empty launch plus its two or three dependent round trips, what is left is a fixed chain: structural moves stop paying, but the chain itself can still be shortened (one dependent round trip less, loads issued at entry, store and load policy, fewer instructions on the tail), so keep taking measured steps until the round ends. Stop a *direction* at the first spill. Take structural moves one at a time, each measured; several in one round is fine. Skip thread-count and unroll tuning until moves (a) to (c) are in.
 7. *Report* the design choices, the ISA numbers, the per-width ratio against the oracle's baseline, and which parity switches were taken from source rather than proven by the test.
 
 ## Operator map
