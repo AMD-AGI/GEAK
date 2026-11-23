@@ -125,8 +125,11 @@ A kernel win or completed call does not establish serving improvement.
 ## Monitor and communicate
 
 Drive inspections from recorded deadlines, independently of module messages or continuations.
-At each inspection, check current allocation authority alongside runtime progress.
-A cached lease deadline or a live worker does not establish continued resource access.
+Check current allocation authority alongside exact handles and bounded native progress;
+reserve full-history scans for decision audits. Keep incomplete observations as unknown
+and the next inspection/report due; recheck authoritative state before control actions.
+An observation failure is not a worker return. A cached lease deadline or live worker
+does not establish continued resource access.
 
 At the user's cadence, otherwise `report.interval_sec`, send **Plan / Finish**: running
 and next work, blockers and verified completions with evidence. Say when nothing new has
