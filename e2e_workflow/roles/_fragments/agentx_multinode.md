@@ -17,9 +17,11 @@ Read this only when `SERVING_TOPOLOGY` is in your inputs.
   directly: the driver has no GPU and no route to a server it did not boot.
 - Run observed_workload.py on this run's engine logs with `--mode multinode`: a TP1 engine's
   untagged rows and a PD engine's SWA rows parse only then.
-- `BACKEND=atom`: `bench_e2e.sh` refuses `PROFILE_PROBE_POINTS` (exit 3, "defines no
-  adapter_probe_args"); run the leg with `PROFILE=1` and no `PROFILE_PROBE_*`, and say in `notes`
-  that the points were not driven.
+- `BACKEND=atom`: add `--log-format atom` to observed_workload.py (ATOM logs each prefill forward
+  and a decode row every 10 s, no server-args line). Under PD plan PREFILL points from the prefill
+  engine's log and DECODE points from the decode engine's: `mn_traces.py pd-points` does both. ATOM
+  prefills a prompt's 256-aligned head and its 1-256-token tail as two forwards, so a PREFILL point
+  is `partial` (7048 runs as 6912 + 136); the census is real, record the shapes it stands for.
 - `SERVING_TOPOLOGY=pd_disagg`: both engines run one code tree, so a kernel selected on both engines
   is ONE task whose cases cover both engines' points; the packer refuses a second task for it. Write
   `engine` (`prefill` | `decode`) into `run/requested_kernel.json` only for a kernel traced on one

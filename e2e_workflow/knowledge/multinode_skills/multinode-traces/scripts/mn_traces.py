@@ -533,16 +533,20 @@ def pd_points(engine_logs: dict, skill_root: str, per_phase: int, out_dir: str) 
         if not log or not os.path.isfile(log):
             raise ValueError(f"no --engine-log {engine}= (got {log!r})")
         info = server_info(log)
-        if not info.get("decode_log_interval"):
+        # ATOM logs no server-args line; its rows are observed_workload's `atom` format.
+        with open(log, encoding="utf-8", errors="replace") as handle:
+            atom = not info and any(line.startswith("[atom ") for line in handle)
+        if not atom and not info.get("decode_log_interval"):
             raise ValueError(f"{log} has no sglang server-args line with decode_log_interval")
         paths = {k: os.path.join(out_dir, f"{k}_{engine}.json") for k in ("server_info", "observed", "points")}
         _write_json(paths["server_info"], info)
+        source = ["--log-format", "atom"] if atom else ["--server-info", paths["server_info"]]
         for cmd in ([sys.executable, os.path.join(scripts, "observed_workload.py"), "--mode", "multinode", "--log", log,
-                     "--server-info", paths["server_info"], "--out", paths["observed"]],
+                     *source, "--out", paths["observed"]],
                     [sys.executable, os.path.join(scripts, "plan_sampling_points.py"),
                      "--observed", paths["observed"], "-n", str(2 * per_phase),
                      "--phase-budget", f"PREFILL={per_phase},DECODE={per_phase}",
-                     "--server-info", paths["server_info"], "--out", paths["points"]]):
+                     *source[atom * 2:], "--out", paths["points"]]):
             run = subprocess.run(cmd, capture_output=True, text=True)
             if run.returncode:
                 raise ValueError(f"{os.path.basename(cmd[1])} on the {engine} log failed: "

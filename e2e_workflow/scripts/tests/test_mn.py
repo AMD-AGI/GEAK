@@ -2754,6 +2754,20 @@ class PdPointsTest(unittest.TestCase):
         self.assertIn("decode_log_interval", proc.stderr)
         self.assertEqual(doc, {})
 
+    def test_atom_engine_logs_plan_in_the_atom_format(self):
+        pre = self.log("prefill.log", None, [
+            f"[atom 10:00:{i:02d}] Scheduled prefill batch: 1 reqs, {t} new tokens (done: [0], new: [{t}]), "
+            f"req_ids: ({i},)" for i, t in enumerate([3584, 256, 3584, 256, 7936, 256])])
+        dec = self.log("decode.log", None, [
+            f"[atom 10:01:{10 * i:02d}] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation "
+            f"throughput: {100.0 * bs} tokens/s, Running: {bs} reqs, Waiting: 0 reqs, GPU KV cache usage: "
+            "1.0%, Prefix cache hit rate: 0.0%" for i, bs in enumerate([4, 4, 2, 6])])
+        proc, doc = self.plan(pre, dec)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual({(p["engine"], p["phase"]) for p in doc["points"]},
+                         {("prefill", "PREFILL"), ("decode", "DECODE")})
+        self.assertIn(4, {p.get("batch_size") for p in doc["points"]})
+
 
 class PdMassTest(unittest.TestCase):
     # geak+agentx场景逻辑.md: M_P = 60 s, M_D = 40 s; A is 20% of prefill, B 5% of decode.
