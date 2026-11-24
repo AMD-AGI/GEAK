@@ -187,6 +187,7 @@ jobs:
             e2e_workflow/routing/test_route_review.py \
             tools/tests/test_ep_task_runner.py \
             tools/tests/test_gen_ep_task.py \
+            tools/tests/test_ep_abi.py \
             geak/test_bootstrap.py
 
       - name: expert skill static validation
