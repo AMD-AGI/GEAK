@@ -278,6 +278,15 @@ const throwsOf = async (args, stubs) => {
   }
 
   console.log('\n# D. lane arguments');
+  // Each value is valid JSON but throws if bakeoff tries to coerce it to a string.
+  const ignored = { toString: null };
+  for (const extra of [{ budget: ignored }, { backends: [ignored] }, { e2e_workflow_dir: ignored }]) {
+    const { run, trace } = build(famArgs(extra), { agent: writerOk });
+    const r = await run();
+    ok(r.plan.budget.total === 10 && trace.workflowCalls.length === 3 &&
+       trace.workflowCalls.every(({ args }) => args.budget === (args.eval_dir.endsWith('/prefill') ? 2 : 4)),
+      `family ignores parent ${Object.keys(extra)[0]} and uses per-config budgets`);
+  }
   {
     const s = spec();
     s.defaults = { mode: 'optimize', target_language: 'Triton', budget: '3', use_learned_kb: 'false', apply_to_original: 'false', gpu_ids: '7' };

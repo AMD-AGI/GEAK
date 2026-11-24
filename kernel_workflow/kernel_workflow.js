@@ -5,7 +5,7 @@ export const meta = {
   phases: [
     { title: 'Freeze',   detail: 'oracle_freezer: freeze the input kernel -> immutable oracle + baseline_src/ (the ONE denominator) [bakeoff] | create the family eval dir [config_aware]' },
     { title: 'Discover', detail: 'op_benchmarker: per-language existing-impl probe + measure + OFFLINE env tune (aiter/CK, shapes from the frozen oracle) -> author_plan, best_known_ms [bakeoff] | operator_family_planner: groups + strategy hints [config_aware]' },
-    { title: 'Bakeoff',  detail: 'one unchanged kernel_lane worker per language (optimize if an impl exists, else author), parallel over the GPU pool [bakeoff] | one kernel_lane per family config [config_aware] | the single lane [optimize/author]' },
+    { title: 'Bakeoff',  detail: 'one unchanged kernel_lane worker per language (optimize if an impl exists, else author), parallel over the GPU pool [bakeoff] | one kernel_lane per family config [config_aware]' },
     { title: 'Report',   detail: 'rank ALL candidates (lanes + tuned env backend) on the SAME frozen baseline; write the comparison table + winner (+ optional apply_to_original), then curate ONE distilled card into knowledge/learned/ on a measured win [bakeoff] | family results, report and catalog [config_aware]' },
   ],
 };
@@ -13,14 +13,11 @@ export const meta = {
 // ---------------------------------------------------------------------------
 // Args. This is a DISPATCHER: on mode=optimize/author it forwards straight to the
 // single-language worker (kernel_lane.js) unchanged; on mode=bakeoff it acts
-// as the multi-language bake-off orchestrator; with config_aware on it runs one
-// worker per operator-family config. The worker script is a sibling in this same
-// dir, so it is called via workflow() at exactly ONE nesting level
+// as the multi-language bake-off orchestrator. The worker script is a sibling in
+// this same dir, so it is called via workflow() at exactly ONE nesting level
 // (dispatcher=level0 -> worker=level1). The dispatcher never nests a second level.
 // ---------------------------------------------------------------------------
 const A = args || {};
-// Operator-family path (see "Config-aware operator family" below). Only "true"/"on" enable it; every
-// other value, including absent, keeps the optimize/author/bakeoff contract byte-for-byte.
 const CONFIG_AWARE = ['true', 'on'].includes(
   String(A.config_aware != null ? A.config_aware : 'false').trim().toLowerCase());
 if (!CONFIG_AWARE && !A.kernel_path) throw new Error('args.kernel_path is required (absolute path to the kernel/op dir)');
@@ -45,32 +42,35 @@ const MODE = String(A.mode != null ? A.mode : 'optimize').trim().toLowerCase() |
 if (OPTIMIZER === 'evo' && MODE === 'bakeoff') {
   throw new Error('optimizer=evo currently supports optimize and author lanes, not bakeoff');
 }
-// Same default kernel_lane.js computes for its EXP_ROOT (args.exp_root is optional).
-const EXP_ROOT = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/exp')).replace(/\/+$/, '');
 
 // ---- Live execution tracker (read-only observer; see interface/geak_trace_collector.py) ----
 // Started HERE so a direct kernel run is tracked from its first agent, not only
-// at the end. Every dispatcher path passes through this point, so one call covers
-// them. The observer resolves its own workflow run from the runtime's workflow
-// record (no eval-dir substring matching) — needed because no eval_dir exists yet
-// on the pass-through branch.
+// at the end. Both dispatcher lanes (pass-through and bakeoff) pass through this
+// point, so one call covers them. The observer resolves its own workflow run from
+// the runtime's workflow record (no eval-dir substring matching) — needed because
+// neither EXP_ROOT nor eval_dir exists yet on the pass-through branch.
 //
 // Detached, read-only and strictly non-fatal: it never influences model choice,
 // prompts, budgets or optimization decisions. Set GEAK_LIVE_TRACE=0 to disable.
 (function startLiveTracker() {
   try {
     if (String(process.env.GEAK_LIVE_TRACE || '1') === '0') return;
+    // Same default as kernel_lane.js computes for EXP_ROOT: args.exp_root is NOT
+    // required, so bailing out when it is absent silently disabled tracking for
+    // every ordinary invocation.
+    const expRoot = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/exp'))
+      .replace(/\/+$/, '');
     const { spawn } = require('child_process');
     const child = spawn('python3', [
       '-B', `${WORKFLOW_DIR}/../interface/geak_trace_collector.py`,
-      '--exp-root', EXP_ROOT,
+      '--exp-root', expRoot,
       // Runtime-supplied invocation identity: the wf_*.json record carries this
       // same args object, so matching it identifies THIS launch deterministically
       // instead of guessing from timing or from being the only run around.
       '--identity-args', JSON.stringify(A),
       '--script-dir', WORKFLOW_DIR,
       // Per-run filename: two runs under one exp_root must not overwrite each other.
-      '--out-dir', EXP_ROOT,
+      '--out-dir', expRoot,
       '--watch',
       '--interval', String(process.env.GEAK_LIVE_TRACE_INTERVAL_S || '30'),
       '--resolve-timeout', '600',
@@ -83,15 +83,57 @@ const EXP_ROOT = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/
       catch (_) {}
     });
     child.unref();
-    log(`Live execution tracker started -> ${EXP_ROOT}/geak_trace_<runId>.json`);
+    log(`Live execution tracker started -> ${expRoot}/geak_trace_<runId>.json`);
   } catch (e) {
     try { log(`Live execution tracker not started (non-fatal): ${e && e.message}`); } catch (_) {}
   }
 })();
 
 // ===========================================================================
-// Shared helpers (config_aware, pass-through and bakeoff paths).
+// SINGLE-LANGUAGE PASS-THROUGH (mode=optimize | author) — byte-compatible with
+// the pre-dispatcher behavior. Forward EVERY arg to the worker unchanged (the
+// worker ignores dispatcher-only args like `backends`). One nesting level.
 // ===========================================================================
+if (!CONFIG_AWARE && (MODE === 'optimize' || MODE === 'author')) {
+  phase('Bakeoff');            // reuse a declared phase slot for the single passthrough lane
+  log(`mode=${MODE}: single-language pass-through -> ${WORKER}`);
+  const r = await workflow({ scriptPath: WORKER }, { ...A, workflow_dir: WORKFLOW_DIR });
+  // Final step: render the run report (token/time/cost ledger -> clickable role-execution-tree
+  // HTML + MD twin) from the lane's OWN timeline. In passthrough the dispatcher makes no agent calls
+  // itself, so the lane result carries the timeline (`llm_timeline`) + its `eval_dir`. This is the
+  // top-level entry for optimize/author runs, so it owns the report (E2E nests kernel_lane.js directly
+  // and reports at its own top level, so there is no double-emit). NOTE: this branch runs BEFORE the
+  // obj()/agentT()/LLM_STATS definitions below, so it is self-contained: raw agent() + inline schema +
+  // an inline llm_stats check. Entirely best-effort — never fail a real result over accounting.
+  const llmStatsOn = String(A.llm_stats != null ? A.llm_stats : 'true').trim().toLowerCase() !== 'false';
+  if (llmStatsOn && r && r.eval_dir && r.llm_timeline) {
+    try {
+      const tlJson = JSON.stringify({ ...r.llm_timeline, instance: r.eval_dir });
+      const tlPath = `${r.eval_dir}/reports/trace/agent_timeline.json`;
+      await agent(
+        `You are the file_writer. PHASE=persist_llm_stats.\n` +
+        `Do exactly two things, in order:\n` +
+        `1. Use the Write tool to create "${tlPath}" with EXACTLY the JSON below, verbatim ` +
+        `(create parent directories if needed; do NOT reformat, truncate or summarize it):\n\n` +
+        '```json\n' + tlJson + '\n```\n\n' +
+        `2. Then run this Bash command (best-effort; if it fails, carry on and report ok=false).\n` +
+        `   It runs the token/time/cost ledger AND renders the role-execution-tree report (HTML + MD):\n` +
+        `   python3 -B "${WORKFLOW_DIR}/../interface/geak_report.py" --eval-dir "${r.eval_dir}"\n\n` +
+        `Then return {"written": true, "path": "${tlPath}", "ok": <true if the command exited 0 else false>}.`,
+        { phase: 'Bakeoff', label: 'file_writer:persist_llm_stats',
+          schema: { type: 'object',
+            properties: { written: { type: 'boolean' }, path: { type: 'string' }, ok: { type: 'boolean' } },
+            required: [], additionalProperties: true } });
+      log(`LLM token+time+cost ledger + run report (HTML+MD) -> ${r.eval_dir}/reports/trace/ and ${r.eval_dir}/report/.`);
+    } catch (e) {
+      log(`LLM stats/report emit failed (NON-FATAL — the run is unaffected): ${String(e)}`);
+    }
+  }
+  return r;
+}
+
+const EXP_ROOT = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/exp')).replace(/\/+$/, '');
+
 // ---- GPU families: keep this block identical in kernel_workflow.js, kernel_lane.js and e2e_workflow.js ----
 // Per-GPU-family policy, looked up by ISA. The Workflow sandbox has no import, so each workflow carries
 // a copy (kernel_workflow/scripts/test_gpu_family_table.js keeps them identical). An ISA no row
@@ -112,12 +154,13 @@ const GPU_FAMILY_DEFAULT = { name: 'default', isa: null, isolate: false, matrixC
 const gpuFamily = (gfx) => GPU_FAMILIES.find((f) => f.isa.test(String(gfx || ''))) || GPU_FAMILY_DEFAULT;
 // ---- end GPU families ----
 
+// ---------------------------------------------------------------------------
 // Schema helpers.
+// ---------------------------------------------------------------------------
 const obj = (props, required) => ({ type: 'object', properties: props, required: required || [], additionalProperties: true });
 const arrStr = { type: 'array', items: { type: 'string' } };
 const arrObj = { type: 'array', items: { type: 'object', additionalProperties: true } };
 
-// Prompt + agent helpers (self-contained; mirror kernel_lane.js / e2e_workflow.js).
 const cfg = (o) => Object.entries(o).map(([k, v]) =>
   `- ${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join('\n');
 
@@ -131,116 +174,12 @@ const AGENT_RETRIES = Math.max(1, parseInt(A.agent_retries != null ? A.agent_ret
 const LLM_STATS = String(A.llm_stats != null ? A.llm_stats : 'true').trim().toLowerCase() !== 'false';
 const LLM_TL = { schema: 'geak.agent_timeline/1', workflow: 'kernel_workflow', events: [], nested: [] };
 const TL_ROLE_RE = /You are the ([A-Za-z0-9_.\-]+)\.\s*PHASE=([A-Za-z0-9_.\-]+)\./;
-// Called AT DISPATCH (before the await) so LLM_TL.events is in dispatch order, not completion order.
-// Returns the event so the caller flips `ok` once the attempt resolves (null when off).
-function tlAgent(prompt, o, attempt) {
-  if (!LLM_STATS) return null;
-  const m = TL_ROLE_RE.exec(String(prompt || ''));
-  const e = {
-    seq: LLM_TL.events.length,
-    phase: (o && o.phase) || '',
-    label: (o && o.label) || 'agent',
-    role: m ? m[1] : '',
-    sub_phase: m ? m[2] : '',
-    attempt: attempt,
-    ok: false,
-  };
-  LLM_TL.events.push(e);
-  return e;
-}
-async function agentT(p, o) {
-  const label = (o && o.label) ? o.label : 'agent';
-  for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
-    const ev = tlAgent(p, o, attempt);   // record AT DISPATCH; ok=false until it resolves
-    try {
-      if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) {
-        const r0 = await agent(p, o); if (ev && r0) ev.ok = true; return r0;
-      }
-      let to;
-      const guard = new Promise((resolve) => {
-        to = setTimeout(() => {
-          log(`  [hung-agent guard] ${label} exceeded ${Math.round(AGENT_TIMEOUT_MS / 60000)}min with no return — resolving null.`);
-          resolve(null);
-        }, AGENT_TIMEOUT_MS);
-      });
-      const r = await Promise.race([
-        agent(p, o).then((rr) => { clearTimeout(to); return rr; }, (e) => { clearTimeout(to); throw e; }),
-        guard,
-      ]);
-      if (ev && r) ev.ok = true;
-      return r;
-    } catch (e) {
-      const msg = String(e && e.message ? e.message : e).slice(0, 200);
-      if (attempt < AGENT_RETRIES) {
-        log(`  [api-fault guard] ${label} attempt ${attempt}/${AGENT_RETRIES} error (${msg}) — retrying.`);
-        continue;
-      }
-      log(`  [api-fault guard] ${label} failed after ${AGENT_RETRIES} attempts (${msg}) — resolving null.`);
-      return null;
-    }
-  }
-  return null;
-}
 
-// Role prompt from an arbitrary roles/ dir (bakeoff references e2e's op_benchmarker in place).
-function roleAgentFrom(dir, role, phaseName, intro, inputs, extra) {
-  return `You are the ${role}. PHASE=${phaseName}.
-First Read ${dir}/roles/${role}.md and follow its instructions for PHASE=${phaseName}.
-Read any knowledge files it points you to under ${dir}/knowledge/.
-Do all filesystem/shell work yourself (Bash/Read/Write). ${intro}
-
-## Inputs
-${cfg(inputs)}
-
-Return ONLY the structured JSON the role file specifies (a StructuredOutput tool is forced).` + (extra || '');
-}
-// This dispatcher's own roles live under WORKFLOW_DIR/roles/.
+// This dispatcher's own roles (oracle_freezer) live under WORKFLOW_DIR/roles/.
 const roleAgent = (role, phaseName, intro, inputs) => roleAgentFrom(WORKFLOW_DIR, role, phaseName, intro, inputs);
 
-// GPU semaphore: 1 GPU per lane, EXCLUSIVE. size==1 serializes lanes. (Lifted from e2e_workflow.js.)
-function makeSem(ids) {
-  const free = ids.slice(); const waiters = [];
-  const pump = () => { while (waiters.length && waiters[0].n <= free.length) {
-    const w = waiters.shift(); w.resolve(free.splice(0, w.n)); } };
-  return {
-    size: ids.length,
-    acquire(n = 1) { if (n <= free.length) return Promise.resolve(free.splice(0, n));
-      return new Promise((resolve) => { waiters.push({ n, resolve }); }); },
-    release(got) { free.push(...got); pump(); },
-    async with(n, fn) { const g = await this.acquire(n); try { return await fn(g); } finally { this.release(g); } },
-  };
-}
-
-// Final step of every top-level run: persist the agent timeline, then render the run report (ledger ->
-// clickable role-execution-tree HTML + MD twin). kernel_workflow is always a TOP-LEVEL entry point (E2E
-// nests kernel_lane.js, not this dispatcher), so it owns its own ledger + report. The script has no
-// filesystem access, so a tiny agent writes the timeline and runs the report driver. Entirely
-// best-effort: accounting must never fail a run that produced a real speedup.
-async function emitRunReport(evalDir, timeline, phaseName) {
-  try {
-    const tlPath = `${evalDir}/reports/trace/agent_timeline.json`;
-    await agentT(
-      `You are the file_writer. PHASE=persist_llm_stats.\n` +
-      `Do exactly two things, in order:\n` +
-      `1. Use the Write tool to create "${tlPath}" with EXACTLY the JSON below, verbatim ` +
-      `(create parent directories if needed; do NOT reformat, truncate or summarize it):\n\n` +
-      '```json\n' + JSON.stringify({ ...timeline, instance: evalDir }) + '\n```\n\n' +
-      `2. Then run this Bash command (best-effort; if it fails, carry on and report ok=false).\n` +
-      `   It runs the token/time/cost ledger AND renders the role-execution-tree report (HTML + MD):\n` +
-      `   python3 -B "${WORKFLOW_DIR}/../interface/geak_report.py" --eval-dir "${evalDir}"\n\n` +
-      `Then return {"written": true, "path": "${tlPath}", "ok": <true if the command exited 0 else false>}.`,
-      { phase: phaseName, label: 'file_writer:persist_llm_stats',
-        schema: obj({ written: { type: 'boolean' }, path: { type: 'string' }, ok: { type: 'boolean' } }, []) });
-    const n = (timeline.nested || []).length;
-    log(`LLM token+time+cost ledger -> ${evalDir}/reports/trace/ and run report (HTML+MD) -> ${evalDir}/report/.` +
-        (timeline.events ? ` ${timeline.events.length} agent attempts recorded${n ? ` plus ${n} nested lane(s)` : ''}.` : ''));
-  } catch (e) {
-    log(`LLM stats/report emit failed (NON-FATAL — the run is unaffected): ${String(e)}`);
-  }
-}
-
 // ===========================================================================
-// CONFIG-AWARE OPERATOR FAMILY (args.config_aware = "true" | "on"; docs/config_aware_family_design.md).
+// CONFIG-AWARE OPERATOR FAMILY (args.config_aware = "true" | "on").
 // One kernel_lane.js per family_spec config, launched together over the GPU pool like bakeoff (one GPU id
 // per lane, a thrown lane is caught), so nesting stays dispatcher -> kernel_lane. Validation, statuses,
 // aggregate and catalog are computed here; agents only propose an advisory plan and write files. The
@@ -635,7 +574,7 @@ if (CONFIG_AWARE) {
     { path: P.catalog, content: JSON.stringify(CATALOG, null, 2) },
   ], { path: P.report, how: REPORT_HOW });
   log(`config_aware COMPLETE: ${SUMMARY.optimized}/${SUMMARY.total} config(s) optimized. Results in ${FAMILY_DIR}`);
-  if (LLM_STATS) await emitRunReport(FAMILY_DIR, LLM_TL, 'Report');
+  if (LLM_STATS) await emitRunReport(FAMILY_DIR);
   return {
     schema_version: 1, mode: 'config_aware', config_aware: true, family_id: FAMILY_ID, operator: OPERATOR, eval_dir: FAMILY_DIR,
     llm_timeline: LLM_STATS ? { ...LLM_TL, instance: FAMILY_DIR } : undefined,
@@ -644,21 +583,6 @@ if (CONFIG_AWARE) {
     artifacts_persisted: planPersisted && persisted,
     validation_status: SUMMARY.optimized > 0 ? 'ok' : 'no_optimized_config',
   };
-}
-
-// ===========================================================================
-// SINGLE-LANGUAGE PASS-THROUGH (mode=optimize | author) — byte-compatible with
-// the pre-dispatcher behavior. Forward EVERY arg to the worker unchanged (the
-// worker ignores dispatcher-only args like `backends`). One nesting level.
-// ===========================================================================
-if (MODE === 'optimize' || MODE === 'author') {
-  phase('Bakeoff');            // reuse a declared phase slot for the single passthrough lane
-  log(`mode=${MODE}: single-language pass-through -> ${WORKER}`);
-  const r = await workflow({ scriptPath: WORKER }, { ...A, workflow_dir: WORKFLOW_DIR });
-  // The dispatcher makes no agent calls of its own here, so the report is rendered from the lane's
-  // OWN timeline (`llm_timeline`) into the lane's `eval_dir`.
-  if (LLM_STATS && r && r.eval_dir && r.llm_timeline) await emitRunReport(r.eval_dir, r.llm_timeline, 'Bakeoff');
-  return r;
 }
 
 // ===========================================================================
@@ -727,6 +651,7 @@ const BACKENDS = (Array.isArray(A.backends) ? A.backends
 let USE_EXPERT_SKILLS = !GPU_FAMILY.isolate && String(A.use_expert_skills != null ? A.use_expert_skills : 'false') === 'true';
 const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
   (KERNEL_KNOWLEDGE_DIR ? KERNEL_KNOWLEDGE_DIR + '/expert_skills' : '')).replace(/\/+$/, '');
+const EXPERT_SKILL_ROLES = new Set(['op_benchmarker']);
 
 // Warm-start experience KB. Passed to each lane explicitly (the bakeoff lane invocation spreads
 // specific keys, not ...A) so every language lane reads/writes its own <kernel>__<lang>__<gfx> slug.
@@ -796,13 +721,96 @@ const UPDATE_EXPERIENCE_SCHEMA = obj({
   key: { type: 'string' }, note: { type: 'string' },
 }, []);
 
-// Expert-skills block appended to the op_benchmarker prompt (advisory; opt-in).
-const expertSkillsBlock = () => (!USE_EXPERT_SKILLS || !EXPERT_SKILLS_DIR) ? '' :
-  `\n\n## Expert skills (ADVISORY — opt-in, enabled this run)\n` +
+// ---------------------------------------------------------------------------
+// Prompt + agent helpers (self-contained; mirror kernel_lane.js / e2e_workflow.js).
+// ---------------------------------------------------------------------------
+// Called AT DISPATCH (before the await) so LLM_TL.events is in dispatch order, not completion order.
+// Returns the event so the caller flips `ok` once the attempt resolves (null when off).
+function tlAgent(prompt, o, attempt) {
+  if (!LLM_STATS) return null;
+  const m = TL_ROLE_RE.exec(String(prompt || ''));
+  const e = {
+    seq: LLM_TL.events.length,
+    phase: (o && o.phase) || '',
+    label: (o && o.label) || 'agent',
+    role: m ? m[1] : '',
+    sub_phase: m ? m[2] : '',
+    attempt: attempt,
+    ok: false,
+  };
+  LLM_TL.events.push(e);
+  return e;
+}
+async function agentT(p, o) {
+  const label = (o && o.label) ? o.label : 'agent';
+  for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
+    const ev = tlAgent(p, o, attempt);   // record AT DISPATCH; ok=false until it resolves
+    try {
+      if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) {
+        const r0 = await agent(p, o); if (ev && r0) ev.ok = true; return r0;
+      }
+      let to;
+      const guard = new Promise((resolve) => {
+        to = setTimeout(() => {
+          log(`  [hung-agent guard] ${label} exceeded ${Math.round(AGENT_TIMEOUT_MS / 60000)}min with no return — resolving null.`);
+          resolve(null);
+        }, AGENT_TIMEOUT_MS);
+      });
+      const r = await Promise.race([
+        agent(p, o).then((rr) => { clearTimeout(to); return rr; }, (e) => { clearTimeout(to); throw e; }),
+        guard,
+      ]);
+      if (ev && r) ev.ok = true;
+      return r;
+    } catch (e) {
+      const msg = String(e && e.message ? e.message : e).slice(0, 200);
+      if (attempt < AGENT_RETRIES) {
+        log(`  [api-fault guard] ${label} attempt ${attempt}/${AGENT_RETRIES} error (${msg}) — retrying.`);
+        continue;
+      }
+      log(`  [api-fault guard] ${label} failed after ${AGENT_RETRIES} attempts (${msg}) — resolving null.`);
+      return null;
+    }
+  }
+  return null;
+}
+
+function expertSkillsBlock(role) {
+  if (!USE_EXPERT_SKILLS || !EXPERT_SKILL_ROLES.has(role) || !EXPERT_SKILLS_DIR) return '';
+  return `\n\n## Expert skills (ADVISORY — opt-in, enabled this run)\n` +
     `Also query ${EXPERT_SKILLS_DIR}/index.yaml for skills whose \`match\` fits this op, whose \`scope\` ` +
     `is \`kernel\` (\`tuning\` entries belong to the e2e tuning phase and match every operator), and whose ` +
     `validation_status is \`validated\`, and treat each as a HIGH-PRIOR candidate — advisory only, never ` +
     `overriding your isolated A/B vs the oracle, never reducing a result below the measured baseline.`;
+}
+
+// Read a role file from an arbitrary roles/ dir (used for e2e's op_benchmarker referenced in place).
+function roleAgentFrom(dir, role, phaseName, intro, inputs) {
+  const base = `You are the ${role}. PHASE=${phaseName}.
+First Read ${dir}/roles/${role}.md and follow its instructions for PHASE=${phaseName}.
+Read any knowledge files it points you to under ${dir}/knowledge/.
+Do all filesystem/shell work yourself (Bash/Read/Write). ${intro}
+
+## Inputs
+${cfg(inputs)}
+
+Return ONLY the structured JSON the role file specifies (a StructuredOutput tool is forced).`;
+  if (CONFIG_AWARE) return base;
+  return base + expertSkillsBlock(role);
+}
+// GPU semaphore: 1 GPU per lane, EXCLUSIVE. size==1 serializes lanes. (Lifted from e2e_workflow.js.)
+function makeSem(ids) {
+  const free = ids.slice(); const waiters = [];
+  const pump = () => { while (waiters.length && waiters[0].n <= free.length) {
+    const w = waiters.shift(); w.resolve(free.splice(0, w.n)); } };
+  return {
+    size: ids.length,
+    acquire(n = 1) { if (n <= free.length) return Promise.resolve(free.splice(0, n));
+      return new Promise((resolve) => { waiters.push({ n, resolve }); }); },
+    release(got) { free.push(...got); pump(); },
+    async with(n, fn) { const g = await this.acquire(n); try { return await fn(g); } finally { this.release(g); } },
+  };
+}
 
 // PRIMARY metric of a worker (kernel_lane.js) result: its final_speedup is already the weighted number
 // when the run was workload-aligned, else the geomean. Fall back defensively.
@@ -948,7 +956,7 @@ const bake = await agentT(
     CANDIDATE_BACKENDS: (BACKENDS.length ? BACKENDS : (oracle.candidate_backends || [])),
     GPU_ID: GPU_LIST[0], ENABLE_FP8, LIVE_SERVER: 'false',
     KERNEL_WF_DIR: WORKFLOW_DIR, KERNEL_BUDGET: BUDGET, SKILL_DIR: E2E_WF_DIR,
-  }, expertSkillsBlock()),
+  }),
   { phase: 'Discover', label: 'op_benchmarker:discover', schema: OPBENCH_SCHEMA }) || {};
 
 // Resolve lanes. The INCUMBENT (original input) language ALWAYS competes as an in-place `optimize` lane:
@@ -1189,7 +1197,37 @@ if (winner && winner.speedup > 1.0) {
   }
 }
 
-if (EVAL_DIR && LLM_STATS) await emitRunReport(EVAL_DIR, LLM_TL, 'Report');
+// Persist the agent timeline, then render the run report (ledger -> clickable role-execution-tree
+// HTML + MD twin) as the very last step. kernel_workflow is always a TOP-LEVEL entry point (E2E nests
+// kernel_lane.js, not this dispatcher), so it owns its own ledger + report. The nested lane timelines
+// are already merged into LLM_TL.nested, so this one report covers the whole bake-off. The script has
+// no filesystem access, so a tiny agent writes the timeline and runs the report driver. Entirely
+// best-effort: accounting must never fail a run that produced a real speedup.
+if (EVAL_DIR && LLM_STATS) await emitRunReport(EVAL_DIR);
+
+async function emitRunReport(EVAL_DIR) {
+  try {
+    const tlJson = JSON.stringify({ ...LLM_TL, instance: EVAL_DIR });
+    const tlPath = `${EVAL_DIR}/reports/trace/agent_timeline.json`;
+    await agentT(
+      `You are the file_writer. PHASE=persist_llm_stats.\n` +
+      `Do exactly two things, in order:\n` +
+      `1. Use the Write tool to create "${tlPath}" with EXACTLY the JSON below, verbatim ` +
+      `(create parent directories if needed; do NOT reformat, truncate or summarize it):\n\n` +
+      '```json\n' + tlJson + '\n```\n\n' +
+      `2. Then run this Bash command (best-effort; if it fails, carry on and report ok=false).\n` +
+      `   It runs the token/time/cost ledger AND renders the role-execution-tree report (HTML + MD):\n` +
+      `   python3 -B "${WORKFLOW_DIR}/../interface/geak_report.py" --eval-dir "${EVAL_DIR}"\n\n` +
+      `Then return {"written": true, "path": "${tlPath}", "ok": <true if the command exited 0 else false>}.`,
+      { phase: 'Report', label: 'file_writer:persist_llm_stats',
+        schema: obj({ written: { type: 'boolean' }, path: { type: 'string' }, ok: { type: 'boolean' } }, []) });
+    const nestedNote = LLM_TL.nested.length ? ' plus ' + LLM_TL.nested.length + ' nested lane(s)' : '';
+    log(`LLM token+time+cost ledger -> ${EVAL_DIR}/reports/trace/ and run report (HTML+MD) -> ` +
+        `${EVAL_DIR}/report/. ${LLM_TL.events.length} agent attempts recorded${nestedNote}.`);
+  } catch (e) {
+    log(`LLM stats/report emit failed (NON-FATAL — the run is unaffected): ${String(e)}`);
+  }
+}
 
 return {
   mode: MODE,
