@@ -86,6 +86,11 @@ before spending hours on e2e.
 A local callable-identity check is **preflight, not proof.** It says what this process
 resolved, not what eight serving ranks loaded.
 
+If loading evidence reveals a shared registration collision, declare the qualified
+owner's dependency before consumer execution through the normal loader, preserving the
+consumer API. Verify which implementation registered; a matching name or schema alone
+does not establish candidate selection.
+
 **For a module loaded lazily, the proof has to come from the serving workers.** Verify the
 source path and hash inside each rank *after* a warmup request has exercised that path. A
 parent-process import or a pre-warmup check establishes nothing. Where the scenario
