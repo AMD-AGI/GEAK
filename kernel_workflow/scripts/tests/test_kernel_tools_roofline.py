@@ -15,6 +15,8 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[3]
 KT = REPO / "kernel_workflow" / "scripts" / "kernel_tools"
+PACK = REPO / "perf_knowledge" / "expert_skills" / "skills" / "gluon_authoring"
+PACK_SCRIPTS = PACK / "scripts"
 HW_DATA = REPO / "perf_knowledge" / "hardware" / "data"
 ROOFLINE_DIR = REPO / "e2e_workflow" / "knowledge" / "analysis_skills" / "roofline"
 
@@ -59,6 +61,30 @@ def test_roofline_tool_selftest(tool):
     out = result.stdout + result.stderr
     assert result.returncode == 0, out[-3000:]
     assert "SELFTEST PASS" in out, out[-3000:]
+
+
+def test_hw_budget_reading_route_page_check_actually_runs():
+    """workload_models.json reading_route.page is pack-relative and must resolve via
+    _hwdata.pack_dir(); the 13-archetype / precheck-heading assertions must RUN, not skip."""
+    path = KT / "hw_budget.py"
+    out = run(sys.executable, path, "--selftest").stdout
+    assert "reading-route page checked" in out and "13 archetype sections" in out, out[-2000:]
+    assert "SKIPPED" not in out
+
+
+def test_reading_route_page_resolves_via_pack_dir():
+    sys.path.insert(0, str(KT))
+    try:
+        import _hwdata  # noqa: PLC0415
+    finally:
+        sys.path.remove(str(KT))
+    page = json.loads((HW_DATA / "workload_models.json").read_text())["reading_route"]["page"]
+    assert (_hwdata.pack_dir() / page).is_file(), page
+
+
+def test_pack_carries_no_shims_of_shared_tools():
+    for tool in TOOLS:
+        assert not (PACK_SCRIPTS / f"{tool}.py").exists(), tool
 
 
 # --------------------------------------------------------------------------- one source, agreeing
@@ -134,6 +160,12 @@ def test_hw_budget_refuses_without_a_sku():
 # --------------------------------------------------------------------------- derived docs
 
 def test_generated_doc_blocks_are_current(extract_sku):
+    files = list(extract_sku.doc_files())
+    rel = {str(Path(f).relative_to(REPO)) for f in files}
+    for must in ("perf_knowledge/expert_skills/skills/gluon_authoring/references/hardware/amd-cdna4-skus.md",
+                 "perf_knowledge/expert_skills/skills/gluon_authoring/references/hardware/amd-cdna3-skus.md",
+                 "perf_knowledge/expert_skills/skills/gluon_authoring/references/hardware/atlas.md"):
+        assert must in rel, must
     assert extract_sku.check_docs(extract_sku.load()) == []
 
 

@@ -19,6 +19,9 @@
 #                      plus "--disable-signal-handlers true" for multi-GPU specs)
 #   RPROF_ARGS         args passed to legacy rocprof (default: "--stats")
 #   METRIX_ARGS        args passed to metrix (default: ""; override per `metrix --help` for this toolchain)
+#   KERNEL_TOOLS_PROFILE  1 = shared kernel_tools extras (rocprof-compute output flag by version, then a
+#                      rocprofv3 counter pass when only the trace survives); default 0 = unchanged.
+#                      kernel_workflow offers it through the role prompts only when use_expert_skills is on.
 #   ROCPROF_SIGNAL_HANDLERS  rocprofv3's own signal handlers in the profiled process (default: 0, off)
 #
 # Fault tolerance: a profiler that fails (e.g. a flag was renamed across toolchain versions) no longer
@@ -152,8 +155,16 @@ run_rocprof_compute() {  # rocprof-compute / omniperf: profile -> analyze, dump 
     mkdir -p "$workload"
     echo "=== Profiling with $tool (profile $RPC_PROFILE_ARGS) ==="
     local rc=0
+    # rocprof-compute >= 3.x replaced `profile -p <dir>` with `--output-directory`/`-d` (`-p` is now
+    # rejected: exit 2, no counters). `analyze -p` is unchanged. Pick the flag this install accepts.
+    local outflag=(-p "$workload")
+    # Opt-in (KERNEL_TOOLS_PROFILE=1, set by the roles only when use_expert_skills is on): default runs
+    # keep main's invocation unchanged.
+    if [ "${KERNEL_TOOLS_PROFILE:-0}" = "1" ]; then
+        "$tool" profile --help 2>/dev/null | grep -q -- '--output-directory' && outflag=(--output-directory "$workload")
+    fi
     bash "$GPU_LOCK" "$GPU_ID" \
-        "$tool" profile $RPC_PROFILE_ARGS -n workload -p "$workload" -- bash -c "$BENCHMARK_CMD" \
+        "$tool" profile $RPC_PROFILE_ARGS -n workload "${outflag[@]}" -- bash -c "$BENCHMARK_CMD" \
         > "$OUTPUT_DIR/${tool}_profile_raw.log" 2>&1 || rc=$?
     if [ "$rc" -ne 0 ]; then emit_profiler_failure "$tool" "$rc" RPC_PROFILE_ARGS "$OUTPUT_DIR/${tool}_profile_raw.log"; return 1; fi
     if [ -d "$workload" ]; then
@@ -243,6 +254,79 @@ for p in $PROFILER_PRIORITY; do
     esac
     [ "$PROFILE_SUCCESS" = true ] && break
 done
+
+# Counter pass. rocprof-compute aborts on some ROCm/gfx950 installs (a counter it requests cannot be
+# collected), which leaves only the rocprofv3 kernel trace: durations and dispatch counts, NO counters.
+# Collect a small set of PMC groups for the hottest user kernel with the shared kernel_tools
+# (rocprofv3_safe.sh: per-group timeout, kernel filter, abort -> degraded; parse_pmc.py: derived
+# metrics), one small group per pass (a bundled group can exceed what one pass may collect).
+#   Opt-in: runs only with KERNEL_TOOLS_PROFILE=1 (the role prompts offer it when use_expert_skills is on), so a
+#   default run is unchanged. PMC_PASS=0 disables it even then; PMC_KERNEL_REGEX overrides the kernel;
+#   PMC_GROUPS overrides the groups (';'-separated counter lists). Single-GPU specs only.
+KT_DIR="$SCRIPT_DIR/kernel_tools"
+run_pmc_pass() {
+    [ "${KERNEL_TOOLS_PROFILE:-0}" = "1" ] || return 0
+    [ "${PMC_PASS:-1}" = "0" ] && return 0
+    case "$GPU_ID" in group:*|pool:*:*) return 0 ;; esac
+    [ -f "$KT_DIR/rocprofv3_safe.sh" ] && [ -f "$KT_DIR/parse_pmc.py" ] || return 0
+    command -v rocprofv3 &> /dev/null || return 0
+    local kre="${PMC_KERNEL_REGEX:-}" stats seen
+    stats="$(find "$OUTPUT_DIR/rocprofv3" -name '*kernel_stats.csv' 2>/dev/null | head -1)"
+    [ -n "$kre" ] || [ -n "$stats" ] || return 0
+    seen="$(mktemp)"
+    # With PMC_KERNEL_REGEX: check it against the trace's kernel names. Without: the hottest kernel by
+    # total time that is not a torch/runtime/library helper. HIP user kernels (demangled "void f<..>"
+    # or mangled "_ZN...") are candidates; torch's own (at::, _ZN2at, c10) are not. No match: the
+    # kernel names the trace saw go to the report and the pass is skipped.
+    if [ -n "$stats" ]; then
+        kre="$(python3 - "$stats" "$kre" 2>"$seen" <<'PY'
+import csv, re, sys
+names = [r.get("Name") or "" for r in csv.DictReader(open(sys.argv[1]))]
+user = sys.argv[2]
+if user:
+    ok = any(re.search(user, n) for n in names)
+    print(user if ok else "")
+else:
+    skip = re.compile(r"^(?:void\s+)?(at::|c10::|__amd|Cijk_|ck::|ck_tile::|rocclr|hipblaslt|_ZN2at|_ZN3c10|_ZN2ck)")
+    rows = [r for r in csv.DictReader(open(sys.argv[1])) if not skip.match(r.get("Name") or "")]
+    rows.sort(key=lambda r: -float(r.get("TotalDurationNs") or 0))
+    print(re.escape(rows[0]["Name"][:200]) if rows else "")  # cut before escaping: no lone "\"
+    ok = bool(rows)
+if not ok:
+    sys.stderr.write("; ".join(sorted(set(n[:120] for n in names)))[:2000])
+PY
+)"
+    fi
+    if [ -z "$kre" ]; then
+        { echo ""; echo "=== PMC counters: skipped, no kernel matched ${PMC_KERNEL_REGEX:+PMC_KERNEL_REGEX='$PMC_KERNEL_REGEX' }(kernels seen: $(cat "$seen" 2>/dev/null)) ==="; } >> "$REPORT"
+        rm -f "$seen"
+        return 0
+    fi
+    rm -f "$seen"
+    # One pass per parse_pmc.py counter group (its PMC_GROUPS is the single source); PMC_GROUPS in the
+    # env ("C1 C2;C3;...") overrides; the literal is a fallback if the parser cannot be run.
+    local groups="${PMC_GROUPS:-}"
+    [ -n "$groups" ] || groups="$(python3 "$KT_DIR/parse_pmc.py" --print-groups 2>/dev/null \
+        | sed -n 's/^[A-Za-z0-9_]*: *//p' | paste -sd';' -)"
+    [ -n "$groups" ] || groups="SQ_WAVES SQ_BUSY_CYCLES SQ_WAIT_ANY;VALUBusy MfmaUtil OccupancyPercent;FETCH_SIZE;WRITE_SIZE;TCC_HIT_sum TCC_MISS_sum;SQ_LDS_BANK_CONFLICT SQ_LDS_IDX_ACTIVE"
+    local pdir="$OUTPUT_DIR/pmc"
+    [ -e "$pdir" ] && mv "$pdir" "${pdir}.old_$(date +%s)_$$" 2>/dev/null || true
+    mkdir -p "$pdir"
+    echo "=== Counter pass (rocprofv3 --pmc via kernel_tools/rocprofv3_safe.sh, kernel ~ ${kre:0:80}) ==="
+    { echo ""; echo "=== PMC counters (rocprofv3 --pmc, one small group per pass; kernel regex: $kre) ==="; } >> "$REPORT"
+    local i=0 g
+    IFS=';' read -ra _GL <<< "$groups"
+    for g in "${_GL[@]}"; do
+        i=$((i+1)); local rc=0
+        bash "$GPU_LOCK" "$GPU_ID" bash "$KT_DIR/rocprofv3_safe.sh" --kernel "$kre" --out "$pdir/pmc_g$i" \
+            --pmc "$g" --cmd "$BENCHMARK_CMD" > "$pdir/pmc_g$i.log" 2>&1 || rc=$?
+        echo "group $i [$g]: rc=$rc$([ "$rc" -ne 0 ] && echo " (not collected; see pmc/pmc_g$i.log)")" >> "$REPORT"
+    done
+    echo "parse: parse_pmc.py <pmc dir> '<kernel regex>' --regex" >> "$REPORT"
+    python3 "$KT_DIR/parse_pmc.py" "$pdir" "$kre" --regex --arch "${DETECTED_ARCH:-}" >> "$REPORT" 2>&1 || \
+        echo "(parse_pmc.py could not derive metrics; raw CSVs are under $pdir)" >> "$REPORT"
+}
+if [ "${PROFILER:-}" = "rocprofv3" ]; then run_pmc_pass || true; fi
 
 # Final fallback: no profiler available, or the chosen one produced nothing -> benchmark-only.
 if [ "$PROFILE_SUCCESS" = false ]; then

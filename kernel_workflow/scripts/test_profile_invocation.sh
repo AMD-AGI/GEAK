@@ -54,7 +54,7 @@ EOF
 
 cat > "$tmp/bin/rocprofv3" <<'EOF'
 #!/bin/sh
-printf '%s\n' "$*" > "$STUB_DIR/rocprofv3_args"
+printf '%s\n' "$*" >> "$STUB_DIR/rocprofv3_calls"
 printf '%s\n' "${ROCPROF_SIGNAL_HANDLERS-unset}" > "$STUB_DIR/rocprofv3_signal_handlers"
 dir=""
 while [ "$#" -gt 0 ]; do
@@ -65,7 +65,8 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 mkdir -p "$dir"
-printf 'Name,Calls\nfixture_kernel,1\n' > "$dir/kernel_stats.csv"
+if [ -n "${STUB_KERNEL_STATS:-}" ]; then cp "$STUB_KERNEL_STATS" "$dir/kernel_stats.csv"
+else printf 'Name,Calls\nfixture_kernel,1\n' > "$dir/kernel_stats.csv"; fi
 EOF
 chmod +x "$tmp/bin/rocminfo" "$tmp/bin/rocprof-compute" "$tmp/bin/rocprofv3"
 
@@ -97,8 +98,71 @@ run_profile "$tmp/out-v3" PROFILER_PRIORITY="rocprofv3"
 grep -q "Profiler used: rocprofv3" "$tmp/stdout.log" || fail "rocprofv3 was not used"
 [ "$(cat "$tmp/rocprofv3_signal_handlers")" = 0 ] \
   || fail "rocprofv3 kept its own signal handlers: $(cat "$tmp/rocprofv3_signal_handlers")"
-grep -q -- "^--kernel-trace --stats --output-format csv -d " "$tmp/rocprofv3_args" \
-  || fail "default rocprofv3 arguments changed: $(cat "$tmp/rocprofv3_args")"
+grep -q -- "^--kernel-trace --stats --output-format csv -d " "$tmp/rocprofv3_calls" \
+  || fail "default rocprofv3 arguments changed: $(cat "$tmp/rocprofv3_calls")"
+# Default run: unchanged -- no counter pass.
+! grep -q -- "--pmc" "$tmp/rocprofv3_calls" || fail "a default run ran a counter pass: $(cat "$tmp/rocprofv3_calls")"
+! grep -q "=== PMC counters" "$tmp/out-v3/profile_report.txt" || fail "a default report carries a counter pass"
+# Opt-in (KERNEL_TOOLS_PROFILE=1, set by the roles when use_expert_skills is on): the trace is followed by
+# a counter pass on the hottest user kernel (kernel_tools/rocprofv3_safe.sh).
+: > "$tmp/rocprofv3_calls"
+run_profile "$tmp/out-v3-kt" PROFILER_PRIORITY="rocprofv3" KERNEL_TOOLS_PROFILE=1
+grep -q -- "--pmc .*--kernel-include-regex fixture_kernel" "$tmp/rocprofv3_calls" \
+  || fail "no counter pass after the kernel trace: $(cat "$tmp/rocprofv3_calls")"
+grep -q "=== PMC counters" "$tmp/out-v3-kt/profile_report.txt" || fail "counter pass missing from the report"
+grep -q "parse_pmc.py .* --regex" "$tmp/out-v3-kt/profile_report.txt" || fail "parse_pmc.py not told the filter is a regex"
+# A HIP user kernel (demangled "void ..." or mangled "_ZN...") is profiled; torch's own kernels are not.
+cat > "$tmp/stats_hip.csv" <<'CSV'
+Name,Calls,TotalDurationNs
+"void at::native::elementwise_kernel<128, 4>(int)",10,900000
+_ZN2at6native13reduce_kernelEv,10,800000
+"void my_gemm<64>(float*, float const*)",10,500000
+_ZN5mykns9small_addEPfS0_,10,100000
+CSV
+: > "$tmp/rocprofv3_calls"
+run_profile "$tmp/out-v3-hip" PROFILER_PRIORITY="rocprofv3" KERNEL_TOOLS_PROFILE=1 STUB_KERNEL_STATS="$tmp/stats_hip.csv"
+grep -q -- "--pmc .*--kernel-include-regex void.*my_gemm" "$tmp/rocprofv3_calls" \
+  || fail "the hottest HIP user kernel was not profiled: $(cat "$tmp/rocprofv3_calls")"
+# A long templated name: the regex is cut to 200 characters of the name before it is escaped, so it
+# stays a valid pattern (a cut after escaping can end in a lone backslash) and still matches the kernel.
+python3 - "$tmp/stats_long.csv" <<'PY'
+import csv, re, sys
+name = "void my_kernel__<" + ", ".join(["int"] * 29) + ">(float*)"
+assert re.escape(name)[:200].endswith("\\"), "fixture no longer exercises the cut-after-escape case"
+with open(sys.argv[1], "w", newline="") as f:
+    w = csv.writer(f); w.writerow(["Name", "Calls", "TotalDurationNs"]); w.writerow([name, 10, 500000])
+PY
+: > "$tmp/rocprofv3_calls"
+run_profile "$tmp/out-v3-long" PROFILER_PRIORITY="rocprofv3" KERNEL_TOOLS_PROFILE=1 STUB_KERNEL_STATS="$tmp/stats_long.csv"
+grep -q -- "--pmc" "$tmp/rocprofv3_calls" || fail "no counter pass for a long templated kernel name"
+long_re="$(sed -n 's/^=== PMC counters (.*kernel regex: \(.*\)) ===$/\1/p' "$tmp/out-v3-long/profile_report.txt")"
+[ -n "$long_re" ] || fail "kernel regex for the long name missing from the report"
+python3 - "$long_re" "$tmp/stats_long.csv" <<'PY' || fail "long-name kernel regex is invalid or does not match: $long_re"
+import csv, re, sys
+name = next(csv.DictReader(open(sys.argv[2])))["Name"]
+assert re.search(sys.argv[1], name)
+PY
+# No candidate: no pass, and the report lists the kernel names the trace saw.
+cat > "$tmp/stats_torch.csv" <<'CSV'
+Name,Calls,TotalDurationNs
+"void at::native::elementwise_kernel<128, 4>(int)",10,900000
+Cijk_Ailk_Bljk_HHS_BH,10,800000
+CSV
+: > "$tmp/rocprofv3_calls"
+run_profile "$tmp/out-v3-none" PROFILER_PRIORITY="rocprofv3" KERNEL_TOOLS_PROFILE=1 STUB_KERNEL_STATS="$tmp/stats_torch.csv"
+! grep -q -- "--pmc" "$tmp/rocprofv3_calls" || fail "a counter pass ran with no candidate kernel"
+grep -q "no kernel matched (kernels seen: .*Cijk_Ailk_Bljk_HHS_BH" "$tmp/out-v3-none/profile_report.txt" \
+  || fail "no-match report does not list the kernels seen"
+# A PMC_KERNEL_REGEX that matches nothing in the trace: skipped, names listed.
+: > "$tmp/rocprofv3_calls"
+run_profile "$tmp/out-v3-nore" PROFILER_PRIORITY="rocprofv3" KERNEL_TOOLS_PROFILE=1 STUB_KERNEL_STATS="$tmp/stats_hip.csv" \
+  PMC_KERNEL_REGEX="no_such_kernel"
+! grep -q -- "--pmc" "$tmp/rocprofv3_calls" || fail "a counter pass ran for a regex that matches no kernel"
+grep -q "PMC_KERNEL_REGEX='no_such_kernel' (kernels seen: .*my_gemm" "$tmp/out-v3-nore/profile_report.txt" \
+  || fail "unmatched PMC_KERNEL_REGEX not reported with the kernels seen"
+: > "$tmp/rocprofv3_calls"
+run_profile "$tmp/out-v3-nopmc" PROFILER_PRIORITY="rocprofv3" KERNEL_TOOLS_PROFILE=1 PMC_PASS=0
+! grep -q -- "--pmc" "$tmp/rocprofv3_calls" || fail "PMC_PASS=0 still ran a counter pass"
 
 # A caller's own setting is kept.
 run_profile "$tmp/out-v3-caller" PROFILER_PRIORITY="rocprofv3" ROCPROF_SIGNAL_HANDLERS=1

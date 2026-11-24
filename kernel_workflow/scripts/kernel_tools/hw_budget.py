@@ -127,7 +127,7 @@ def _load(rel):
 
 
 # Stop/continue cut-offs on measured_ms / floor: one source, thresholds.json `hw_budget`, read here
-# and quoted by --help. Heuristic, uncalibrated.
+# and quoted by --help (and by kernel_workflow/scripts/kernel_tools/CARD.md). Heuristic, uncalibrated.
 def _room_thresholds():
     t = (_load("thresholds.json").get("hw_budget") or {})
     return float(t.get("little_room_below", 1.25)), float(t.get("large_room_from", 2.0))
@@ -1243,7 +1243,7 @@ def budget(sku_name, workload=None, shapes=None, dtype="bf16", measured_ms=None,
             "hbm_bytes_range": [b_lo, b_hi], "bytes_source": bytes_src,
             "bytes_clamped_by_physics": bytes_clamped,
             "hbm_ceiling_tb_s": [bw_lo, bw_hi], "hbm_ceiling_source": bw_src,
-            # THE ROOFLINE BASIS PAIR (GEAK-wide rule, perf_knowledge/profiling/roofline_on_mi.md):
+            # THE ROOFLINE BASIS PAIR (gluon_authoring references/hardware/roofline-models.md, "Every % of roofline"):
             # every %-of-roofline names what its numerator and denominator rest on. A datasheet
             # denominator may RANK only; a measured numerator over a probed/calibrated denominator
             # is the only combination that may gate or close.

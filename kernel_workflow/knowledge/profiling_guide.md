@@ -198,7 +198,7 @@ diagnosis forward; and recognize that an autotuner sweeping tiles is implicitly 
 
 **CDNA (gfx942/gfx950):** `waves/SIMD ≈ min(8, 512 / (Arch_VGPR + Accum_VGPR))`; 1–2 is register-starved. ArchVGPR and Accum_VGPR share one file.
 
-**gfx115x:** do **not** use the 512 combined-VGPR formula either; re-derive with `$SKILL_DIR/../perf_knowledge/expert_skills/skills/gluon_authoring/scripts/amd_occupancy.py` `--compiler-sweep --arch <this box's gfx>`. The parts differ: gfx1151's steps start at 96 VGPRs for 16 waves, gfx1150 / gfx1152 / gfx1153's at 64.
+**gfx115x:** do **not** use the 512 combined-VGPR formula either; re-derive with `$SKILL_DIR/scripts/kernel_tools/amd_occupancy.py` `--compiler-sweep --arch <this box's gfx>`. The parts differ: gfx1151's steps start at 96 VGPRs for 16 waves, gfx1150 / gfx1152 / gfx1153's at 64.
 
 **R9700 / gfx1201:** do **not** use the 512 combined-VGPR formula. GEAK's HIP/Triton workflow uses the static ≤256 VGPR/wave model, granule 24, cap 16 waves/SIMD. Read `amd_rdna4.md` and re-derive with `amd_occupancy.py --compiler-sweep --arch gfx1201` on this ROCm. Dividing 256 by kernel VGPRs under-reports occupancy 2–3×.
 - Branch Divergence > 10% → significant divergence penalty

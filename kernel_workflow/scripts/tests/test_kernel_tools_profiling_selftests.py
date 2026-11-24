@@ -12,6 +12,7 @@ import pytest
 
 SCRIPTS = Path(__file__).resolve().parents[1]
 KT = SCRIPTS / "kernel_tools"
+PACK = SCRIPTS.parents[1] / "perf_knowledge/expert_skills/skills/gluon_authoring/scripts"
 
 TOOLS = [
     "locus.sh", "capture.sh", "rocprofv3_safe.sh",
@@ -33,6 +34,11 @@ def test_selftest_passes(tool, tmp_path):
     r = _run(path, tmp_path)
     out = r.stdout + r.stderr
     assert r.returncode == 0 and "PASS" in out and "FAIL" not in out.replace("FAILED", ""), out[-2000:]
+
+
+def test_pack_carries_no_profiling_shims():
+    for tool in TOOLS:
+        assert not (PACK / tool).exists(), tool
 
 
 def test_profiler_wrappers_follow_geak_conventions():

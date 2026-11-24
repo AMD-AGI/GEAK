@@ -24,7 +24,8 @@
 #
 # --arch: only --emit-gluon consumes it. Not given -> read from rocminfo (printed); still unknown ->
 # --emit-gluon REFUSES (exit 4) instead of assuming one (gfx942 vs gfx950 changes the recovery).
-# No `rm`: the per-variant compile cache is a fresh mktemp dir; a non-empty one is MOVED ASIDE.
+# No `rm`: the per-variant compile cache is a fresh mktemp dir under ${TMPDIR:-/tmp}/geak-dump-ir
+# (TILE_HW_CACHE overrides); a non-empty one is MOVED ASIDE.
 #
 # Writes: <ir_dir>/<variant>/<variant>.{ttgir,llir,amdgcn,s} + meta_*.json (LDS bytes/workgroup).
 # Exit: 0 dumped | 1 no compile command / bare --kernel | 2 unknown option before the compile
@@ -43,7 +44,7 @@ Usage:
   bash dump_ir.sh --variant <name> --out <ir_dir> [options] -- <compile_cmd ...>
   bash dump_ir.sh <compile_cmd ...> --variant <name> --out <ir_dir>
       [--knobs "COEXEC EXPERT AGPR PLUGIN"] [--emit-gluon layouts|anchor|pipeline]
-      [--kernel module.path:object] [--kernel-name <substring>] [--arch gfx950]
+      [--kernel module.path:object] [--kernel-name <substring>] [--all] [--arch gfx950]
   bash dump_ir.sh --selftest
 
 Any token that is not one of the flags above is part of <compile_cmd>, so the
@@ -54,6 +55,8 @@ names shared with this wrapper, such as --arch, --out, --variant or --help.
 
   --kernel       module.path:object, handed to recover_gluon.py for --emit-gluon anchor|pipeline
   --kernel-name  substring that PINS which compiled kernel's IR is copied (multi-kernel ops)
+  --all          multi-case benchmark: dump EVERY compilation to <out>/<variant>_c<i>/ (index in
+                 <out>/<variant>/ir_index.json, with each one's constexprs) instead of refusing with E_IR_SELECTION
 
   bash dump_ir.sh python bench.py --version plain --variant plain --out ir/
   bash dump_ir.sh python bench.py --version plain --variant plain --out ir/ --emit-gluon layouts --arch gfx950
@@ -90,6 +93,19 @@ selftest() {
   out="$(TILE_HW_CACHE="$T/cache" bash "$SELF" true --variant n --out "$T/ir" 2>&1)"; rc=$?
   if [ $rc -eq 3 ] && grep -q "E_IR_NOTHING_COMPILED" <<<"$out"; then echo "  ok   nothing compiled -> named (3)"
   else echo "  FAIL nothing-compiled rc=$rc: $out"; f=1; fi
+  # --all: two configurations of one kernel, each indexed with the constexprs the hook logged (the
+  # fake command checks the hook dir is on PYTHONPATH and writes the rows the hook would)
+  local fake2='case ":$PYTHONPATH:" in *.hook:*) ;; *) exit 9;; esac; for c in 1 2; do d="$TRITON_CACHE_DIR/h$c"; mkdir -p "$d"; printf "x\n" > "$d/k.ttgir"; printf "x\n" > "$d/k.llir"; printf "k:\n\ts_endpgm\n" > "$d/k.amdgcn"; printf "{\"name\": \"k\", \"num_warps\": $((c*4)), \"num_stages\": 2}\n" > "$d/k.json"; printf "{\"kernel\": \"k\", \"num_warps\": $((c*4)), \"num_stages\": 2, \"constexprs\": {\"BLOCK\": \"$((c*64))\"}}\n" >> "$TRITON_CACHE_DIR/_constexprs.jsonl"; done'
+  out="$(TILE_HW_CACHE="$T/cache" bash "$SELF" bash -c "$fake2" --all --variant a --out "$T/ir" 2>&1)"; rc=$?
+  if [ $rc -eq 0 ] && python3 -c "import json,sys; ix=json.load(open(sys.argv[1])); assert sorted(r['constexprs']['BLOCK'] for r in ix)==['128','64'], ix" "$T/ir/a/ir_index.json" 2>/dev/null; then
+    echo "  ok   --all: ir_index.json records each compilation's constexprs"
+  else echo "  FAIL --all constexprs (rc=$rc): $out"; f=1; fi
+  # --all, configs sharing num_warps/num_stages: told apart by the logged compile hash
+  local fake3='for c in 1 2; do d="$TRITON_CACHE_DIR/s$c"; mkdir -p "$d"; printf "x\n" > "$d/k.ttgir"; printf "x\n" > "$d/k.llir"; printf "k:\n\ts_endpgm\n" > "$d/k.amdgcn"; printf "{\"name\": \"k\", \"num_warps\": 4, \"num_stages\": 2, \"hash\": \"h$c\"}\n" > "$d/k.json"; printf "{\"kernel\": \"k\", \"num_warps\": 4, \"num_stages\": 2, \"hash\": \"h$c\", \"constexprs\": {\"BLOCK\": \"$((c*64))\"}}\n" >> "$TRITON_CACHE_DIR/_constexprs.jsonl"; done'
+  out="$(TILE_HW_CACHE="$T/cache" bash "$SELF" bash -c "$fake3" --all --variant s --out "$T/ir" 2>&1)"; rc=$?
+  if [ $rc -eq 0 ] && python3 -c "import json,sys; ix={r['compilation'].split('/')[0]: r['constexprs']['BLOCK'] for r in json.load(open(sys.argv[1]))}; assert ix=={'s1':'64','s2':'128'}, ix" "$T/ir/s/ir_index.json" 2>/dev/null; then
+    echo "  ok   --all: shared num_warps/num_stages told apart by the compile hash"
+  else echo "  FAIL --all shared-warps constexprs (rc=$rc): $out"; f=1; fi
   if grep -nE '(^|[;&|]|then|do)[[:space:]]*rm[[:space:]]+-' "$SELF" >/dev/null; then
     echo "  FAIL an rm call is present (GEAK roles run this; move aside instead)"; f=1
   fi
@@ -101,6 +117,7 @@ if [ "${1:-}" = "--selftest" ]; then selftest; exit $?; fi
 
 VARIANT="variant"; OUT_DIR="ir"; KNOBS=""; EMIT_GLUON=""; KERNEL=""; ARCH=""
 KERNEL_NAME=""
+ALL=0
 CMD=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -112,6 +129,7 @@ while [ $# -gt 0 ]; do
     --emit-gluon)  EMIT_GLUON="$2"; shift 2;;
     --kernel)      KERNEL="$2"; shift 2;;
     --kernel-name) KERNEL_NAME="$2"; shift 2;;
+    --all)         ALL=1; shift;;
     --arch)        ARCH="$2"; shift 2;;
     # A wrapper puts unknown tokens into the command it will RUN. That makes a mistyped wrapper flag
     # (`--ariant`, `--help` before this branch existed) something this script executes, after already
@@ -174,7 +192,8 @@ if [ -e "$DEST" ]; then
   mv "$DEST" "$DEST.previous.$(date +%s).$$"
 fi
 mkdir -p "$DEST"
-CACHE_PARENT="${TILE_HW_CACHE:-$OUT_DIR/.tile-runtime/tile-hw}"
+# The compile cache lives outside the workspace (TMPDIR), so it can never travel in a candidate patch.
+CACHE_PARENT="${TILE_HW_CACHE:-${TMPDIR:-/tmp}/geak-dump-ir}"
 mkdir -p "$CACHE_PARENT"
 CACHE_PARENT="$(cd "$CACHE_PARENT" && pwd)"
 CACHE="$(mktemp -d "$CACHE_PARENT/dump_ir_${VARIANT}.XXXX")"
@@ -193,11 +212,12 @@ export TRITON_CACHE_DIR="$CACHE"
 # A plugin path is the caller's to supply; this script does not guess one.
 for k in $KNOBS; do
   case "$k" in
-    COEXEC) export TRITON_HIP_USE_COEXEC_SCHEDULER=1;;
+    COEXEC) export TRITON_HIP_USE_COEXEC_SCHEDULER=1   # read nowhere on stock 3.8.0 (inert); coexec is gfx1250-only
+            echo "note: COEXEC env is inert on stock Triton 3.8.0; coexec is gfx1250-only (LLVM warns on gfx950/gfx942)" >&2;;
     EXPERT) export TRITON_HIP_USE_EXPERT_SCHEDULING=1;;
     AGPR)
       # a compile OPTION, not an env var: pass it through to the launcher, which must set
-      #   llvm_fn_attrs="amdgpu-agpr-alloc=256,amdgpu-mfma-vgpr-form=0"
+      #   llvm_fn_attrs=[["amdgpu-agpr-alloc", "256"]]   (amdgpu-mfma-vgpr-form is an llc option, inert as a fn attr)
       export DUMP_IR_WANT_AGPR_FN_ATTRS=1
       echo "note: AGPR is a per-compile option -- set llvm_fn_attrs on the kernel, not an env var" >&2
       ;;
@@ -210,6 +230,68 @@ for k in $KNOBS; do
       ;;
   esac
 done
+
+# --all: log each compilation's constexprs (Triton's cache metadata does not record them) through
+# Triton's jit_post_compile_hook, installed by a sitecustomize.py on PYTHONPATH for this command
+# only. It chains to any sitecustomize it shadows and to an already-set hook; without Triton, or on
+# any error, it does nothing. Each row carries the compiled kernel's hash (the cache metadata's
+# "hash"; read from the JIT's device cache, checked against Triton 3.8.0) when it can be read.
+# collect_ir.py matches rows by that hash, else by kernel + num_warps + num_stages.
+if [ "$ALL" = 1 ]; then
+  HOOK_DIR="$CACHE.hook"
+  mkdir -p "$HOOK_DIR"
+  cat > "$HOOK_DIR/sitecustomize.py" <<'PY'
+import importlib, importlib.util, json, os, sys
+_here = os.path.dirname(os.path.abspath(__file__))
+_saved, _me = list(sys.path), sys.modules.get("sitecustomize")
+try:  # chain to the sitecustomize this file shadows, if any
+    sys.path[:] = [p for p in sys.path if os.path.abspath(p or ".") != _here]
+    del sys.modules["sitecustomize"]
+    importlib.import_module("sitecustomize")
+except Exception:
+    pass
+finally:
+    sys.path[:] = _saved
+    if sys.modules.get("sitecustomize") is None:
+        sys.modules["sitecustomize"] = _me
+try:
+    if importlib.util.find_spec("triton") is not None:
+        from triton import knobs as _knobs
+        _log = os.path.join(os.environ.get("TRITON_CACHE_DIR", ""), "_constexprs.jsonl")
+        _prev = _knobs.runtime.jit_post_compile_hook
+
+        def _dump_ir_hook(*a, **kw):
+            try:
+                fn, c = kw.get("fn"), kw.get("compile") or {}
+                params = [p.name for p in getattr(getattr(fn, "jit_function", None), "params", [])]
+                ce = {}
+                for path, v in (c.get("constants") or {}).items():
+                    i = path[0] if isinstance(path, tuple) and path else path
+                    n = params[i] if isinstance(i, int) and i < len(params) else str(path)
+                    ce[n if not isinstance(path, tuple) or len(path) == 1 else f"{n}{list(path[1:])}"] = repr(v)
+                # The compiled kernel sits in the JIT's per-device cache under the same key; its
+                # hash is the "hash" field of the cache metadata, which ties this row to one cache
+                # dir even when configs share num_warps/num_stages. Absent -> collect_ir falls back.
+                h = None
+                try:
+                    jf = getattr(fn, "jit_function", None)
+                    h = getattr(jf.device_caches[c.get("device")][0].get(c.get("key")), "hash", None)
+                except Exception:
+                    h = None
+                with open(_log, "a") as f:
+                    f.write(json.dumps({"kernel": getattr(fn, "name", None), "num_warps": c.get("num_warps"),
+                                        "num_stages": c.get("num_stages"), "hash": h,
+                                        "constexprs": ce}) + "\n")
+            except Exception:
+                pass
+            return _prev(*a, **kw) if _prev else None
+
+        _knobs.runtime.jit_post_compile_hook = _dump_ir_hook
+except Exception:
+    pass
+PY
+  export PYTHONPATH="$HOOK_DIR${PYTHONPATH:+:$PYTHONPATH}"
+fi
 
 echo "=== dump_ir variant=$VARIANT knobs='${KNOBS:-none}' cache=$CACHE ==="
 # ONE token with whitespace is a command STRING (`bash -c` form); anything else is an argv.
@@ -232,6 +314,15 @@ fi
 # Select ONE compilation group (cache directory + kernel stem), then copy its IR and
 # matching metadata together. Multiple kernels/configurations require an explicit selection;
 # missing outputs are failures, never a reason to reuse a previous dump.
+if [ "$ALL" = 1 ]; then
+  # multi-case benchmark: one dump per compilation (<out>/<variant>_c<i>/), indexed in <out>/<variant>/ir_index.json
+  python3 "$(dirname "$SELF")/collect_ir.py" "$CACHE" "$DEST" "$VARIANT" --kernel-name "$KERNEL_NAME" --all
+  for d in "$DEST"_c*; do
+    [ -f "$d/$VARIANT.amdgcn" ] && sed -e '/^[[:space:]]*\.loc[[:space:]]/d' -e '/^\.Ltmp[0-9]*:/d' \
+        "$d/$VARIANT.amdgcn" > "$d/$VARIANT.s"
+  done
+  exit 0
+fi
 python3 "$(dirname "$SELF")/collect_ir.py" "$CACHE" "$DEST" "$VARIANT" --kernel-name "$KERNEL_NAME"
 
 # Echo the config the dumped IR was compiled with, so it can be confirmed to match

@@ -2,6 +2,8 @@
 
 Evidence CLIs for AMD Triton/Gluon/HIP kernels. They report evidence; they do not pick a tactic,
 and GEAK's verify step decides. Each tool's `--help` is its interface. Python 3.10+.
+Agent routing (signal -> tool) is `kernel_workflow/scripts/kernel_tools/CARD.md`, pointed to only under
+`use_expert_skills`.
 
 | Tool | Answers | Needs |
 | --- | --- | --- |
@@ -18,6 +20,7 @@ and GEAK's verify step decides. Each tool's `--help` is its interface. Python 3.
 | `parse_pmc.py` | counters -> busy, L2 hit, DRAM bytes, bank conflicts | rocprofv3 CSV |
 | `capture.sh` | ATT + ISA capture for one kernel | rocprofv3 + ATT decoder |
 | `hotspot_analyzer.py`, `att_opclass.py`, `mfma_efficiency.py`, `deep_mfma_analysis.py` | ATT stall hotspots, stall cycles by op class, MFMA cadence, what breaks the MFMA stream | decoded ATT or assembly |
+| `create_harness.py`, `parse_correctness.py`, `harness_stub_env.py` | search-harness skeleton; correctness log -> JSON | Python |
 
 Libraries (imported or sourced, not commands): `_hwdata.py`, `_quickhelp.py`, `amd_resources.py`,
 `amd_artifacts.py`, `amd_targets.py`, `_amd_isa_db.py`, `_amd_matrix.py`, `_kt_common.sh`,
@@ -34,6 +37,8 @@ ISA data maintenance: [isa_tools.md](isa_tools.md).
   is the acceptance step. JSON v2: read `screen` only when `validity.valid` is true. Exit 0 = valid
   screening (not a speedup), 2 = invalid screening/input, 1 = run failure. Adapters provide
   `variants()` and either `oracle(name)` or `outputs(name)` + `reference(name)`; `__control__` is reserved.
+- **Correctness adapter**: GEAK rc 0/1/2/3 = pass/fail/environment/incomplete; pass the real exit code.
+- **Skeletons**: reuse an existing task runner first; `create_harness.py --output` refuses existing files.
 - **Evidence limits**: static instruction order does not measure overlap; `s_nop` counts are encodings,
   not stall time; planning outputs (`hw_budget.py`, `probe.py plan`) carry `may_gate: false`.
 - **Kernel selection**: multi-kernel inputs need `--kernel`; `--loop-label` pins the loop.
