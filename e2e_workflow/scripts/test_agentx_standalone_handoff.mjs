@@ -176,6 +176,7 @@ test('all optimization dispatch sites reuse UTs and fail locally without authori
         MODEL_PATH: '/model', GPU_LIST: ['0'], gpu: '0', WORKLOAD: {}, profile: {},
         curOverlay: '', curFlags: '', curEnv: '', CONC: 32, EXTRACT_SCHEMA: {}, EXTRACT_OP_SCHEMA: {},
         h: {...queued}, c: {...queued}, headQueue: [queued, pending], gemmSynthFor: () => false,
+        engineWorkload: () => ({}), engineRegimes: () => ({}),
         safeAgent: () => { throw new Error('downstream authoring is forbidden'); }};
       return new AsyncFunction('env', `let {${Object.keys(env).join(',')}} = env;
         ${helper}\n${body}\nreturn {ext, headQueue};`)(env);
@@ -209,15 +210,20 @@ test('all optimization dispatch sites reuse UTs and fail locally without authori
 // intake re-asserts every invariant it can without reading bytes. Forge the reply and it must
 // THROW -- which is what arms the repair_delivery retry. Dropping the bad candidate instead would
 // shorten the queue silently and the run would end looking like there was nothing to optimize.
-test('a forged or degraded envelope is refused at intake, not taken on trust', async t => {
-  const f = await delivered(t);
-  await f.pack();
-  const good = await readPreparedKernels(f.evalDir, 'delivery.json');
+async function intakeReader(topology) {
   const src = await fs.readFile(new URL('../e2e_workflow.js', import.meta.url), 'utf8');
   const cut = (from, to) => src.slice(src.indexOf(from), src.indexOf(to, src.indexOf(from)));
   const reader = cut('function preparedUtDefect(', '\n// Hand an optimization lane')
     + cut('function readAgentXPreparation(', '\nasync function prepareAgentXKernels(');
-  const read = new Function(`${reader}\nreturn readAgentXPreparation;`)();
+  return new Function('SERVING_TOPOLOGY', 'IS_PD', 'PD_ROLES',
+    `${reader}\nreturn readAgentXPreparation;`)(topology, topology === 'pd_disagg', ['prefill', 'decode']);
+}
+
+test('a forged or degraded envelope is refused at intake, not taken on trust', async t => {
+  const f = await delivered(t);
+  await f.pack();
+  const good = await readPreparedKernels(f.evalDir, 'delivery.json');
+  const read = await intakeReader('');
   const reply = {delivery_path: '/eval/delivery.json', prepared: good};
   assert.equal(read(structuredClone(reply)).kernel_candidates.length, 1, 'the real envelope passes');
   const mutate = (fn) => { const r = structuredClone(reply); fn(r.prepared.kernel_candidates[0]); return r; };
@@ -243,6 +249,69 @@ test('whole-op metadata routes attention aliases to head and preserves the consu
   assert.equal(queues.head_candidates[0].op_kind, 'attn');
   await f.write('run/RETURN.json', {...f.result, smoke: 'pass', op_kind: 'moe'});
   await assert.rejects(f.pack(), /op_kind differs/);
+});
+
+const GPU_TIME_MASS = {rule: 'gpu_time_mass', weights: {prefill: 0.6, decode: 0.4},
+  inputs: {mass_us: {PREFILL: 60e6, DECODE: 40e6}, ranks: {prefill: 8, decode: 8}}, warnings: []};
+async function weighed(f, denominators) {
+  await f.writeEval('ranking.json', {denominators,
+    ranking: [{name: 'leaf_kernel', selection_pct_gpu_time: 7.5}]});
+}
+
+test('a PD task is one per kernel; its optional engine must be a PD engine', async t => {
+  const f = await delivered(t);
+  const engines = ['prefill', 'decode'];
+  await weighed(f, GPU_TIME_MASS);
+  await f.pack();
+  const untagged = await readPreparedKernels(f.evalDir, 'delivery.json', {engines});
+  assert.equal(untagged.kernel_candidates.length, 1, 'a kernel traced on both engines names neither');
+  await f.write('run/requested_kernel.json', {...f.kernel, engine: 'decode'});
+  await f.pack();
+  assert.equal((await readPreparedKernels(f.evalDir, 'delivery.json', {engines})).kernel_candidates[0].engine, 'decode');
+  await f.write('run/requested_kernel.json', {...f.kernel, engine: 'router'});
+  await f.pack();
+  const bogus = await readPreparedKernels(f.evalDir, 'delivery.json', {engines});
+  assert.equal(bogus.kernel_candidates.length, 0);
+  assert.match(bogus.failed_tasks.at(-1).reason, /engine names no PD engine/);
+});
+
+test('a PD kernel with both engines\' shares is shared, whatever engine it declares', async t => {
+  const f = await delivered(t);
+  const engines = ['prefill', 'decode'];
+  await f.write('run/requested_kernel.json', {...f.kernel, engine: 'decode'});
+  await f.pack();
+  await f.writeEval('ranking.json', {denominators: GPU_TIME_MASS, ranking: [{name: 'leaf_kernel',
+    selection_pct_gpu_time: 7.5, share_of_phase_pct: {PREFILL: 25.9, DECODE: 60}}]});
+  const pd = await readPreparedKernels(f.evalDir, 'delivery.json', {engines});
+  assert.equal(pd.kernel_candidates[0].engine, '', 'the ranking, not the declaration, decides');
+  assert.equal((await readPreparedKernels(f.evalDir, 'delivery.json')).kernel_candidates[0].engine, 'decode',
+    'off PD the declaration is untouched');
+  const read = await intakeReader('pd_disagg');
+  assert.equal(read({delivery_path: '/eval/delivery.json', prepared: structuredClone(pd)})
+    .kernel_candidates[0].engine, '', 'PD intake takes an empty engine as both');
+  const bogus = structuredClone(pd);
+  bogus.kernel_candidates[0].engine = 'router';
+  assert.throws(() => read({delivery_path: '/eval/delivery.json', prepared: bogus}), /engine must be prefill \| decode or empty/);
+});
+
+test('a PD ranking must carry the GPU-time mass mn_traces.py pd-mass wrote', async t => {
+  const f = await delivered(t);
+  const engines = ['prefill', 'decode'];
+  await f.write('run/requested_kernel.json', {...f.kernel, engine: 'decode'});
+  await f.pack();
+  await weighed(f, {basis: 'agent busy rate', prefill_engine: {deployment_weight_pct: 93.4}});
+  await assert.rejects(readPreparedKernels(f.evalDir, 'delivery.json', {engines}),
+    /not written by `mn_traces.py pd-mass --apply`/);
+  for (const rule of ['decode_only', 'latency_split']) {
+    await weighed(f, {metric_basis: 'p90_intvty_inferencex', rule, weights: {prefill: 0, decode: 1}});
+    await assert.rejects(readPreparedKernels(f.evalDir, 'delivery.json', {engines}),
+      /not written by `mn_traces.py pd-mass --apply`/, `a metric-weighted ${rule} ranking is refused`);
+  }
+  await weighed(f, GPU_TIME_MASS);
+  assert.equal((await readPreparedKernels(f.evalDir, 'delivery.json', {engines})).kernel_candidates.length,
+    1, 'no baseline bench_summary is read: the mass does not depend on the metric');
+  const oneHost = await readPreparedKernels(f.evalDir, 'delivery.json');
+  assert.equal(oneHost.kernel_candidates.length, 1, 'one host or tp_span: no engines to weigh');
 });
 
 test('completed multi-rank UTs retain evidence but do not enter single-GPU optimization lanes', async t => {
