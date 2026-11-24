@@ -1163,7 +1163,11 @@ def _run_main(monkeypatch, tmp_path, eval_dir, *, invoke, handoff_extra=None):
     handoff = _handoff(eval_dir)
     handoff.update(handoff_extra or {})
     hp.write_text(json.dumps(handoff), encoding="utf-8")
-    rc = rx.main([str(hp), str(rp)])
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    try:
+        rc = rx.main([str(hp), str(rp)])
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
     return rc, rp
 
 
@@ -1178,6 +1182,7 @@ def test_emit_on_success(monkeypatch, tmp_path):
                 "baseline_throughput_tok_s": 461.314,
                 "report_path": str(report)}
 
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
     rc, rp = _run_main(
         monkeypatch,
         tmp_path,
@@ -1188,6 +1193,7 @@ def test_emit_on_success(monkeypatch, tmp_path):
             "orchestrator_best_tput_same_config": 460.0,
         },
     )
+    assert signal.getsignal(signal.SIGTERM) == previous_sigterm
     assert rp.is_file(), "result.json MUST exist on success"
     out = json.loads(rp.read_text())
     assert out["status"] == "ok"
