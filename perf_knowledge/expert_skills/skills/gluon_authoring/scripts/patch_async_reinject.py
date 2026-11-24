@@ -207,6 +207,13 @@ def selftest():
 
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
+    if cmd in ("-h", "--help", "help"):
+        print(__doc__)
+        sys.exit(0)
     if cmd in ("--selftest", "selftest"):
         sys.exit(selftest())
-    sys.exit({"apply": apply_patch, "revert": revert, "status": status}[cmd]())
+    _cmds = {"apply": apply_patch, "revert": revert, "status": status}
+    if cmd not in _cmds:
+        sys.exit(f"{os.path.basename(sys.argv[0])}: unknown command {cmd!r}; "
+                 f"use apply | revert | status | --selftest | --help")
+    sys.exit(_cmds[cmd]())

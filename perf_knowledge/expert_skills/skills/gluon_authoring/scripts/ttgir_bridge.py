@@ -37,6 +37,7 @@ Three consequences worth stating, because they are the reason to switch:
 
 MODES
 -----
+  capabilities  report installed compiler APIs and normalization probes, no TTGIR needed.
   recover   .ttgir -> Gluon layout constants (+ JSON facts), with per-use-site
             provenance and a round-trip proof for every layout.
   verify    plain.ttgir vs anchor.ttgir, compared as LinearLayout normal forms.
@@ -59,6 +60,7 @@ import json
 import os
 import re
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -127,7 +129,8 @@ _CAPS: dict | None = None
 # on the one build where it matters, which is how a 3.6 box ends up comparing its
 # DISTRIBUTED layouts as text too -- weaker than it needs to be, for no reason.
 _CAP_PROBE = """\
-import sys
+import inspect, json, sys
+import triton
 from triton._C.libtriton import ir, gluon_ir
 import triton.experimental.gluon.language as gl
 
@@ -137,6 +140,26 @@ def say(c):
     sys.stdout.flush()
 
 
+def api(obj):
+    if obj is None:
+        return {"available": False, "parameters": None}
+    try:
+        parameters = list(inspect.signature(getattr(obj, "fn", obj)).parameters)
+    except (TypeError, ValueError):
+        parameters = None
+    return {"available": True, "parameters": parameters}
+
+
+amd = getattr(gl, "amd", None)
+cdna4 = getattr(amd, "cdna4", None)
+apis = {
+    "mfma_layout": api(getattr(amd, "AMDMFMALayout", None)),
+    "wmma_layout": api(getattr(amd, "AMDWMMALayout", None)),
+    "scale_layout": api(getattr(cdna4, "get_mfma_scale_layout", None)),
+    "padded_shared_layout": api(getattr(cdna4, "compute_efficient_padded_shared_layout", None)),
+    "layout_view": api(getattr(gluon_ir, "get_layout_view", None)),
+}
+print("API:" + json.dumps({"triton_version": triton.__version__, "native_apis": apis}), flush=True)
 if hasattr(gluon_ir, "get_layout_view"):
     say("layout_view")
 ctx = ir.context()
@@ -148,7 +171,7 @@ try:
     say("distributed_norm")
 except Exception:
     pass
-# LAST: aborts the interpreter on Triton 3.6.
+# LAST: can abort on older builds; some vendor 3.6 builds backport this capability.
 try:
     lay = gl.SwizzledSharedLayout(4, 1, 16, order=[1, 0])
     b.to_linear_layout(lay._to_ir(b), [64, 64])
@@ -158,7 +181,7 @@ except Exception:
 """
 
 
-def capabilities() -> dict:
+def capabilities(force_probe: bool = False) -> dict:
     """What this Triton build can do, probed in a CHILD process.
 
     Probed rather than version-gated, and out-of-process rather than in a try/except,
@@ -174,10 +197,10 @@ def capabilities() -> dict:
     subprocess (or to force a set) if the ~0.4s is unwelcome in a loop.
     """
     global _CAPS
-    if _CAPS is not None:
+    if _CAPS is not None and not force_probe:
         return _CAPS
     env = os.environ.get("TTGIR_BRIDGE_CAPS")
-    if env is not None:
+    if env is not None and not force_probe:
         names = {n.strip() for n in env.split(",") if n.strip()}
         _CAPS = {"shared_norm": "shared_norm" in names,
                  "distributed_norm": "distributed_norm" in names,
@@ -186,6 +209,8 @@ def capabilities() -> dict:
     import subprocess
     names: set = set()
     how = "subprocess"
+    api_info: dict = {}
+    diagnostic = ""
     try:
         # A non-zero / signal exit is EXPECTED on the builds this probe exists for; what
         # matters is the lines that made it out before the child died, so returncode is
@@ -195,11 +220,17 @@ def capabilities() -> dict:
         for ln in (r.stdout or "").splitlines():
             if ln.startswith("CAP:"):
                 names.add(ln[4:].strip())
-    except Exception:  # noqa: BLE001
+            elif ln.startswith("API:"):
+                api_info = json.loads(ln[4:])
+        if r.returncode:
+            diagnostic = (r.stderr or f"probe exited {r.returncode}")[-2000:]
+    except Exception as exc:  # noqa: BLE001
         how = "probe-failed"
+        diagnostic = str(exc)
     _CAPS = {"shared_norm": "shared_norm" in names,
              "distributed_norm": "distributed_norm" in names,
-             "layout_view": "layout_view" in names, "probed": how}
+             "layout_view": "layout_view" in names, "probed": how,
+             **api_info, "probe_diagnostic": diagnostic}
     return _CAPS
 
 
@@ -331,6 +362,30 @@ class Site:
 _FUNC_RE = re.compile(r"^\s*tt\.func\s+(public|private)?\s*@([\w$.]+)", re.MULTILINE)
 _NS_ATTR_RE = re.compile(r"tt\.num_stages\s*=\s*(\d+)")
 _ITER_ARGS_RE = re.compile(r"iter_args\(([^)]*)\)")
+# A pipelined loop's LDS ring: `ttg.local_alloc : () -> !ttg.memdesc<S x <tile> ...>` indexed per
+# iteration with ttg.memdesc_index. The pipeliner consumes tt.num_stages, so a pipelined dump
+# often carries no attribute at all -- the ring's leading dimension IS the depth.
+_UNIT_SCALE_RE = re.compile(r"(%[\w.]+)\s*=\s*arith\.constant\s+dense<127>\s*:\s*tensor<([\dx]+)xi8")
+_DOT_SCALED_FIRST_SCALE_OPERAND = 3   # tt.dot_scaled operands: a, b, c, a_scale?, b_scale?
+_DOT_SCALE_USE_RE = re.compile(r"\bscale\s+(%[\w.]+)")
+_RING_ALLOC_RE = re.compile(r"ttg\.local_alloc\s*:\s*\(\)\s*->\s*!ttg\.memdesc<(\d+)x(\d+)x(\d+)")
+
+
+def _meta_num_stages(path: str):
+    """num_stages from the compile metadata dump_ir.sh writes beside the .ttgir (meta__*.json).
+    The pipeliner consumes the tt.num_stages attribute, so the dumped TTGIR often has none; the
+    metadata records what the compile was asked for. Returns None when absent/unreadable."""
+    try:
+        d = os.path.dirname(os.path.abspath(path))
+        for fn in sorted(os.listdir(d)):
+            if fn.startswith("meta_") and fn.endswith(".json"):
+                with open(os.path.join(d, fn)) as f:
+                    v = json.load(f).get("num_stages")
+                if isinstance(v, int):
+                    return v
+    except (OSError, ValueError, TypeError):
+        pass
+    return None
 
 
 def _pipeline_facts(text: str) -> dict:
@@ -351,20 +406,41 @@ def _pipeline_facts(text: str) -> dict:
     Signals, both literal in the TTGIR: the `tt.num_stages` attribute, and the count of
     `scf.for` loop-carried `iter_args`.
 
-    **They are not of equal standing, and treating them as such produced a false positive.**
-    The attribute is decisive. The carry count is not: the pipeliner does add carries for
-    its in-flight buffers, but an algorithmic loop carries accumulators for its own reasons
-    -- every online-softmax attention loop carries m/l/acc and usually an offset, so it
-    reads >= 2 while un-pipelined. One dump cannot separate the pipeliner's carries from
-    the algorithm's. So the caller must let the attribute decide when it is present, and
-    report INCONCLUSIVE rather than assert when it is absent.
+    **They are not of equal standing, and treating them as such is a false positive.** The
+    attribute decides. The carry count does not: the pipeliner does add carries for its
+    in-flight buffers, but an algorithmic loop carries accumulators for its own reasons --
+    every online-softmax attention loop carries m/l/acc and usually an offset, so it reads
+    >= 2 while un-pipelined. One dump cannot separate the pipeliner's carries from the
+    algorithm's, so the caller lets the attribute decide when it is present and reports
+    INCONCLUSIVE rather than asserting when it is absent.
     """
     ns = [int(m.group(1)) for m in _NS_ATTR_RE.finditer(text)]
     carries = [len([x for x in m.group(1).split(",") if x.strip()])
                for m in _ITER_ARGS_RE.finditer(text)]
+    # ring depth: only when the 3-D alloc is actually indexed as a ring (memdesc_index) -- a
+    # genuinely 3-D shared tensor is not a pipeline
+    rings = ([int(m.group(1)) for m in _RING_ALLOC_RE.finditer(text)]
+             if "ttg.memdesc_index" in text else [])
+    async_copies = text.count("amdg.buffer_load_to_local") + text.count("ttg.async_copy_global_to_local")
     return {"num_stages": ns, "max_num_stages": max(ns) if ns else None,
             "loops": text.count("scf.for"), "iter_args": carries,
-            "max_iter_args": max(carries) if carries else 0}
+            "max_iter_args": max(carries) if carries else 0,
+            "ring_depths": rings, "ring_depth": max(rings) if rings else None,
+            "async_copies": async_copies,
+            "async_commit_groups": text.count("ttg.async_commit_group"),
+            # tt.dot_scaled with E8M0 unit scales (splat 127 = 2^0): what gl mfma_scaled(.., None, ..)
+            # materialises for an UNSCALED fp8 dot; plain's tl.dot on fp8 lowers to dot_scaled with
+            # no scale operands at all
+            "unit_scale_consts": sorted({m.group(1) for m in _UNIT_SCALE_RE.finditer(text)}
+                                        & set(_DOT_SCALE_USE_RE.findall(text))),
+            # one entry per unit-scale DEFINITION (shape), so the verify reconcile can accept at
+            # most that many i8 constants, each at one of these shapes
+            "unit_scale_shapes": sorted(
+                [int(x) for x in m.group(2).rstrip("x").split("x")]
+                for m in _UNIT_SCALE_RE.finditer(text)
+                if m.group(1) in set(_DOT_SCALE_USE_RE.findall(text))),
+            "dot_scaled_unscaled": sum(1 for ln in text.splitlines()
+                                       if "tt.dot_scaled" in ln and " scale " not in ln)}
 
 
 @dataclass
@@ -433,12 +509,13 @@ _MMA_KINDS = ("amd_mfma", "amd_wmma", "nvidia_mma")
 # 64 KiB/CU, CDNA4 has 160 KiB. The figure lives in the shared vendor/amd occupancy model
 # rather than being copied here, because three copies of one hardware table drift.
 #
-# GEAK carries only the two CDNA generations this skill claims (`match.gens`), sourced from
+# GEAK fallback, for when `amd_occupancy` (kernel_workflow/scripts/kernel_tools/, reached through
+# the shim beside this file) is not importable (scripts copied out
+# alone): only the two CDNA generations this skill claims (`match.gens`), sourced from
 # perf_knowledge/hardware/: cdna3_mi300/arch.md "64 KiB/CU, 32 banks" and
-# cdna4_mi350/memory.md "160 KiB/CU, 64 banks". Upstream delegates to its own
-# `amd_occupancy.lds_per_cu()`, which belongs to the occupancy/roofline regime this package
-# deliberately does not vendor -- so that module is preferred when present and this table is
-# the fallback, rather than the other way round.
+# cdna4_mi350/memory.md "160 KiB/CU, 64 banks". `amd_occupancy.lds_per_cu()` (backed by
+# perf_knowledge/hardware/data/hw_constants.json via _hwdata) is preferred whenever it imports, and its None is
+# final -- this table never overrides a decline from the shared model.
 _LDS_PER_CU = {"gfx942": 65536, "gfx950": 163840}
 
 
@@ -452,7 +529,9 @@ def _lds_per_cu(arch: str | None) -> int | None:
     if not arch:
         return None
     try:
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        _kt = os.path.join(os.path.dirname(os.path.abspath(__file__)), *[".."] * 5,
+                           "kernel_workflow", "scripts", "kernel_tools")
+        sys.path.insert(0, os.path.normpath(_kt))
         import amd_occupancy as _occ
     except ImportError:
         pass
@@ -823,7 +902,7 @@ def recover(path: str, arch: str, warp_size: int | None = None,
                    funcs_public=[m.group(2) for m in _FUNC_RE.finditer(text)
                                  if m.group(1) == "public"],
                    buffer_facts=_buffer_facts(text),
-                   pipeline=_pipeline_facts(text))
+                   pipeline=dict(_pipeline_facts(text), meta_num_stages=_meta_num_stages(path)))
 
     ops: list = []
     mod.walk(ops.append)
@@ -1187,19 +1266,27 @@ def report(rec: Recovery, verbose: bool = False) -> str:
     lines.append("  round-trip: " + ", ".join(f"{k}={v}" for k, v in sorted(rt.items())))
     pf = rec.pipeline or {}
     mns, mia = pf.get("max_num_stages"), pf.get("max_iter_args", 0)
+    ring = pf.get("ring_depth")
+    meta_ns = pf.get("meta_num_stages")
+    if mns is None and ring:
+        # the pipeliner consumed the attribute; the LDS ring it built is the depth
+        mns = ring
+    elif mns is None and meta_ns == 1:
+        # compiled at num_stages=1 (metadata beside the dump) and no ring in the IR: not pipelined
+        mns = 1
     if pf.get("loops"):
         lines.append("")
         lines.append(f"  PIPELINE (read from THIS dump, not from the source): "
                      f"tt.num_stages={pf.get('num_stages') or 'absent'}, "
-                     f"{pf['loops']} scf.for, max iter_args={mia}")
-        # `iter_args >= 2` is NOT on its own evidence of pipelining, and treating it as
-        # such misreported an attention kernel whose dump said tt.num_stages=1: every
-        # online-softmax loop carries m/l/acc (plus an offset), so the count is >= 2 for
-        # algorithmic reasons. The pipeliner's own carries cannot be told apart from the
-        # algorithm's in a single dump, so the attribute decides when it is present and the
-        # carry count is only ever a hint when it is absent.
+                     f"{pf['loops']} scf.for, max iter_args={mia}"
+                     + (f", LDS ring depth={ring} (memdesc<{ring}x...> indexed by memdesc_index"
+                        f"{', async copies' if pf.get('async_copies') else ''})" if ring else "")
+                     + (f", compile metadata num_stages={meta_ns}" if meta_ns is not None else ""))
+        # The attribute decides; `iter_args >= 2` never does on its own. Every online-softmax
+        # loop carries m/l/acc for algorithmic reasons, so a carry-count verdict calls an
+        # un-pipelined attention kernel pipelined and sends its whole residual to layer 4.
         if (mns or 0) > 1:
-            lines.append("  => plain IS software-pipelined. `gluon_to_ttgir` does not run the")
+            lines.append(f"  => plain IS software-pipelined (depth {mns}). `gluon_to_ttgir` does not run the")
             lines.append("     pipeliner by default, so a FAITHFUL anchor sits below plain BY")
             lines.append("     CONSTRUCTION -- that gap is a debt you knowingly take on, not a")
             lines.append("     defect. Measure `plain at num_stages=1` as the control: if the")
@@ -1208,7 +1295,7 @@ def report(rec: Recovery, verbose: bool = False) -> str:
             lines.append("     lowering, NOT from libtriton -- re-inject them before hand-building")
             lines.append("     (references/tile-programming/pipeline.md).")
         elif mns == 1:
-            lines.append("  => plain is NOT pipelined: this dump says tt.num_stages=1. There is no")
+            lines.append("  => plain is NOT pipelined: num_stages=1 (dump attribute or compile metadata). No")
             lines.append("     pipeline to lose, so a faithful anchor should land at ~1.00 and")
             lines.append("     anything materially below that is a transcription DEFECT, not a debt.")
             lines.append("     Check the ASM load-width histogram before believing any clock.")
@@ -1224,7 +1311,9 @@ def report(rec: Recovery, verbose: bool = False) -> str:
             lines.append(f"     max iter_args={mia} is a hint at best -- the pipeliner adds carries,")
             lines.append("     but so does any accumulator loop, and one dump cannot separate them.")
             lines.append("     Settle it with the load count and a peeled prologue across a depth")
-            lines.append("     sweep, or measure `plain at num_stages=1` directly.")
+            lines.append("     sweep, or measure `plain at num_stages=1` directly. Do NOT hand a")
+            lines.append("     guess to Stage-Recover: `lost pipeline` is one of three suspects and")
+            lines.append("     naming the wrong one mis-attributes the residual for the whole run.")
         lines.append("     Do not infer num_stages from the source: a file containing 1 can")
         lines.append("     dispatch a branch compiled at 2.")
     lines.append("")
@@ -1273,7 +1362,19 @@ def report(rec: Recovery, verbose: bool = False) -> str:
                      if not any(s.group == g and s.kind == "operand" for s in rec.sites))
     n_alloc = len(alloc_groups)
     n_store = sum(1 for s in rec.sites if s.op == "ttg.local_store")
-    if bare_alloc and not n_store:
+    # Async copies (amdg.buffer_load_to_local / ttg.async_copy_global_to_local) write LDS straight
+    # from global memory: an operand-less alloc they fill is NOT backend scratch, and its shared
+    # layout is in the IR (on the alloc's memdesc type) and recovered above.
+    n_async = (rec.pipeline or {}).get("async_copies", 0)
+    if bare_alloc and not n_store and n_async:
+        lines.append("")
+        lines.append(f"  NOTE: {bare_alloc} of {n_alloc} ttg.local_alloc have no initialiser and are")
+        lines.append(f"  written by {n_async} async copies (global -> LDS, no local_store). Their shared")
+        lines.append("  layouts ARE in the IR and recovered above; in Gluon they are the destination of")
+        lines.append("  buffer_load_to_shared / async_copy. The load layouts feeding them are named by the")
+        lines.append("  copy (TO_SMEM...), and which operand each is can differ per bucket -- read the")
+        lines.append("  provenance (<- a_ptrs / b_ptrs), not the name.")
+    elif bare_alloc and not n_store:
         lines.append("")
         lines.append(f"  NOTE: {bare_alloc} of {n_alloc} ttg.local_alloc have NO initialiser and")
         lines.append("  there are ZERO ttg.local_store. For those, plain never")
@@ -1539,7 +1640,13 @@ def _normal_form(builder, layout: Any, shape: list, space: str = "reg") -> str |
     """
     caps = capabilities()
     can_norm = caps["shared_norm"] if space != "reg" else caps["distributed_norm"]
-    if not can_norm:
+    # `padded_shared` has no generic LinearLayout conversion on 3.8.0: `to_linear_layout` hits
+    # `assert(0 && "unknown layout")` in TritonGPUDialect::toLinearLayout -- a process ABORT,
+    # not an exception, so the except below cannot catch it, and plain gfx950 GEMM dumps carry
+    # one for the B operand. The `shared_norm` probe exercises a swizzled layout, so it cannot
+    # see this. Text is a sound basis here: a padded layout IS its fields (padding pairs +
+    # offset bases), so equal text means equal layout.
+    if not can_norm or type(layout).__name__ == "PaddedSharedLayout":
         return _canonical_enc(builder, layout, shape, space)
     sub = _shape_for_layout(layout, shape)
     if sub is None or any(d <= 0 for d in sub):
@@ -1722,8 +1829,35 @@ def _verify_recs(plain: Recovery, anchor: Recovery, arch: str,
     #      mistake that does not exist. Kept visible and named, never folded into a PASS.
     rec_r3 = [k for k in missing
               if k not in rec_r2 and any(s.op in NO_GLUON_OP for s in p[k])]
+    # (R4) EXTRA i8 arith.constant rows that are the UNIT scale operands (splat 127 = 2^0)
+    #      Gluon's mfma_scaled(a, None, fmt, b, None, fmt) materialises for an unscaled fp8 dot,
+    #      where plain's tl.dot lowers to a dot_scaled without scale operands. A correct fp8 port
+    #      carries them by construction; they change no value.
+    #      Tight on purpose: every arith.constant site in an accepted row must sit at the shape
+    #      of a unit-scale (dense<127>) constant that feeds a tt.dot_scaled in the anchor's text,
+    #      the rows together may hold no more constant sites per shape than there are such
+    #      definitions, and a dot_scaled site counts only at a SCALE operand position (a, b, c
+    #      come first; an fp4 a/b is i8 too and is not a scale). One unit-scale constant no
+    #      longer waves through every other i8 constant.
+    a_unit_shapes = Counter(tuple(x) for x in
+                            ((anchor.pipeline or {}).get("unit_scale_shapes") or []))
+    plain_unscaled = (plain.pipeline or {}).get("dot_scaled_unscaled", 0) or not any(
+        s.op == "tt.dot_scaled" for s in plain.sites)
+
+    def _unit_scale_row(k):
+        sites = a[k]
+        return (any(s.op == "arith.constant" for s in sites)
+                and all("i8" in str(s.dtype)
+                        and ((s.op == "arith.constant" and tuple(s.shape) in a_unit_shapes)
+                             or (s.op == "tt.dot_scaled" and s.kind == "operand"
+                                 and s.index >= _DOT_SCALED_FIRST_SCALE_OPERAND))
+                        for s in sites))
+    cand_r4 = ([k for k in extra if k not in rec_r1 and _unit_scale_row(k)]
+               if a_unit_shapes and plain_unscaled else [])
+    used = Counter(tuple(s.shape) for k in cand_r4 for s in a[k] if s.op == "arith.constant")
+    rec_r4 = cand_r4 if all(n <= a_unit_shapes[sh] for sh, n in used.items()) else []
     unexplained_missing = [k for k in missing if k not in rec_r2 and k not in rec_r3]
-    unexplained_extra = [k for k in extra if k not in rec_r1]
+    unexplained_extra = [k for k in extra if k not in rec_r1 and k not in rec_r4]
 
     if not missing and not extra:
         status = "PASS"
@@ -1764,8 +1898,14 @@ def _verify_recs(plain: Recovery, anchor: Recovery, arch: str,
                          "'the compiler chose a layout because you did not' signature --")
             lines.append("       that one shows up as MISSING+EXTRA at the same shape. Look for a "
                          "copy plain materialises that the anchor folded.)")
-    if rec_r1 or rec_r2 or rec_r3:
+    if rec_r1 or rec_r2 or rec_r3 or rec_r4:
         lines.append("  RECONCILED -- differences with a structural cause:")
+        for k in rec_r4:
+            s = a[k][0]
+            lines.append(f"    ~ {s.role:<18} {s.enc_kind:<18} shape={list(k[0])}  EXTRA = the unit "
+                         f"scale constants (i8 splat 127 = 2^0)")
+            lines.append("        mfma_scaled(.., None, ..) materialises for an unscaled fp8 dot; "
+                         "plain's dot_scaled has no scale operands. Value-neutral.")
         for k in rec_r3:
             s = p[k][0]
             ops = sorted({x.op for x in p[k] if x.op in NO_GLUON_OP})
@@ -1823,7 +1963,7 @@ def _verify_recs(plain: Recovery, anchor: Recovery, arch: str,
         "status": status,
         "counts": {"plain": len(p), "anchor": len(a),
                    "missing": len(unexplained_missing), "extra": len(unexplained_extra),
-                   "reconciled": len(rec_r1) + len(rec_r2) + len(rec_r3)},
+                   "reconciled": len(rec_r1) + len(rec_r2) + len(rec_r3) + len(rec_r4)},
         "missing": _pack(unexplained_missing, p),
         "extra": _pack(unexplained_extra, a),
         "reconciled": ([dict(_pack([k], a)[0], reason="extra_at_unrecoverable_shape")
@@ -1832,7 +1972,9 @@ def _verify_recs(plain: Recovery, anchor: Recovery, arch: str,
                           for k in rec_r2]
                        + [dict(_pack([k], p)[0], reason="op_has_no_gluon_equivalent",
                                ops=sorted({x.op for x in p[k] if x.op in NO_GLUON_OP}))
-                          for k in rec_r3]),
+                          for k in rec_r3]
+                       + [dict(_pack([k], a)[0], reason="unit_scale_constants_of_mfma_scaled")
+                          for k in rec_r4]),
         "multiplicity": [{"role": p[k][0].role, "shape": list(k[0]),
                           "plain": len(p[k]), "anchor": len(a[k]),
                           "ratio": round(len(p[k]) / max(len(a[k]), 1), 3)}
@@ -2174,21 +2316,19 @@ def _selftest() -> int:
     ck("_pipeline_facts on a loop-free module is empty",
        _pipeline_facts("tt.func @k() { tt.return }")["loops"] == 0)
 
-    # An online-softmax loop carries m/l/acc/offset for ALGORITHMIC reasons, so a carry
-    # count >= 2 must not by itself produce a "plain IS pipelined" verdict. Pinned in both
-    # directions, and on the rendered text rather than the facts dict, because the bug was
-    # in the verdict rather than in the parse.
+    # The verdict, not the parse. An online-softmax loop carries m/l/acc/offset for
+    # ALGORITHMIC reasons, so a carry count >= 2 must never on its own read as "pipelined".
+    # Pinned on the rendered text in all three directions, because that is where the bug was.
     def _verdict(text):
-        r = Recovery(path="<selftest>", arch="gfx950", num_warps=None,
-                     threads_per_warp=None, pipeline=_pipeline_facts(text))
-        return report(r)
+        return report(Recovery(path="<selftest>", arch="gfx950", num_warps=None,
+                               threads_per_warp=None, pipeline=_pipeline_facts(text)))
 
-    attn = ('scf.for %i = %c0 to %n step %c1 iter_args(%m = %a, %l = %b, %acc = %c, '
-            '%off = %d) { } {tt.num_stages = 1 : i32}')
-    v_attn = _verdict(attn)
-    ck("attention-shaped ns=1 loop is NOT called pipelined",
-       "is NOT pipelined" in v_attn and "IS software-pipelined" not in v_attn,
-       v_attn)
+    v_attn = _verdict('scf.for %i = %c0 to %n step %c1 iter_args(%m = %a, %l = %b, '
+                      '%acc = %c, %off = %d) { } {tt.num_stages = 1 : i32}')
+    ck("an attention-shaped ns=1 loop is NOT called pipelined",
+       "is NOT pipelined" in v_attn and "IS software-pipelined" not in v_attn, v_attn)
+    ck("...and its 4 carries are named as a non-counter-signal",
+       "NOT a counter-signal" in v_attn, v_attn)
     ck("...and it says the depth may still be reachable via the annotation",
        "REACHABLE" in v_attn, v_attn)
     v_deep = _verdict('scf.for %i = %c0 to %n step %c1 iter_args(%a = %x) '
@@ -2197,7 +2337,33 @@ def _selftest() -> int:
        "IS software-pipelined" in v_deep, v_deep)
     v_none = _verdict("scf.for %i = %c0 to %n step %c1 iter_args(%a = %x, %b = %y) { }")
     ck("a dump with no tt.num_stages is INCONCLUSIVE, not a verdict",
-       "INCONCLUSIVE" in v_none, v_none)
+       "INCONCLUSIVE" in v_none and "IS software-pipelined" not in v_none, v_none)
+    # a pipelined dump whose attribute the pipeliner consumed: the indexed LDS ring is the depth
+    ring_txt = ("%a = ttg.local_alloc : () -> !ttg.memdesc<3x128x64xf16, #shared, #smem, mutable>\n"
+                "%v = ttg.memdesc_index %a[%i] : x\n%t = amdg.buffer_load_to_local %p into %v\n"
+                "scf.for %i = %c0 to %n step %c1 iter_args(%x = %y) { }")
+    v_ring = _verdict(ring_txt)
+    ck("an indexed memdesc<3x..> ring reads as pipelined depth 3 without tt.num_stages",
+       "IS software-pipelined (depth 3)" in v_ring and "ring depth=3" in v_ring, v_ring)
+    ck("a 3-D alloc that is never memdesc_index'ed is not a ring",
+       _pipeline_facts(ring_txt.replace("ttg.memdesc_index", "ttg.memdesc_subslice"))["ring_depth"] is None)
+    v_meta1 = report(Recovery(path="<selftest>", arch="gfx950", num_warps=None, threads_per_warp=None,
+                              pipeline=dict(_pipeline_facts("scf.for %i = %c0 to %n step %c1 "
+                                                            "iter_args(%x = %y) { }"),
+                                            meta_num_stages=1)))
+    ck("compile metadata num_stages=1 with no ring reads as NOT pipelined",
+       "is NOT pipelined" in v_meta1 and "INCONCLUSIVE" not in v_meta1, v_meta1)
+    # unit scale constants of mfma_scaled(.., None, ..) are recognised, a real scale is not
+    us = _pipeline_facts("%cst = arith.constant dense<127> : tensor<128x4xi8, #linear>\n"
+                         "%r = tt.dot_scaled %a scale %cst, %b scale %cst, %c lhs = e4m3 rhs = e4m3\n")
+    ck("unit scale constants feeding tt.dot_scaled are found", us["unit_scale_consts"] == ["%cst"], us)
+    ck("each unit scale definition records its shape", us["unit_scale_shapes"] == [[128, 4]], us)
+    us2 = _pipeline_facts("%cst = arith.constant dense<126> : tensor<128x4xi8, #linear>\n"
+                          "%r = tt.dot_scaled %a scale %cst, %b scale %cst, %c lhs = e4m3 rhs = e4m3\n")
+    ck("a non-unit scale constant is not whitelisted",
+       us2["unit_scale_consts"] == [] and us2["unit_scale_shapes"] == [], us2)
+    ck("plain's scale-less dot_scaled is counted",
+       _pipeline_facts("%r = tt.dot_scaled %a, %b, %c lhs = e4m3 rhs = e4m3")["dot_scaled_unscaled"] == 1)
 
     ck("_backend_key amd", _backend_key("gfx942") == ("amd", "hip", "gfx942", 64))
     ck("_backend_key nvidia via sm90", _backend_key("sm90") == ("nvidia", "cuda", 90, 32))
@@ -2381,6 +2547,37 @@ def _selftest() -> int:
                     ck("live: R3 does not silently promote to PASS",
                        "RECONCILED" in rep4 and no_op in rep4)
 
+                    # R4: EXTRA i8 rows that are exactly the unit-scale constants of
+                    # mfma_scaled(.., None, ..) reconcile; any other i8 constant must not ride along.
+                    s4 = [x * 2 for x in b0.shape]
+
+                    def _i8(op, shape, kind="result", index=0):
+                        return Site(op=op, kind=kind, index=index, shape=list(shape), dtype="i8",
+                                    space="reg", enc_kind=b0.enc_kind, enc_text=b0.enc_text,
+                                    layout=b0.layout, error=None, role="X")
+
+                    def _r4(extra_sites, unit_shapes):
+                        pl5 = _mk([_site(b0.shape, b0.layout)])
+                        pl5.pipeline = {"dot_scaled_unscaled": 1}
+                        an5 = _mk([_site(b0.shape, b0.layout)] + extra_sites)
+                        an5.pipeline = {"unit_scale_shapes": unit_shapes}
+                        return _verify_recs(pl5, an5, "gfx942")
+                    unit = [_i8("arith.constant", s4), _i8("tt.dot_scaled", s4, "operand", 3)]
+                    st5, _r5, d5 = _r4(unit, [s4])
+                    ck("live: R4 RECONCILES the unit-scale constant of mfma_scaled",
+                       st5 == "RECONCILED" and any(x["reason"] == "unit_scale_constants_of_mfma_scaled"
+                                                   for x in d5["reconciled"]), f"{st5}: {d5['counts']}")
+                    st6 = _r4(unit + [_i8("arith.constant", s4)], [s4])[0]
+                    ck("live: R4 refuses more i8 constants than unit-scale definitions", st6 == "FAIL", st6)
+                    st7 = _r4(unit, [[x + 1 for x in s4]])[0]
+                    ck("live: R4 refuses an i8 constant not at a unit-scale shape", st7 == "FAIL", st7)
+                    st8 = _r4([_i8("arith.constant", s4), _i8("tt.dot_scaled", s4, "operand", 0)],
+                              [s4])[0]
+                    ck("live: R4 refuses an i8 dot_scaled A/B operand (fp4), not a scale",
+                       st8 == "FAIL", st8)
+                    st9 = _r4(unit, [])[0]
+                    ck("live: R4 needs a unit-scale constant in the anchor at all", st9 == "FAIL", st9)
+
                     # A genuine difference must still FAIL.
                     other = [s for s in rec.ok_sites
                              if s.space == "reg" and repr(s.layout) != repr(b0.layout)]
@@ -2464,10 +2661,12 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--selftest", action="store_true", help="offline smoke; no GPU")
     sub = ap.add_subparsers(dest="mode")
+    c = sub.add_parser("capabilities", help="inspect installed Triton APIs; no GPU or hardware assets")
+    c.add_argument("--json", action="store_true", help="print the capability record as JSON")
 
     r = sub.add_parser("recover", help="ttgir -> Gluon layout constants + JSON facts")
     r.add_argument("--ttgir", required=True)
-    r.add_argument("--arch", default="gfx942")
+    r.add_argument("--arch", help="REQUIRED: the arch the dump was compiled for (gfx950 | gfx942 | ...); no default")
     r.add_argument("--warp-size", type=int)
     r.add_argument("--out", help="write the layout module here (default: stdout report only)")
     r.add_argument("--json", dest="json_out", help="write machine-readable facts here")
@@ -2480,14 +2679,14 @@ def main() -> None:
     v = sub.add_parser("verify", help="plain vs anchor, as LinearLayout normal forms")
     v.add_argument("--plain", required=True)
     v.add_argument("--anchor", required=True)
-    v.add_argument("--arch", default="gfx942")
+    v.add_argument("--arch", help="REQUIRED: the arch the dump was compiled for (gfx950 | gfx942 | ...); no default")
     v.add_argument("--warp-size", type=int)
     v.add_argument("--json", dest="json_out", help="write the verdict here")
 
     w = sub.add_parser("view", help="ASCII per-lane view of one recovered layout")
     w.add_argument("--ttgir", required=True)
     w.add_argument("--role", required=True)
-    w.add_argument("--arch", default="gfx942")
+    w.add_argument("--arch", help="REQUIRED: the arch the dump was compiled for (gfx950 | gfx942 | ...); no default")
     w.add_argument("--warp-size", type=int)
     w.add_argument("--hardware", action="store_true", help="hardware view instead of tensor view")
     w.add_argument("--max-rows", type=int, default=24, help="0 = no limit")
@@ -2496,9 +2695,29 @@ def main() -> None:
     a = ap.parse_args()
     if a.selftest:
         raise SystemExit(_selftest())
+    if a.mode == "capabilities":
+        # An inventory must inspect the real compiler, not TTGIR_BRIDGE_CAPS overrides.
+        caps = capabilities(force_probe=True)
+        caps["note"] = "API presence and normalization probes only; target lowering, numerical correctness and performance require separate checks."
+        if a.json:
+            print(json.dumps(caps, indent=2))
+        else:
+            print(f"Triton {caps.get('triton_version', 'unavailable')}")
+            for name, info in caps.get("native_apis", {}).items():
+                print(f"{name}: {info}")
+            for name in ("layout_view", "distributed_norm", "shared_norm", "probe_diagnostic", "note"):
+                print(f"{name}: {caps[name]}")
+        raise SystemExit(0 if caps.get("native_apis") else 3)
     if a.mode is None:
         ap.print_help()
         raise SystemExit(2)
+    if not getattr(a, "arch", None):
+        # No silent default: the recovered constructors, the LDS divisor and the gl.amd
+        # sub-namespace are all arch-specific, and a gfx942 default applied to a gfx950 dump
+        # reports a plausible wrong anchor rather than an error.
+        raise SystemExit(
+            f"[ttgir_bridge] {a.mode}: --arch is required (the arch the TTGIR was compiled for, "
+            f"e.g. --arch gfx950; gfx942 for the CDNA3 downgrade). Refusing to guess one.")
 
     if a.mode == "recover":
         rec = recover(a.ttgir, a.arch, a.warp_size)

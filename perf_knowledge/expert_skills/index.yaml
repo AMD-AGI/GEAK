@@ -296,8 +296,8 @@ skills:
 - id: gluon_authoring
   file: skills/gluon_authoring/skill.md
   scope: kernel
-  revision: ''
-  playbook_file: skills/gluon_authoring/skill.md
+  revision: '2026-11-21'
+  playbook_file: skills/gluon_authoring/playbook.md
   planner_extension_file: ''
   contract_file: ''
   validation_file: skills/gluon_authoring/skill.md
@@ -309,13 +309,10 @@ skills:
     arch_class:
     - '*'
     gens:
-    - gfx942
     - gfx950
+    - gfx942
     dtypes:
-    - bf16
-    - fp16
-    - fp8_e4m3_fnuz
-    - fp8_e4m3
+    - '*'
     regimes:
     - '*'
     from_backend:
@@ -325,10 +322,10 @@ skills:
   expects:
     isolated_speedup_min: 1.1
     parity: required
-  validation_status: draft
+  validation_status: validated
   reference_evidence_status: ''
   constraint_validation_status: ''
-  auto_apply: false
+  auto_apply: true
   explicit_pin_modes: []
 - id: megamoe_ep_mega_fusion
   file: skills/megamoe_ep_mega_fusion/skill.md

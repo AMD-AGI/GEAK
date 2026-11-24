@@ -1,50 +1,23 @@
-# Gluon Shared Memory, Async, And AOT (gfx950 / gfx942)
+# Gluon AOT, Prebuilt, And Wrapper Contracts (gfx950 / gfx942)
 
-Required companions: `imports-and-launching.md` and the relevant layout, memory,
-or matrix reference. Use this file only after a simpler layout, memory, or matrix
-candidate is correct. gfx1250 descriptor / TDM / tensor-memory paths are out of
-scope.
-
-## Shared Memory And Async
-
-Shared memory, barriers, and async copy on CDNA:
-
-- `allocate_shared_memory`;
-- `barrier` / `fence_async_shared`;
-- swizzled or padded shared layouts (`SwizzledSharedLayout`,
-  `PaddedSharedLayout`) — see `../tile-programming/layout-recipes.md` for the
-  padding-vs-swizzle bank-conflict recipe;
-- async transfer phases: issue, commit, wait, consume (the basis of the pipeline
-  layer, `../tile-programming/pipeline.md`).
-
-API names and layout contracts are target-specific; confirm against local source
-before use (`../missing-doc-protocol.md`).
+This page owns the packaging boundary only. Shared memory: `smem-lds-reference.md`; shared-layout
+constructors: `layout-reference.md ## Shared Layouts: The Three Constructors`; async copy:
+`memory-reference.md`; fill-vs-read ordering: `pipeline/async-ordering.md ## Ordering the fill
+against the read — class S` (no `fence_async_shared` on AMD — `appendix-api.md ## Spellings that do
+not exist on the CDNA Gluon path`).
 
 ## AOT Signature And Prebuilt Notes
 
-When AOT, prebuilt, or wrapper-sensitive paths are involved, check:
+- Target triple and warp size: `hip:gfx950:64` / `hip:gfx942:64`.
+- Launch attributes `num_warps`, `num_ctas`, `waves_per_eu`; `num_stages` is inert on the Gluon path
+  and survives only as a signature field.
+- Pointer hints / divisibility in the signature; constexprs that disappear between source and AOT
+  signature; wrappers that reject nonzero scratch; prebuilt vs fallback selection. A local JIT
+  compile proves none of these, so a JIT compile is not evidence that a fallback gate is removable.
 
-- target triple and warp-size assumptions (`hip:gfx950:64` / `hip:gfx942:64`);
-- launch attributes such as `num_warps`, `num_ctas`, `waves_per_eu`, and
-  `num_stages`;
-- pointer-type hints or divisibility assumptions encoded in the signature;
-- disappearing constexpr values between source and AOT signature;
-- scratch behavior and whether wrappers reject nonzero scratch sizes;
-- prebuilt and fallback selection logic.
-
-Compile success alone does not prove package/runtime contract validity. Do not
-delete fallback gates or prebuilt selection just because a local JIT path
-compiles. Triton minor-version sensitivity for AOT metadata lives in
-`../hardware/capability-matrix.md` / `../hardware/planning-constants.md`.
-
-## Acceptance Checklist
-
-```text
-simple anchor path already correct:
-target family (gfx950 / gfx942):
-source-proven API names:
-shared layout constraints + bank-conflict plan:
-launch attributes:
-wrapper or artifact selection:
-correctness oracle / benchmark boundary / fallback policy:
-```
+**Three version surfaces.** (1) A 3.8.0-only *symbol* (`compute_efficient_padded_shared_layout`,
+defaulted `._reinterpret`, `atomic_scatter_*`) makes the source unbuildable on older toolchains.
+(2) A changed triple / launch attribute makes the artifact wrong while the source builds. (3)
+**`loop_unroll_factor` is accepted on every version but only read by a 3.8.0 pass: an older
+toolchain silently produces a correct artifact without the transform** — record the toolchain minor
+of the artifact; do not infer it (`pipeline/loop-knobs-and-targets.md ## Roll the loop (cut i-cache pressure)`).

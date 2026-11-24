@@ -1,206 +1,209 @@
 # Gluon Memory Reference (gfx950 / gfx942)
 
-Required companions: `imports-and-launching.md` for launcher rules and
-`layout-reference.md` for distributed offset/mask layouts. Per-target memory-path
-support lives in `../hardware/capability-matrix.md`.
-
-Use this file when deciding between generic `gl.load` / `gl.store` and AMD buffer
-ops, or when debugging memory-path dtype, fallback, offset, or store issues. This
-is the **memory-path layer** of the backbone.
-
-For non-matrix Gluon body work, keep the same discipline: first prove the generic
-memory anchor, then add buffer ops, shared staging, or async copy only when they
-remove a named body cost (branchy masks, address-register pressure, traffic,
-repeated layout conversion, or a consumer-layout mismatch).
-
-## Start With Generic Memory Ops
-
-Start with generic `gl.load` / `gl.store` unless there is a clear AMD memory
-mechanism.
-
-Move to AMD buffer ops only when:
-
-- the path is streaming or memory-bound;
-- an existing AMD Gluon path uses buffer operations;
-- dtype, fallback value, value layout, and target family are known;
-- the memory path is hot enough to pay for extra specificity;
-- a same-shape correctness probe has passed against the generic anchor.
-
-`buffer_load` / `buffer_store` are namespaced by target: `gl.amd.cdna4.*` on
-gfx950, `gl.amd.cdna3.*` on gfx942. Namespace swap alone is not an optimization
-direction (equivalent operand types can generate the same ISA). Do not add buffer
-ops only to avoid a `where`; measure the memory path first. Buffer paths have
-been observed to compile and run but read wrong values — require a correctness
-gate, not a blanket rejection.
+Generic `gl.load` / `gl.store` is the baseline; AMD buffer ops, shared staging and async copy each pay
+when they remove a named cost. Per-target support: `../hardware/capability-matrix.md`. Distributed offset /
+mask layouts: `layout-reference.md`.
 
 ## Buffer Pointer And Offset Rules
 
-- `buffer_load(base_ptr, offsets, ...)` / `buffer_store(base_ptr, offsets, ...)`
-  use a scalar base pointer plus distributed offsets.
-- They are not textual replacements for `gl.load(ptr + offsets)`.
-- offsets must be int32 or uint32 on supported AMD buffer paths.
-- int64 offsets from page/block ids multiplied by large strides are a hard
-  constraint, not a performance preference.
-- treat offsets as byte offsets unless operator-local source proves otherwise.
-- for non-1-byte element types, re-check source expressions written as element
-  offsets and multiply by bytes per element when byte offsets are required.
-- the base pointer must be scalar pointer-like; restructure `ptr + offsets`
-  tensor pointers before buffer ops.
+`buffer_load` / `buffer_store` live at `gl.amd.cdna4.*` (gfx950) and `gl.amd.cdna3.*` (gfx942). A
+namespace swap alone is not an optimization. Buffer paths can compile, run and read wrong values —
+gate each one on correctness against the generic anchor.
 
-## Buffer Dtype Rules
-
-- `buffer_load(..., other=...)` casts the fallback to the loaded pointer element
-  type. For generated code prefer a typed Gluon value:
-
-```python
-other = gl.full(shape, 0.0, ptr.dtype.element_ty, layout=layout)
-```
-
-- `buffer_store(..., stored_value=...)` must store a value whose element dtype
-  matches the destination pointer element type. Cast widened accumulators before
-  storing.
+- **`buffer_store(stored_value, base_ptr, offsets, ...)` — the value comes FIRST**;
+  `buffer_load(base_ptr, offsets, ...)`. Scalar base pointer + distributed offsets; restructure
+  `ptr + offsets` tensor pointers first.
+- **Offsets are ELEMENT offsets, not bytes** — pre-multiplying scales twice and silently reads wrong values.
+- Offsets must be int32 / uint32; int64 offsets from page/block id x large stride are a hard
+  constraint.
+- `other=` is cast to the pointer element type — pass a typed value
+  (`gl.full(shape, 0.0, ptr.dtype.element_ty, layout=layout)`). The stored value's dtype must equal
+  the destination element type (cast widened accumulators first).
+- `mask=` / `other=` predicates a load without branching, which keeps the wave converged.
 
 ## Async Copy To Shared
 
-`buffer_load_to_shared` (CDNA4 async copy) requires 32-bit offsets and an
-offset tensor whose distributed layout matches rank, dtype, unit, and the
-shared-memory consumer. A `BlockedLayout` lowering failure is **layout-contract
-evidence** before it is a build ceiling — retry with a source-proven
-`DistributedLinearLayout` matched to the consumer before recording a toolchain
-ceiling. Do not interleave ordinary loads/stores with async paths without a
-traffic/scheduling hypothesis. This is the main mechanism behind the pipeline
-layer (`../tile-programming/pipeline.md`).
+**Three preconditions, from the docstrings of `global_load_to_shared` and `buffer_load_to_shared`
+(v3.8.0: "the following conditions must be met or lowering to LLVM will fail"):** per-thread
+`size per thread * bits per element` must be 128 or 32 (of `offsets` / `ptr`); writes to `dest` must
+be coalesced; a swizzled `dest` may only swizzle within a warp boundary. Root cause: the instruction
+takes a per-lane global address but **one warp-uniform LDS address**.
+
+- **"Coalesced" is the predicate `threads_per_warp[contig] * size_per_thread[contig] == tile extent
+  along contig`** — `==`, not `>=` (over- or under-coverage makes the per-warp LDS address
+  non-uniform). The failure is a translation error naming the enclosing function
+  (`../pitfalls/negative-patterns.md ## A translation failure names the allocation, not the murderer`)
+  and is indistinguishable from the width gate below; the fixes move different fields.
+- `buffer_load_to_shared` needs 32-bit offsets and an offset layout matched to the shared consumer.
+  A `BlockedLayout` lowering failure is layout-contract evidence before a toolchain ceiling; for a
+  padded consumer the match is constructed: `## Deriving the producer layout for a padded async
+  destination`. Ordering (`commit_group` / `wait_group` / barriers): `../tile-programming/pipeline.md`.
+- **Merging two copies into one is a dependency edit as much as a memory one.** Measured,
+  bit-exact: two `[32, 256]` copies vs one `[64, 256]` gave identical memory-side ISA, fewer total
+  instructions (1279 -> 1252) and `s_waitcnt` (110 -> 76), yet **slower at most shapes**: VGPR
+  174 -> 190 and one `wait_group` now gates both operands. Price a merge by A/B.
 
 ### Minimum per-thread granularity (applicability by dtype)
 
-`buffer_load_to_shared` also requires the **per-thread chunk to clear the HW
-async-copy granularity floor (~16 B/thread)**. A sub-floor load (e.g. a
-small-element dtype with a narrow contiguous run) is **rejected at lowering**
-(an `unrealized_conversion_cast` / lowering failure), which is **not** a build
-ceiling and **not** fixable by switching the `BlockedLayout` family — it is the
-per-thread *byte count*. The fix is to raise `size_per_thread` on the contiguous
-dim until per-thread bytes clear the floor:
+Legal per-thread widths are a set, not a floor: gfx950 128 or 32 bit
+(`triton/experimental/gluon/language/amd/cdna4/async_copy.py` docstring), gfx942 32 bit only; 64 bit is
+illegal on both (compile-verified 3.8.0). The failure strings:
+`failed to translate module to LLVM IR` (`LLVM Translation failed for operation:
+builtin.unrealized_conversion_cast`) from `buffer_load_to_shared`, `PassManager::run failed`
+(`failed to legalize operation 'ttg.async_copy_global_to_local'`) from `global_load_to_shared`.
+This is **not** a build ceiling and **not** fixable by switching the `BlockedLayout` family — move
+`size_per_thread` on the contiguous dim so the byte count lands **exactly on** a legal width:
 
-| Operand dtype | bytes/elem | contiguous elems/thread to clear ~16 B |
-| --- | --- | --- |
-| bf16 / fp16 | 2 | >= 8 |
-| fp8 / int8 | 1 | >= 16 |
-| fp4 (e2m1, packed 2/byte) | 0.5 | >= 32 |
+| Operand dtype | bytes/elem | contiguous elems/thread at 128 bit | at 32 bit |
+| --- | --- | --- | --- |
+| bf16 / fp16 | 2 | exactly 8 | exactly 2 |
+| fp8 / int8 | 1 | exactly 16 | exactly 4 |
+| fp4 (e2m1, packed 2/byte) | 0.5 | exactly 32 | exactly 8 |
+| fp32 | 4 | exactly 4 | exactly 1 |
 
-Tensors that are inherently sub-floor (a few elems/thread — typically block
-scales) cannot use direct-to-LDS at all; route them through the register-staging
-side path GR -> LW -> LR (`../tile-programming/low-precision.md`). This is a
-layout/granularity constraint, not an async-path build ceiling — do not record it
-as a `buffer_load_to_shared` capability failure.
+fp32 block scales therefore copy at 1 or 4 elems/thread; 2 (64 bit) does not lower (production:
+`COPY_WIDTH = 1 if SPLITS > 1 else 4`). Register staging
+GR -> LW -> LR (`../tile-programming/low-precision.md`) is the fallback for a width that misses the
+set, not a route block scales belong on by kind.
 
-> **Arch note (the floor is per arch, not universal).** The ~16 B/thread figure is
-> the **CDNA4** 128-bit direct-to-LDS chunk. On **gfx942 / CDNA3 the widest
-> direct-to-LDS load is 32-bit (4 B, 2×bf16) per thread** — 128-bit is CDNA4-only
-> (`supportsDirectToLdsLoadBitWidth`: CDNA3 = {32}, CDNA4 = {128, 32}, GFX1250 =
-> {128, 64, 32}). So on gfx942 the async path moves fewer bytes per instruction and
-> tends to become `s_waitcnt`-bound; measure it against sync staging rather than
-> assuming a win (`../hardware/capability-matrix.md ## Direct-to-LDS granularity
-> (per arch)`).
+**A legal width is necessary, not sufficient: the lane's elements must be contiguous in the
+source.** Measured: `size_per_thread = 4` on `uint8` (32 bit, legal) fails LLVM translation once the
+offsets carry a vendor-permuted order that puts a lane's 4 bytes 64 B apart; plain `gl.load` on the
+same offsets gives four `global_load_ubyte`. **Same error text as an illegal width** — check the
+offsets before concluding. A permutation that moves whole 16 B blocks keeps 16 B runs intact and
+lowers with an identical ISA histogram; the same permutation at element granularity does not lower.
+Copy-back check per `(destination layout, producer layout, dtype, width, source access pattern)`.
+
+gfx942 width cost (4 B/lane max) and its `order` gate (destination order = source fast dim):
+`pipeline/marker-and-version-gates.md ## The gfx942 async-copy width gate — available, and narrow`,
+`../hardware/capability-matrix.md ## Direct-to-LDS granularity (per arch)`.
 
 ### Shared-layout family + transpose-on-read (layout dependency)
 
-Not every shared layout lowers for the async direct-to-LDS path:
+Which shared layouts an async direct-to-LDS copy (`buffer_load_to_shared` / `global_load_to_shared`)
+can target. Same rule on gfx950 and gfx942 (Triton 3.8.0; compile-verified gfx950 + gfx942; every
+padded destination that lowers copies back exact on gfx950 (GPU), at both entry points):
 
-- `SwizzledSharedLayout` lowers for `buffer_load_to_shared`; the padded-identity
-  variant (`PaddedSharedLayout.with_identity_for`) has been seen to **fail to
-  lower** for the async path — record as a known layout delta, not a build ceiling,
-  and prefer `SwizzledSharedLayout` (or a source-proven `DistributedLinearLayout`
-  matched to the consumer) for async.
-- **Transpose-on-read**: to consume one LDS tile in two operand orientations
-  (instead of storing it twice), store it once in natural order and read the
-  transposed operand via `smem.permute((1, 0)).load(dot_layout)`. The conflict
-  behaviour of reading a tile both ways and its mitigation live in
-  `../tile-programming/layout-recipes.md ## Padding vs swizzle (LDS bank conflicts)`.
+- **`SwizzledSharedLayout` lowers** at any legal width. It is the usual destination.
+- **A padded destination lowers iff two conditions hold** (recipe: `## Deriving the producer layout
+  for a padded async destination`):
+  1. **interval ≥ one wave's copy:** `interval_bytes >= 64 lanes x per-lane width` — 1 KiB at
+     128 bit, 256 B at 32 bit. fp16 64x64 `with_identity_for([[512, 8]], ...)` lowers,
+     `[[256, 8]]` fails; at 32 bit/lane a 256 B interval lowers and 128 B fails.
+  2. **the producer's reg/lane/warp bases are the destination's `offset_bases`** — derive it.
+     For `with_identity_for` an exact-cover row-major `BlockedLayout` already *is* that layout and
+     lowers; for `compute_efficient_padded_shared_layout` (permuted row bases) a row-major
+     `BlockedLayout` fails and the derived producer lowers (either operand index).
+  Miss either and the error is the generic one: `failed to translate module to LLVM IR`
+  (`LLVM Translation failed for operation: builtin.unrealized_conversion_cast`) from
+  `buffer_load_to_shared`, `PassManager::run failed` (`failed to legalize operation
+  'ttg.async_copy_global_to_local'`) from `global_load_to_shared`. A per-lane run that is not
+  contiguous in global memory (operand B from the factory with the default `is_k_contig=True` over a
+  row-major source) fails the same way — pass `is_k_contig` to match the source.
+- **Lowering is not correctness — a swizzled destination can be silently wrong.** With a plain
+  `BlockedLayout` producer, `max_phase > 1` **and** `vec < size_per_thread` compiled, ran, and
+  returned wrong data at both entry points (GPU copy-back, 3.8.0 gfx950; the sync control was
+  exact). `max_phase = 1` and `vec >= size_per_thread` stay outside that case; a larger `max_phase`
+  is a correctness change, so copy the LDS tile back and compare once per
+  `(destination, producer, dtype, width)`. A padded async arm forced through by splicing a
+  coalescing pass was the fastest arm measured **while returning NaN** — check numerics before
+  believing a clock.
+- **Same message, different cause.** The per-lane width gate (`### Minimum per-thread granularity
+  (applicability by dtype)`) and "warps must cover contiguous rows of the destination exactly" fail
+  with the same strings. Check the width first, then the warp-to-row mapping, then the family.
+- Whether `compute_efficient_padded_shared_layout` returns a layout at all moves with
+  `instr_shape` and `operand_index` (small non-K tiles return `None`); its refusal conditions are
+  owned by `layout-reference.md ## Let 3.8 Compute The Padded Layout For You (CDNA4)`.
+- **Transpose-on-read**: to consume one LDS tile in two operand orientations, store it once and read
+  the transposed operand via `smem.permute((1, 0)).load(dot_layout)` (conflict behaviour:
+  `../tile-programming/layout-recipes.md ## Padding vs swizzle (LDS bank conflicts)`). **A saving
+  only when the transpose is not already free — check the ISA for `ds_read_*_tr_*` first.** On a
+  gfx950 MLA forward (1 wave/SIMD), moving V's transpose from registers into the LDS read removed
+  instructions, left `mfma` / `ds_read` / `shared` identical, was bit-equal — and measured slower (small,
+  beyond noise in an interleaved A/B). The register path already used
+  `ds_read_b64_tr_b16`, and the replaced `v_mov`s had co-issued under MFMA for free
+  (`../pitfalls/negative-patterns.md ## Instruction count is not the objective function`).
 
-  **It is a saving only when the transpose is not already free. Check the ISA for
-  an existing `ds_read_*_tr_*` before reaching for it.** The competing form —
-  load in a linear layout and transpose in registers (`gl.permute` +
-  `convert_layout`) — looks strictly worse in a census and can be strictly
-  faster: on a gfx950 MLA forward pinned at 1 wave/SIMD, moving V's transpose
-  from registers into the LDS read removed 51 instructions, left `mfma` and
-  `ds_read` counts and `shared` bytes/WG **identical**, was bit-for-bit
-  numerically equal — and lost **1.4 %** (1.0433x vs 1.0585x, interleaved A/B in
-  one clean window; record the window's spread alongside, per `ab_bench.py`).
-  The register path was already landing 384 `ds_read_b64_tr_b16`, i.e. the
-  hardware was already doing the cheap part, so the transpose did not disappear:
-  it moved into that read's bank pattern, while the `v_mov`s it replaced had been
-  co-issuing under MFMA for free. On the same kernel a padding change to the same
-  buffer cost 10–11 pp in both directions, so the LDS access pattern was the
-  sensitive axis and the registers were not.
+## Deriving the producer layout for a padded async destination
 
-  The general rule this is an instance of is in
-  [`../gluon-negative-patterns.md ## Instruction count is not the objective function`](../gluon-negative-patterns.md).
+A padded shared layout describes the **consumer** side — how the matrix instruction reads the tile
+back out of LDS. When that tile arrives by async direct-to-LDS copy you also owe the compiler the
+**producer** side: the distributed layout of the offset tensor `buffer_load_to_shared` writes
+through. The two are not independently choosable. A padded destination under a producer layout that
+describes a dense tile is a contradiction, and the lowering has to reject it somehow.
+
+So derive the producer from the padded layout instead of authoring it alongside.
+`PaddedSharedLayout` exposes `.offset_bases` (and `.interval_padding_pairs`, `.shape`) as readable
+attributes. `.offset_bases` is a flat list of basis vectors ordered **register, then lane, then
+warp**, and splitting it at the right two points gives the three basis lists
+`gl.DistributedLinearLayout` wants:
+
+```python
+@triton.constexpr_function
+def async_producer_layout(shared_layout, elems_per_lane, num_warps):
+    """Register-side offset layout for the async copy that fills `shared_layout`."""
+    bases = shared_layout.offset_bases            # register -> lane -> warp order
+    r = elems_per_lane.bit_length() - 1           # low bits one lane owns contiguously
+    lane_end = r + 6                              # 6 == log2(64), wave64
+    warp_end = lane_end + (num_warps.bit_length() - 1)
+    return gl.DistributedLinearLayout(
+        reg_bases=bases[:r] + bases[warp_end:],
+        lane_bases=bases[r:lane_end],
+        warp_bases=bases[lane_end:warp_end],
+        block_bases=[],
+        shape=shared_layout.shape,
+    )
+
+# shared_a / shared_b came from compute_efficient_padded_shared_layout
+load_a: gl.constexpr = async_producer_layout(shared_a, 16, NUM_WARPS)   # 16 fp8 = 16 B/lane
+load_b: gl.constexpr = async_producer_layout(shared_b, 16, NUM_WARPS)
+```
+
+The three split points are not free parameters:
+
+- `6` is `log2(64)` — wave64 on gfx950/gfx942.
+- the warp count is the launch's `num_warps`, so this layout is `num_warps`-coupled like every
+  other layout carrying an explicit warp dimension.
+- `r` is set by how many contiguous elements one lane copies, i.e. the per-thread byte width of
+  the copy divided by the element size. That is the same quantity that has to land in the
+  direct-to-LDS width set (`### Minimum per-thread granularity (applicability by dtype)`): 16 fp8
+  elements and 8 bf16 elements are both 16 B/lane, giving `r` of 4 and 3.
+
+Verified on Triton 3.8.0: compile-verified gfx950 + gfx942 (32 bit); copy-back exact on gfx950 (GPU;
+uint8 / bf16 / fp8 / fp16; factory op0, and op1 with `is_k_contig=False`). The other two conditions — the padding
+interval covers one wave's copy and the global offsets' contiguous dim is `offset_bases[0]`'s dim —
+are in `### Shared-layout family + transpose-on-read (layout dependency)`; the factory's intervals
+(512 elements and up) satisfy the first.
+
+Get `r` wrong and the bases are partitioned between registers and lanes incorrectly — the copy
+still has a layout, it just does not describe the tile the matrix instruction will read. A plain
+`gl.BlockedLayout` of the same tile describes a dense tile, so every offset past the first padding
+interval names the wrong byte.
 
 ## gfx950 <-> gfx942 delta
 
-- buffer ops: `gl.amd.cdna4.buffer_load/store` (gfx950) vs
-  `gl.amd.cdna3.buffer_load/store` (gfx942);
-- **async direct-to-LDS IS available on gfx942 — a namespace gap is not a silicon
-  gap.** The `gl.amd.cdna3` namespace has no `async_copy` submodule (no
-  `commit_group` / `wait_group` under `cdna3`), but
-  `gl.amd.cdna4.async_copy.buffer_load_to_shared` + `commit_group` / `wait_group` +
-  `load_shared_relaxed` **compile and run on gfx942** (verified correct). Do **not**
-  conclude "gfx942 has no async copy" from the empty `cdna3.async_copy` — probe the
-  `cdna4.async_copy` entry first, and only fall back to synchronous register staging
-  once that path is shown non-viable for the specific layout. Backend truth:
-  direct-to-LDS width is arch-gated (`supportsDirectToLdsLoadBitWidth`: CDNA3 = {32},
-  CDNA4 = {128, 32}, GFX1250 = {128, 64, 32}) — see
-  `../hardware/capability-matrix.md ## Direct-to-LDS granularity (per arch)`.
-- **Real gfx942 async limits (verify each — these are layout/width facts, not the
-  namespace myth):**
-  - gfx942 direct-to-LDS granularity = **32-bit / 2×bf16 per thread** (the 128-bit
-    chunk is CDNA4-only). A non-GFX1250 target also requires the fast dim to be
-    **exactly covered** by `threads_per_warp * size_per_thread` (no replication).
-  - transpose-B / complex dot-operand offset layouts under `AMDMFMALayout(v3)` +
-    `SwizzledSharedLayout` can **fail LLVM translation**
-    (`builtin.unrealized_conversion_cast`); the fix is `PaddedSharedLayout` + a
-    source-proven `DistributedLinearLayout` matched to the consumer (a block-scale
-    GEMM that stages a transposed operand is one upstream example of this pattern).
-  - the **generic** `ttg.async_copy_global_to_local` is explicitly illegal on the
-    gfx942 backend — use the `cdna4.async_copy` entry, not the generic op.
-  - `compute_efficient_padded_shared_layout` asserts **v4-only** (unavailable on
-    gfx942 / v3).
-- Synchronous register staging (`buffer_load` -> shared `store` -> `LR` -> `DOT`,
-  ordered by LDS read-after-write) is the fallback, not the default.
+- Buffer ops: `gl.amd.cdna3.buffer_load/store` on gfx942.
+- **Async direct-to-LDS IS available on gfx942 through the `cdna4` namespace** (`gl.amd.cdna3` has
+  no `async_copy` submodule): `gl.amd.cdna4.async_copy.buffer_load_to_shared` + `commit_group` /
+  `wait_group` + `load_shared_relaxed` compile and run correctly on gfx942 at 32 bit/lane, so
+  "gfx942 has no async copy" is wrong. Width / `order` gate and the measured loss vs sync staging on one kernel:
+  `pipeline/marker-and-version-gates.md ## The gfx942 async-copy width gate — available, and narrow`.
+- **`ttg.async_copy_global_to_local` (what `global_load_to_shared` emits) fails to legalize on gfx942
+  above 32 bit/lane; at 32 bit it lowers to `global_load_lds_dword`** (3.8.0 compile-checked). Both
+  `cdna4.async_copy` entry points obey the same width gate there.
+- The exact-cover predicate (`## Async Copy To Shared`) bites first at gfx942's narrow width.
+- gfx942 transpose-B / dot-operand reads from a `SwizzledSharedLayout` under `AMDMFMALayout(v3)` lowered
+  in every shape tested (compile-only, Triton 3.6-3.8); the `builtin.unrealized_conversion_cast` failure
+  reproduced on gfx942 only for an **async copy whose producer does not exactly cover the destination**.
+  If it fires, check the exact-cover predicate first (derive the producer from the destination's
+  `offset_bases`); `PaddedSharedLayout` + a derived producer is one fix, a matching exact-cover producer
+  another. Copy back and compare once.
+- `compute_efficient_padded_shared_layout` asserts v4 (unavailable on gfx942).
+- LDS 64 KiB / 32 banks vs 160 KiB / 64 banks
+  (`smem-lds-reference.md ## LDS is a second, independent occupancy limiter`).
+- **Synchronous register staging (`buffer_load` -> shared store -> LR -> DOT) is the usual gfx942 form**;
+  the 32-bit async path is an A/B option. On gfx950 the async ring is the form AMD's tutorial GEMMs are
+  built on; register prefetch remains an A/B alternative on loops with few MFMAs per iteration.
 
-Full status/evidence: `../hardware/capability-matrix.md` (memory & scheduling
-matrix; `## Direct-to-LDS granularity (per arch)`) and
-`../hardware/cdna3-gfx942.md`.
-
-## Reduce divergence (predicate, not branch)
-
-When VALU active-threads/wave is low (Branch Util high), replace boundary `if`-branches
-around loads with predicated `buffer_load(..., mask=, other=)` so the wave stays
-converged; pad/pow2-align ragged axes so the mask is uniform per wave.
-
-```python
-# predicated load instead of `if in_bounds: load` — uniform control flow
-mask = offs_m[:, None] < M
-a = gl.amd.cdna3.buffer_load(a_ptr, offs, mask=mask, other=0.0)   # no wavefront branch
-```
-
-Ref: `cdna3/cdna4.buffer_load(mask=, other=)` predication (upstream
-`triton/experimental/gluon/language/amd/cdna3`). Note CDNA uses `mask=` on buffer ops
-where gfx1250 uses a `pred=` on `tdm.async_load`. Verify: active-threads/wave up toward
-wave_size, Branch Util down.
-
-## Minimal Acceptance Checklist
-
-```text
-generic gl.load anchor is correct:
-base pointer is scalar:
-offset dtype is int32 or uint32:
-offset unit is byte or source-proven:
-mask layout matches offsets:
-fallback dtype matches pointer element type:
-stored value dtype matches destination:
-benchmark boundary:
-```
-
-If any item is unknown, keep the generic path or shrink the probe. Symptom -> fix
-routing: `../failure-triage.md`.
+Evidence: `../hardware/capability-matrix.md`, `../hardware/cdna3-gfx942.md`. Symptom routing:
+`../method/triage.md`.
