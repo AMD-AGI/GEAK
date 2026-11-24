@@ -1,4 +1,5 @@
-"""Scheduling, isolation, lazy operands and timing-mode resume regressions (CPU)."""
+"""Scheduling, isolation, lazy operands, timing-mode resume, rank_chain (mono_layer) and
+--quick-timing subset regressions (CPU)."""
 import importlib.util
 import json
 import os
@@ -92,6 +93,106 @@ class SweepTest(unittest.TestCase):
         with patch.object(H, '_run_leg', side_effect=leg), self.assertRaisesRegex(RuntimeError, 'missing runtime dependency'):
             H._measure_bucket('/fixture', 'base', 'cand', 'a', 5, 1, (.95, 1.1), {})
 
+
+class RankChainTimingTest(unittest.TestCase):
+    """mono_layer (meta.timing.kind rank_chain): ONE leg per side per rep times every undecided
+    bucket on the whole device set; the first side alternates, both sides of a rep share one
+    shuffled bucket order, and the early exit stays per bucket."""
+    META = {'timing': {'kind': 'rank_chain', 'world': 8}}
+
+    def run_chain(self, times, sigs=None, **kwargs):
+        sigs = list(sigs or times)
+        legs = []
+        def leg(task, overlay, mode, **kw):
+            if mode == 'list':
+                return {'sigs': sigs}
+            self.assertNotIn('bucket', kw)
+            legs.append(('B' if overlay == 'base' else 'C', list(kw['sigs']), kw.get('env_extra')))
+            out = []
+            for s in kw['sigs']:
+                if times.get(s) is None:
+                    continue
+                ms = times[s][0 if overlay == 'base' else 1]
+                out.append({'sig': s, 'ms': ms() if callable(ms) else ms, 'regime': 'decode'})
+            return {'cases': out}
+        with patch.object(H, 'build_candidate_overlay', return_value=('base', 'cand')), \
+             patch.object(H, 'assert_legs_differ'), patch.object(H, '_run_leg', side_effect=leg):
+            rows = H.measure_legs('/fixture', self.META, gpus=list(range(8)), **kwargs)
+        return rows, legs
+
+    def test_a_decided_bucket_leaves_the_next_reps_legs(self):
+        seen = []
+        rows, legs = self.run_chain({'d': (2.0, 1.0), 'p': (4.0, 4.0)}, max_reps=3, on_bucket=seen.append)
+        self.assertEqual(len(legs), 6)
+        self.assertEqual([sorted(s) for _, s, _ in legs[:2]], [['d', 'p']] * 2)
+        self.assertEqual([s for _, s, _ in legs[2:]], [['p']] * 4)
+        self.assertTrue(all(e['HIP_VISIBLE_DEVICES'] == '0,1,2,3,4,5,6,7' for _, _, e in legs))
+        by = {r['sig']: r for r in rows}
+        self.assertEqual((by['d']['reps'], by['p']['reps']), (1, 3))
+        self.assertEqual(by['d']['speedup'], 2.0)
+        self.assertEqual([r['sig'] for r in seen], ['d', 'p'])
+        self.assertTrue(all(r['process_mode'] == 'fresh_rank_chain' for r in rows))
+
+    def test_the_first_side_alternates_and_both_sides_share_a_reps_order(self):
+        sigs = 'abcde'
+        _, legs = self.run_chain({s: (1.0, 1.0) for s in sigs}, max_reps=3)
+        self.assertEqual([side for side, _, _ in legs], ['B', 'C', 'C', 'B', 'B', 'C'])
+        for i in range(0, 6, 2):
+            self.assertEqual(legs[i][1], legs[i + 1][1])
+            self.assertEqual(sorted(legs[i][1]), list(sigs))
+        self.assertGreater(len({tuple(s) for _, s, _ in legs}), 1)      # reshuffled across reps
+
+    def test_the_bucket_median_is_over_pairs_of_fresh_legs(self):
+        it = iter([1.0, 1.02, 9.0])           # undecided after two pairs, then one slow process
+        rows, legs = self.run_chain({'d': (lambda: next(it), 1.0)}, max_reps=3)
+        self.assertEqual((rows[0]['reps'], rows[0]['baseline_ms'], len(legs)), (3, 1.02, 6))
+
+    def test_an_untimable_bucket_does_not_stop_the_others(self):
+        rows, legs = self.run_chain({'d': None, 'p': (4.0, 4.0)}, max_reps=3)
+        self.assertEqual([r['sig'] for r in rows], ['p'])
+        self.assertEqual([s for _, s, _ in legs[2:]], [['p']] * 4)
+
+    def test_resumed_and_quick_timing_filtered_buckets_are_not_timed(self):
+        prev = {'d': {'sig': 'd', 'speedup': 2.0, 'process_mode': 'fresh_rank_chain'}}
+        rows, legs = self.run_chain({'d': (2.0, 1.0), 'p': (8.0, 4.0), 'x': (1.0, 1.0)},
+                                    done=prev, only={'d', 'p'})
+        self.assertEqual([r['sig'] for r in rows], ['d', 'p'])
+        self.assertEqual({tuple(s) for _, s, _ in legs}, {('p',)})
+
+    def test_too_few_devices_is_incomplete_not_a_partial_measurement(self):
+        with patch.object(H, 'build_candidate_overlay', return_value=('base', 'cand')), \
+             patch.object(H, 'assert_legs_differ'), \
+             patch.object(H, '_run_leg', return_value={'sigs': ['d']}), \
+             self.assertRaises(H.HarnessIncompleteError):
+            H.measure_legs('/fixture', self.META, gpus=[0, 1])
+
+
+class QuickTimingSubsetTest(unittest.TestCase):
+    """ut_driver --quick-timing measures a subset of an observed workload's buckets: the weighting
+    accepts it only with subset=True, says what it left out, and stays strict otherwise."""
+    META = {'workload': {'kind': 'agentx_trace_replay',
+                         'serving_weight_model': {'source': 'observed_workload', 'evidence_path': 'x'},
+                         'cases': [{'sig': 'small', 'regime': 'decode', 'effective_calls': 100},
+                                   {'sig': 'big', 'regime': 'decode', 'effective_calls': 900}]}}
+    ROWS = [{'sig': 'small', 'regime': 'decode', 'baseline_ms': 1.0, 'optimized_ms': 0.5},
+            {'sig': 'big', 'regime': 'decode', 'baseline_ms': 1.0, 'optimized_ms': 1.25}]
+
+    def test_strict_refuses_a_subset_and_subset_mode_weights_what_was_measured(self):
+        part = json.loads(json.dumps(self.ROWS[1:]))
+        with self.assertRaises(H.HarnessIncompleteError):
+            H.serving_weighted_speedup(json.loads(json.dumps(part)), self.META)
+        r = H.serving_weighted_speedup(part, self.META, subset=True)
+        self.assertTrue(r['subset'])
+        self.assertEqual(r['omitted_positive_mass'], ['small'])
+        self.assertAlmostEqual(r['call_mass_coverage'], 0.9)
+        self.assertAlmostEqual(r['weighted'], 0.8)
+
+    def test_a_complete_subset_run_equals_the_strict_figure(self):
+        full = H.serving_weighted_speedup(json.loads(json.dumps(self.ROWS)), self.META)
+        sub = H.serving_weighted_speedup(json.loads(json.dumps(self.ROWS)), self.META, subset=True)
+        self.assertAlmostEqual(full['weighted'], sub['weighted'])
+        self.assertEqual(sub['omitted_positive_mass'], [])
+        self.assertNotIn('subset', full)
 
 class NativeLegTest(unittest.TestCase):
     def setUp(self):

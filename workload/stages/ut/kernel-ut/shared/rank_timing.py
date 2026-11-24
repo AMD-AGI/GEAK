@@ -37,8 +37,12 @@ The task supplies, in cases.py:
         chain.check()         raise if a device-side wait failed (guard / epoch error words)
         chain.close()         release peer buffers (optional)
 
-Run as a leg: leg_runner --mode time calls `time_bucket` (in the leg's process, which never
-touches a GPU itself); it spawns `world` workers of this file pinned to the leg's visible devices.
+Run as a leg: leg_runner --mode time calls `time_buckets` (in the leg's process, which never
+touches a GPU itself); it spawns `world` workers of this file pinned to the leg's visible devices,
+and those workers time ALL of the leg's buckets one after another. Start-up (torch import, device
+and process-group init, the first model build) is ~90% of a one-bucket leg and is paid once per
+leg; each bucket still builds, checks, captures and times its own chain, and closes it (graphs
+dropped, peer buffers released, allocator cache emptied) before the next bucket starts.
 """
 import json
 import os
@@ -100,21 +104,36 @@ def _kill(procs):
 
 def time_bucket(task_dir, case, meta, spec=None):
     """Time one manifest row on `world` ranks; returns leg_runner's time-mode row."""
+    return time_buckets(task_dir, [case], meta, spec)[0]
+
+
+def time_buckets(task_dir, cases, meta, spec=None):
+    """Time manifest rows on ONE set of `world` rank processes, in the given order; returns
+    leg_runner's time-mode rows in that order. Any rank failing fails the whole leg (the others
+    would wait on it in-kernel), exactly as for one bucket."""
     spec = spec or chain_spec(meta)
+    cases = list(cases)
+    if not cases:
+        return []
     world = spec["world"]
     devs = visible_devices(world)
     port = _free_port()
     out = tempfile.mkdtemp(prefix="rank_chain_")
+    sigfile = os.path.join(out, "sigs.json")
+    with open(sigfile, "w") as f:
+        json.dump([c["sig"] for c in cases], f)
     procs = []
     try:
         for r in range(world):
             env = dict(os.environ, HIP_VISIBLE_DEVICES=devs[r], CUDA_VISIBLE_DEVICES=devs[r],
                        RANK_CHAIN_SPEC=json.dumps(spec))
             procs.append(subprocess.Popen(
-                [sys.executable, os.path.abspath(__file__), "--worker", task_dir, case["sig"],
+                [sys.executable, os.path.abspath(__file__), "--worker", task_dir, sigfile,
                  str(r), str(world), str(port), out],
                 env=env, stdout=sys.stderr, stderr=sys.stderr, start_new_session=True))
-        deadline = time.time() + float(spec["worker_timeout_s"])
+        # worker_timeout_s is a per-bucket allowance; the leg's own timeout (measure_legs) still
+        # bounds the whole leg
+        deadline = time.time() + float(spec["worker_timeout_s"]) * len(cases)
         while any(p.poll() is None for p in procs):
             if time.time() > deadline or any(p.poll() not in (None, 0) for p in procs):
                 break       # one rank died: the others would wait on it in-kernel until their deadline
@@ -123,7 +142,8 @@ def time_bucket(task_dir, case, meta, spec=None):
         codes = [p.wait() for p in procs]
         path = os.path.join(out, "result.json")
         if any(codes) or not os.path.exists(path):
-            raise RuntimeError("rank_chain workers for %s exited %s" % (case["sig"], codes))
+            raise RuntimeError("rank_chain workers for %s exited %s"
+                               % (", ".join(c["sig"] for c in cases), codes))
         with open(path) as f:
             res = json.load(f)
     finally:
@@ -131,8 +151,14 @@ def time_bucket(task_dir, case, meta, spec=None):
         for f in os.listdir(out) if os.path.isdir(out) else []:
             os.unlink(os.path.join(out, f))
         os.rmdir(out)
-    res.update({"sig": case["sig"], "regime": case.get("regime", ""), "m": case.get("m")})
-    return res
+    rows = []
+    for case in cases:
+        row = res.get(case["sig"])
+        if row is None:
+            raise RuntimeError("rank_chain workers returned no result for %s" % case["sig"])
+        row.update({"sig": case["sig"], "regime": case.get("regime", ""), "m": case.get("m")})
+        rows.append(row)
+    return rows
 
 
 # ----------------------------------------------------------------------------- the rank workers
@@ -160,22 +186,10 @@ def summarize(per_rank, spec):
             "rank_chain": {k: spec[k] for k in ("world", "reps", "iters", "warmup")}}
 
 
-def _worker(task_dir, sig, rank, world, port, out):
-    # the task dir holds a unittest.py that shadows the stdlib module torch imports
-    sys.path[:] = [p for p in sys.path if os.path.abspath(p or ".") != os.path.abspath(task_dir)]
-    import datetime
+def _time_chain(chain, spec, rank, torch, dist):
+    """This rank's receipt for one bucket's chain (built, not yet run)."""
     import statistics
 
-    import torch
-    import torch.distributed as dist
-
-    spec = json.loads(os.environ["RANK_CHAIN_SPEC"])
-    torch.cuda.set_device(0)
-    dist.init_process_group("gloo", init_method="tcp://127.0.0.1:%d" % port, rank=rank, world_size=world,
-                            timeout=datetime.timedelta(seconds=float(spec["init_timeout_s"])))
-    cases = _load("cases", os.path.join(task_dir, "cases.py"))
-    row = next(c for c in timed_rows(task_dir) if c["sig"] == sig)
-    chain = cases.rank_chain(rank, world, dist.group.WORLD, row)
     n_full, n_short = int(chain.length), int(getattr(chain, "short", 0))
     if n_full - n_short < 1:
         raise ValueError("chain.length must exceed chain.short")
@@ -202,41 +216,70 @@ def _worker(task_dir, sig, rank, world, port, out):
         e.synchronize()
         return s.elapsed_time(e) / iters
 
-    try:
-        chain.step(n_full)                 # eager once: builds / loads every launch before capture
-        torch.cuda.synchronize()
-        chain.check()
+    chain.step(n_full)                 # eager once: builds / loads every launch before capture
+    torch.cuda.synchronize()
+    chain.check()
+    dist.barrier()
+    g_full, g_short = capture(n_full), capture(n_short)
+    dist.barrier()
+    samples = []
+    for _ in range(int(spec["reps"])):
         dist.barrier()
-        g_full, g_short = capture(n_full), capture(n_short)
+        tf = gtime(g_full)
         dist.barrier()
-        samples = []
-        for _ in range(int(spec["reps"])):
-            dist.barrier()
-            tf = gtime(g_full)
-            dist.barrier()
-            ts = gtime(g_short)
-            samples.append((tf - ts) / (n_full - n_short))
-        chain.check()
-        # host cost of issuing the chain, per launch: every rank issues the same replays, so the
-        # in-kernel waits pair; enqueue time only (no sync inside the window)
-        dist.barrier()
-        t0 = time.perf_counter()
-        for _ in range(int(spec["host_probe"])):
-            g_full.replay()
-        host = (time.perf_counter() - t0) * 1e3 / int(spec["host_probe"]) / max(1, n_full)
-        torch.cuda.synchronize()
-        chain.check()
-        mine = {"rank": rank, "ms": statistics.median(samples), "samples_ms": samples,
-                "host_ms": host, "length": n_full, "short": n_short}
-    finally:
-        torch.cuda.synchronize()
-        close = getattr(chain, "close", None)
-        if close:
-            close()
-    got = [None] * world
-    dist.all_gather_object(got, mine)
+        ts = gtime(g_short)
+        samples.append((tf - ts) / (n_full - n_short))
+    chain.check()
+    # host cost of issuing the chain, per launch: every rank issues the same replays, so the
+    # in-kernel waits pair; enqueue time only (no sync inside the window)
+    dist.barrier()
+    t0 = time.perf_counter()
+    for _ in range(int(spec["host_probe"])):
+        g_full.replay()
+    host = (time.perf_counter() - t0) * 1e3 / int(spec["host_probe"]) / max(1, n_full)
+    torch.cuda.synchronize()
+    chain.check()
+    del g_full, g_short
+    return {"rank": rank, "ms": statistics.median(samples), "samples_ms": samples,
+            "host_ms": host, "length": n_full, "short": n_short}
+
+
+def _worker(task_dir, sigfile, rank, world, port, out):
+    # the task dir holds a unittest.py that shadows the stdlib module torch imports
+    sys.path[:] = [p for p in sys.path if os.path.abspath(p or ".") != os.path.abspath(task_dir)]
+    import datetime
+    import gc
+
+    import torch
+    import torch.distributed as dist
+
+    spec = json.loads(os.environ["RANK_CHAIN_SPEC"])
+    with open(sigfile) as f:
+        sigs = json.load(f)
+    torch.cuda.set_device(0)
+    dist.init_process_group("gloo", init_method="tcp://127.0.0.1:%d" % port, rank=rank, world_size=world,
+                            timeout=datetime.timedelta(seconds=float(spec["init_timeout_s"])))
+    cases = _load("cases", os.path.join(task_dir, "cases.py"))
+    rows = {c["sig"]: c for c in timed_rows(task_dir)}
+    res = {}
+    for sig in sigs:
+        chain = cases.rank_chain(rank, world, dist.group.WORLD, rows[sig])
+        try:
+            mine = _time_chain(chain, spec, rank, torch, dist)
+        finally:
+            torch.cuda.synchronize()
+            close = getattr(chain, "close", None)
+            if close:
+                close()
+            del chain
+            gc.collect()
+            torch.cuda.empty_cache()
+        got = [None] * world
+        dist.all_gather_object(got, mine)
+        if rank == 0:
+            res[sig] = summarize(sorted(got, key=lambda r: r["rank"]), spec)
+        dist.barrier()                 # every rank has released this bucket before the next builds
     if rank == 0:
-        res = summarize(sorted(got, key=lambda r: r["rank"]), spec)
         tmp = os.path.join(out, "result.json.tmp")
         with open(tmp, "w") as f:
             json.dump(res, f)

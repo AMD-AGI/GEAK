@@ -11,7 +11,8 @@ For every task:
   tasks/<label>/run/requested_kernel.json   the request's KERNEL object, with task_dir and
                                 the server evidence installed here
   tasks/<label>/...             `ut_contracts/scaffold_ut.py new` with the family, target,
-                                const axes/attrs, phase regimes and the case manifest
+                                bind module/file, const axes/attrs, contract overrides,
+                                phase regimes and the case manifest
                                 (an existing unittest.py is never overwritten without --force)
   tasks/<label>/meta.json       server_preimports, server_evidence, expected_launches and
                                 compile_variant_waivers stamped from the request
@@ -85,6 +86,11 @@ def check_request(path):
         sc = t.get("scaffold") or {}
         if sc.get("family") not in known | {"custom"} and not sc.get("family_file"):
             problems.append("%s: unknown family %r" % (lab, sc.get("family")))
+        for o in sc.get("contract_overrides") or []:
+            if not (isinstance(o, dict) and o.get("path") and "value" in o
+                    and str(o.get("why") or "").strip()):
+                problems.append("%s: every contract override needs path, value and why" % lab)
+                break
         rk = t.get("requested_kernel") or {}
         if rk.get("entity_kind") != "gpu_kernel" or not rk.get("selected_identities"):
             problems.append("%s: requested_kernel needs entity_kind gpu_kernel and its kernels" % lab)
@@ -117,6 +123,17 @@ def scaffold(task, tdir, force):
            "--manifest", mpath, "--phase-regimes", rpath]
     if sc.get("target_callable"):
         cmd += ["--target", sc["target_callable"]]
+    # a whole-package bind (mono_layer: the model's runner package, references/mono_models.json)
+    if sc.get("bind_module"):
+        cmd += ["--bind-module", sc["bind_module"]]
+    if sc.get("bind_file"):
+        cmd += ["--bind-file", sc["bind_file"]]
+    # contract changes the request decided, each with its why (mono_layer: oracles the model's
+    # worked example does not implement, outputs its runner never exposes)
+    if sc.get("contract_overrides"):
+        opath = os.path.join(tdir, "run", "contract_overrides.json")
+        dump(sc["contract_overrides"], opath)
+        cmd += ["--override", opath]
     # scaffold_ut parses non-strings as JSON: a bool must arrive as `true`, not `True`
     for k, v in (sc.get("axes") or {}).items():
         cmd += ["--axis", "%s=%s" % (k, v if isinstance(v, str) else json.dumps(v))]

@@ -1,0 +1,71 @@
+{
+  "contract": "kernel_extract/mono_models/v1",
+  "doc": "Per-model facts of mono_layer monokernels (NOT part of the family schema). The UT request author (references/request-authoring.md, references/mono-layer-ut.md 'Requesting a mono_layer task') makes the profiled kernels matching a model's `kernel` pattern one mono_layer task per model and copies that model's entry, bind, attrs and const axes into the task's `scaffold`. `case_axes` expressions may use shape / context and {serving-arg} placeholders filled from the serving launch args (e.g. --speculative-num-draft-tokens). `world` is the deployment's tp. Values come from the model's config and the serving launch: check them. `oracles_ready` lists the contract oracle legs this model's worked example implements and a GPU run verified; any other family oracle is dropped from the task's contract with a `scaffold.contract_overrides` entry and its why (the FILL agent is never left to write an oracle no example covers).",
+  "models": [
+    {
+      "name": "muse_spark_target",
+      "label": "muse_mono_target_layer",
+      "kernel": "muse_spark_(layer|k1)_",
+      "target_callable": "sgl_amd_mono.muse_spark.gfx950.runner:MuseMonoRunner.launch",
+      "bind_module": "sgl_amd_mono",
+      "attrs": {
+        "layer_kind": "routed_moe",
+        "stream_dtype": "float32"
+      },
+      "axes": {
+        "hidden": 8192,
+        "launches": 2,
+        "pools": 2,
+        "kv_width": 128,
+        "topk": 8
+      },
+      "case_axes": {
+        "DECODE": {
+          "rows": "shape * {speculative-num-draft-tokens}",
+          "context": "context"
+        }
+      },
+      "widths_from": "rows: verify tokens = requests x --speculative-num-draft-tokens; the launch names carry it as s<rows> (muse_spark_layer_s8_*, s16_*)",
+      "worked_example": "references/examples/muse_spark_target_rank_model.py",
+      "oracles_ready": [
+        "split",
+        "native"
+      ],
+      "oracles_verified": "runs/gpu/W8b 2026-11-12: every gate incl. the native oracle floor (worked example references/examples/muse_spark_target_rank_model.py)"
+    },
+    {
+      "name": "muse_spark_draft",
+      "label": "muse_mono_draft_layer",
+      "kernel": "muse_spark_d(pre|attn|post|mlp)_|muse_spark_draft_layer",
+      "target_callable": "sgl_amd_mono.muse_spark.draft:_Draft.forward",
+      "bind_module": "sgl_amd_mono",
+      "attrs": {
+        "layer_kind": "dense",
+        "stream_dtype": "bfloat16"
+      },
+      "axes": {
+        "hidden": 8192,
+        "launches": 5,
+        "pools": 1,
+        "kv_width": 128
+      },
+      "case_axes": {
+        "DECODE": {
+          "rows": "shape * {speculative-num-draft-tokens}",
+          "context": "context"
+        }
+      },
+      "widths_from": "rows: draft tokens = requests x --speculative-num-draft-tokens (muse_spark_dpre_s8 / s16); launches = the draft's 5 layers (DRAFT_CONFIG num_hidden_layers), each = D-pre, D-attn, D-post, D-MLP device launches; pools = 1 (the compact windowed draft cache through req_to_token)",
+      "review": [
+        "draft: the server calls _Draft.forward (sglang monokernels/runtime.py:349 -> built.forward); RankModel drives one layer a launch through it (references/examples/muse_spark_draft_rank_model.py)",
+        "draft: split == the deployed per-stage path (no merged launch): correctness rests on the native oracle"
+      ],
+      "oracles_ready": [
+        "split",
+        "native"
+      ],
+      "worked_example": "references/examples/muse_spark_draft_rank_model.py",
+      "oracles_verified": "runs/gpu/W10b 2026-11-12: every gate incl. the native oracle floor (SGLang DFlash modules; worked example references/examples/muse_spark_draft_rank_model.py)"
+    }
+  ]
+}

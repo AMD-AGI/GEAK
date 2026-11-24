@@ -12,8 +12,8 @@
                "doc": "an implementation that does not share the monokernel's code (target: the per-stage torch references of sgl-amd-mono test/kernels combined over the ranks; draft: the SGLang DFlash modules' own reference), so the whole layer and its split cannot be wrong the same way. Run only on each width's smallest-context random case; it is not a leg of the negative controls.",
                "bounds": {"stream_out": {"kind": "sqnr", "min_db": 20, "delta": {"minus": "stream_in"}},
                           "layer_out": {"kind": "sqnr", "min_db": 20, "delta": {"minus": "stream_in", "along": "launches"}},
-                          "attn_out": {"kind": "sqnr", "min_db": 26}, "kv_rows": {"kind": "sqnr", "min_db": 20}},
-               "bounds_doc": "SQNR of the step's CHANGE (stream_out - stream_in; each launch's layer_out minus the stream it entered with), not of the stream: the pass-through residual is N(0,1) and would carry a 26 dB check past a wholly wrong attention or MoE contribution whose rms is under ~5% of it. 20 dB = the layer's contribution right to 10% rms. attn_out (= norm of the stream) checks the norm, not the layer. The thresholds are calibrated at the first GPU floor run (the baseline's own sqnr against native is recorded).",
+                          "attn_out": {"kind": "sqnr", "min_db": 20}, "kv_rows": {"kind": "sqnr", "min_db": 20}},
+               "bounds_doc": "SQNR of the step's CHANGE (stream_out - stream_in; each launch's layer_out minus the stream it entered with), not of the stream: the pass-through residual is N(0,1) and would carry a 26 dB check past a wholly wrong attention or MoE contribution whose rms is under ~5% of it. 20 dB = the layer's contribution right to 10% rms. attn_out (= norm of the stream) checks the norm, not the layer. The thresholds are calibrated at the first GPU floor run (the baseline's own sqnr against native is recorded). Calibration 2026-11-12 (Muse Spark target, TP8/EP8 TPX experts, runs/gpu/W8a, 2 cases x 3 draws, native teacher-forced per launch with near-tie routing aligned): baseline vs native stream_out 27.1-27.6 dB, layer_out 21.8-22.3, attn_out 23.5-24.0, kv_rows >= 75 dB; spread +-0.3 dB. attn_out 26 -> 20: it is the RMS-normed stream and inherits the stream's error, and the library's own TPX test (sgl-amd-mono test_muse_spark_k3.py test_k3_tpx_matches_the_compact_a4_math) admits row cosine >= 0.996 (~21 dB) between this path and the same reference.",
                "outputs": ["stream_in", "stream_out", "attn_out", "layer_out", "kv_rows"]}
   },
   "axes": {
@@ -64,6 +64,7 @@
   "required_control_categories": {"by": "layer_kind", "cases": {
     "routed_moe": ["softmax_scale", "peer_partial", "kv_slot", "routing_ids"],
     "dense": ["softmax_scale", "peer_partial", "kv_slot", "norm_weight"]}},
+  "min_controls_per_category": {"kv_slot": 3},
   "compare": {"determinism": "bounded", "max_violation_fraction": 0.0, "element_order": "fixed"},
   "layout_facts": [],
   "hooks": {},
