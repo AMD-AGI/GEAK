@@ -14,7 +14,7 @@ appropriate than the bounded multi-direction optimization in
 perf_knowledge/expert_skills/avo/         AVO agents (one directory per agent)
   avo-source/                             this agent: source-level optimization
     README.md                             this file
-    examples/                             three portable example tasks
+    examples/                             one portable example task
     avo-source-impl/                      implementation (run_geak_avo.py, run_avo.mjs,
                                           avo_workflow.js, lib/, roles/, kernel_base/, tests/)
 ```
@@ -174,13 +174,12 @@ canonical wrapper:
 
 ```bash
 cd <GEAK>/perf_knowledge/expert_skills/avo/avo-source/examples
-python3 run_example.py triton-w8a8-block-scaled-mm --dry-run
-python3 run_example.py flydsl-per-token-group-quant-fp8 --dry-run
+python3 run_example.py flydsl-gemm-a16-w16 --dry-run
 ```
 
 Remove `--dry-run` to launch. A real run copies the case's `kernel/` to the
-output directory and optimizes that copy. Select an idle GPU with `--gpu-ids`. The FlyDSL
-case additionally requires `AVO_FLYDSL_ENV`.
+output directory and optimizes that copy. Select an idle GPU with `--gpu-ids`. The
+example is a FlyDSL task, so a real run also requires `AVO_FLYDSL_ENV`.
 
 ### 4. Node shim
 
@@ -310,8 +309,8 @@ export GEAK_CLAUDE_HOME="<claude-home>"
 export GEAK_CLAUDE_MODEL="<model>"
 ```
 
-Kernel-specific setup can be passed with `kernel_env_script`. FlyDSL examples
-use `AVO_FLYDSL_ENV` in their harness configuration.
+Kernel-specific setup can be passed with `kernel_env_script`. The FlyDSL example
+uses `AVO_FLYDSL_ENV` in its harness configuration.
 
 ## Outputs
 

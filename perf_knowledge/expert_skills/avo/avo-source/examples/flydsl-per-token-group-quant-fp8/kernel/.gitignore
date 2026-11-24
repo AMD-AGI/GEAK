@@ -1,6 +1,0 @@
-build/
-__pycache__/
-*.so
-.torch_ext/
-.rocprofv3/
-*.o

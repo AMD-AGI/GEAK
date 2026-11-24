@@ -1,9 +1,8 @@
 # FlyDSL-capable A16W16 GEMM
 
-This optional case comes from the completed `_gemm_a16_w16_kernel` MI300X
-campaign. Unlike the per-token example, its frozen baseline already executes a
-real FlyDSL GEMM path when FlyDSL is available, so its optimization opportunity
-does not depend on an optional-import failure.
+This case comes from the completed `_gemm_a16_w16_kernel` MI300X campaign. Its
+frozen baseline already executes a real FlyDSL GEMM path when FlyDSL is
+available.
 
 Director validation accepted `avo-v3` at **1.18613x geomean** with correctness
 passing and **0.42% CV**:
