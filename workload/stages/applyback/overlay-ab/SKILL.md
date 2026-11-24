@@ -91,6 +91,10 @@ owner's dependency before consumer execution through the normal loader, preservi
 consumer API. Verify which implementation registered; a matching name or schema alone
 does not establish candidate selection.
 
+For extension exports, retain the actual loaded module from the declared reference path
+and verify that its member is the executed callable. Preserve and recheck that owner
+through removal and collection; dynamic loaders can return unregistered modules.
+
 **For a module loaded lazily, the proof has to come from the serving workers.** Verify the
 source path and hash inside each rank *after* a warmup request has exercised that path. A
 parent-process import or a pre-warmup check establishes nothing. Where the scenario
