@@ -31,7 +31,7 @@ Usage:
                          --runner <runners/x.sh> [--gpus 0,1,...] [--target 172800]
     python3 scheduler.py --work-root <dir> status
 """
-import argparse, fcntl, hashlib, json, os, subprocess, sys, time
+import argparse, fcntl, hashlib, json, os, socket, subprocess, sys, time
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -311,6 +311,16 @@ class Backend(object):
         raise NotImplementedError
 
 
+def read_pidfile(path):
+    """(pid, host) from a worker pid file; host is None for the older bare-pid format.
+
+    The file lives on a shared filesystem, so after the machine changes it still names a
+    process of the previous host. A PID means nothing without the host that owns it: on
+    the new machine it can belong to an unrelated process."""
+    parts = open(path).read().split()
+    return int(parts[0]), (parts[1] if len(parts) > 1 else None)
+
+
 class LocalBackend(Backend):
     def __init__(self, work_root, image=None):
         Backend.__init__(self, work_root, image)
@@ -329,9 +339,11 @@ class LocalBackend(Backend):
         # No handle means the scheduler itself restarted and the worker was left behind
         # by its previous life. Fall back to /proc, again counting zombies as dead.
         try:
-            pid = int(open(self._pidfile(kernel, gpus)).read().strip())
-        except (OSError, ValueError):
+            pid, host = read_pidfile(self._pidfile(kernel, gpus))
+        except (OSError, ValueError, IndexError):
             return False
+        if host is not None and host != socket.gethostname():
+            return False            # a worker of another machine is not running here
         try:
             with open("/proc/%d/stat" % pid) as f:
                 return f.read().split(") ", 1)[1].split()[0] not in ("Z", "X")
@@ -360,7 +372,7 @@ class LocalBackend(Backend):
                              start_new_session=True)
         os.makedirs(os.path.dirname(self._pidfile(kernel, gpus)), exist_ok=True)
         with open(self._pidfile(kernel, gpus), "w") as f:
-            f.write(str(p.pid))
+            f.write("%d %s" % (p.pid, socket.gethostname()))
         self.procs[(slot_label(gpus), kernel)] = p
         return True
 
@@ -369,9 +381,12 @@ class LocalBackend(Backend):
         # session beneath it, and killing only the worker leaves orphans that keep
         # crediting time.
         try:
-            pid = int(open(self._pidfile(kernel, gpus)).read().strip())
-            os.killpg(os.getpgid(pid), 15)
-        except (OSError, ValueError):
+            pid, host = read_pidfile(self._pidfile(kernel, gpus))
+            # Only a pid file that names this host authorizes a signal; a bare pid from an
+            # older run does not say whose process it is.
+            if host == socket.gethostname():
+                os.killpg(os.getpgid(pid), 15)
+        except (OSError, ValueError, IndexError):
             pass
         p = self.procs.pop((slot_label(gpus), kernel), None)
         if p is not None:

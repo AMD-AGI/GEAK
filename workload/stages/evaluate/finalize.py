@@ -88,6 +88,15 @@ def pick_throughput(d):
     return None, None
 
 
+def arm_repeats(arm):
+    """Repeats an arm records: its `repeats` count, else the length of its `legs` list."""
+    count = arm.get("repeats")
+    if isinstance(count, int) and not isinstance(count, bool):
+        return count
+    legs = arm.get("legs")
+    return len(legs) if isinstance(legs, list) else 0
+
+
 def at(doc, path):
     """`a.b.c` into nested dicts and lists; None when any step is absent."""
     for part in str(path).split("."):
@@ -173,6 +182,19 @@ def main(integration=None):
         return fail("bench_summary.json has no admissible fresh stock_control; measure "
                     "the unchanged stack in this A/B before comparing the candidate",
                     status="blocked")
+    # The candidate must have run the configured number of repeats. A finalize that fires while
+    # a later candidate arm is still measuring would otherwise grade a partial A/B and report it
+    # as ok. The fresh stock control is not held to `repeats`: the overlay-ab method asks for one
+    # admissible unchanged arm, which may be a single run. Scenarios that configure no `repeats`
+    # are not judged here.
+    want = params.get("repeats")
+    if isinstance(want, int) and not isinstance(want, bool) and want > 0:
+        have_candidate = arm_repeats(summary)
+        if have_candidate < want:
+            return fail("the A/B is incomplete: the candidate has %d of %d configured repeats. "
+                        "Wait for the remaining candidate arms and finalize again, or lower "
+                        "params.repeats if fewer repeats are intended." % (have_candidate, want),
+                        status="blocked")
     base_tp, base_key = pick_throughput(base)
     if base_tp is None:
         return fail("stock_control contains no finite positive throughput (tried %s)"

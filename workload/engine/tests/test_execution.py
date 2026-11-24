@@ -121,6 +121,40 @@ class ExecutionTests(unittest.TestCase):
                 self.assertEqual(seen['CUDA_VISIBLE_DEVICES'], logical)
                 self.assertEqual(seen['GPU_IDS'], logical)
 
+    def test_local_pidfile_records_the_host_and_a_foreign_host_is_never_judged_here(self):
+        # The pid file lives on a shared filesystem. After the machine changes it names a
+        # process of the old host; a bare PID says nothing about the host that owns it.
+        backend = scheduler.LocalBackend(str(self.root / 'pid'))
+        pidfile = backend._pidfile('task', [0])
+        os.makedirs(os.path.dirname(pidfile), exist_ok=True)
+        me = os.getpid()
+        host = scheduler.socket.gethostname()
+
+        Path(pidfile).write_text('%d %s' % (me, host))
+        self.assertTrue(backend.alive('task', [0]))
+        self.assertEqual(scheduler.read_pidfile(pidfile), (me, host))
+
+        Path(pidfile).write_text('%d another-host' % me)          # same PID, other machine
+        self.assertFalse(backend.alive('task', [0]))
+        with patch.object(scheduler.os, 'killpg') as killpg:
+            backend.stop('task', [0])
+        killpg.assert_not_called()
+
+        Path(pidfile).write_text(str(me))                         # bare PID from an older run
+        self.assertEqual(scheduler.read_pidfile(pidfile), (me, None))
+        self.assertTrue(backend.alive('task', [0]))
+        with patch.object(scheduler.os, 'killpg') as killpg:      # ...but it never authorizes a signal
+            backend.stop('task', [0])
+        killpg.assert_not_called()
+
+        Path(pidfile).write_text('')                              # empty or unreadable: not alive
+        self.assertFalse(backend.alive('task', [0]))
+
+        popen = type('Proc', (), {'pid': 4242, 'poll': lambda self: None})()
+        with patch.object(scheduler.subprocess, 'Popen', return_value=popen):
+            self.assertTrue(backend.start('other', [1], {}))
+        self.assertEqual(Path(backend._pidfile('other', [1])).read_text(), '4242 %s' % host)
+
     def test_missing_device_does_not_remove_a_container(self):
         backend = scheduler.DockerBackend(str(self.root))
         backend.render_paths = []
