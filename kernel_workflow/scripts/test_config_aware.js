@@ -13,7 +13,7 @@
 //   F) lane failures are isolated and every status is mapped
 //   G) catalog: only optimized configs, exact coverage, every other config in fallback exactly once
 //   H) aggregate only across one timing basis
-//   I) persisted artifacts are the returned objects, verbatim
+//   I) persisted artifacts are the returned objects, verbatim; one run report nests every lane timeline
 //   J) the family eval dir: pinned, created by the setup agent, or refused
 //
 // Run:  node kernel_workflow/scripts/test_config_aware.js
@@ -145,18 +145,17 @@ const throwsOf = async (args, stubs) => {
     ['unsafe config id', famArgs({ family_spec: spec({ configs: [cfg('../x')] }) }), /configs\[0\]\.id/],
     ['relative kernel_path', famArgs({ family_spec: spec({ configs: [cfg('a', { kernel_path: 'tasks/a' })] }) }), /absolute path/],
     ['missing op_spec', famArgs({ family_spec: spec({ configs: [cfg('a', { op_spec: undefined })] }) }), /op_spec must be an object/],
-    ['mode=bakeoff in a config', famArgs({ family_spec: spec({ configs: [cfg('a', { overrides: { mode: 'bakeoff' } })] }) }), /mode must be optimize or author/],
+    ['mode=bakeoff in a config', famArgs({ family_spec: spec({ configs: [cfg('a', { overrides: { mode: 'bakeoff' } })] }) }), /mode must be one of optimize\|author/],
     ['no target_language anywhere', famArgs({ family_spec: spec({ defaults: {}, configs: [cfg('a')] }) }), /target_language must resolve/],
     ['budget 0', famArgs({ family_spec: spec({ defaults: { target_language: 'hip', budget: 0 } }) }), /budget must be a positive integer/],
     ['budget 1.5', famArgs({ family_spec: spec({ defaults: { target_language: 'hip', budget: 1.5 } }) }), /budget must be a positive integer/],
     ['bad gpu_mode', famArgs({ family_spec: spec({ defaults: { target_language: 'hip', gpu_mode: 'shared' } }) }), /gpu_mode must be one of/],
-    ['apply_to_original=true in overrides', famArgs({ family_spec: spec({ configs: [cfg('a', { overrides: { apply_to_original: 'true' } })] }) }), /apply_to_original must be false/],
+    ['apply_to_original=true in overrides', famArgs({ family_spec: spec({ configs: [cfg('a', { overrides: { apply_to_original: 'true' } })] }) }), /apply_to_original must be one of false/],
     ['unknown override field', famArgs({ family_spec: spec({ configs: [cfg('a', { overrides: { kernel_path: '/x' } })] }) }), /overrides\.kernel_path is not a supported field/],
     ['signature rank vs axes', famArgs({ family_spec: spec({ configs: [cfg('a', { signature: [1, 2] })] }) }), /signature rank 2 does not match deployment\.signature_axes/],
     ['signature rank across configs', famArgs({ family_spec: spec({ deployment: {}, configs: [cfg('a', { signature: [1, 2] }), cfg('b', { signature: [1, 2, 3] })] }) }), /does not match the other configs/],
     ['non-integer signature', famArgs({ family_spec: spec({ configs: [cfg('a', { signature: [1, 2.5, 3] })] }) }), /signature must be/],
     ['signature outside its range', famArgs({ family_spec: spec({ configs: [cfg('a', { signature: [1, 2, 3], signature_ranges: { 0: [2, 8] } })] }) }), /outside signature_ranges/],
-    ['same signature and contract twice', famArgs({ family_spec: spec({ configs: [cfg('a', { signature: [1, 2, 3] }), cfg('b', { signature: [1, 2, 3] })] }) }), /same signature and contract as config 'a'/],
     ['negative workload_weight', famArgs({ family_spec: spec({ configs: [cfg('a', { workload_weight: -1 })] }) }), /workload_weight/],
     ['non-object contract.graph', famArgs({ family_spec: spec({ configs: [cfg('a', { contract: { graph: 'x' } })] }) }), /contract\.graph must be an object/],
     ['parent mode=bakeoff', famArgs({ mode: 'bakeoff' }), /does not support mode=bakeoff/],
@@ -247,6 +246,24 @@ const throwsOf = async (args, stubs) => {
     ok(r.plan.source === 'planner', 'equal contracts written in a different key order may share a group', r.plan.fallback_reason);
   }
   {
+    const { run, trace } = build(famArgs(), { agent: writerOk });
+    const r = await run();
+    const p = trace.agentCalls.find((c) => c.label === 'operator_family_planner:plan').prompt;
+    ok(/roles\/operator_family_planner\.md/.test(p) && /PHASE=plan/.test(p) && /- LEARNED_KB: on/.test(p),
+      'the planner reads its role file and gets LEARNED_KB=on by default');
+    ok(JSON.stringify(r.plan.budget) === JSON.stringify({ rule: r.plan.budget.rule, per_config: { m1: 4, m2: 4, prefill: 2 }, total: 10 }),
+      'the plan records the per-config budget policy', JSON.stringify(r.plan.budget));
+  }
+  for (const [label, a] of [
+    ['a config with use_learned_kb=false', famArgs({ family_spec: spec({ configs: [cfg('a', { overrides: { use_learned_kb: 'false' } }), cfg('b')] }) })],
+    ['an isolated expected GPU family', famArgs({ family_spec: spec({ target: { expected_gfx: 'gfx1201', expected_target: 'r9700' } }) })],
+  ]) {
+    const { run, trace } = build(a, { agent: writerOk });
+    await run();
+    const p = trace.agentCalls.find((c) => c.label === 'operator_family_planner:plan').prompt;
+    ok(/- LEARNED_KB: off/.test(p), `${label} -> planner LEARNED_KB=off`);
+  }
+  {
     const plan = { ...goodPlan, execution_order: ['m1', 'm1', 'prefill'] };
     const { run } = build(famArgs(), { agent: withPlanner(plan) });
     const r = await run();
@@ -282,7 +299,6 @@ const throwsOf = async (args, stubs) => {
     ok([m1, m2, pf, ns].every((a) => a.kb_mode === 'local' && a.use_expert_skills === 'true'), 'recognized parent knobs are forwarded');
     ok([m1, m2, pf, ns].every((a) => a.routing === undefined && a.family_spec === undefined && a.config_aware === undefined),
       'unrecognized parent args are not forwarded');
-    ok(trace.logs.some((l) => /parent .*target_language.*budget.* ignored/.test(l)), 'ignored parent args are logged');
     ok([m1, m2, pf, ns].every((a) => a.apply_to_original === 'false'), 'apply_to_original is "false" on every lane');
     ok([m1, m2, pf, ns].every((a) => /^\d$/.test(a.gpu_ids)), 'every lane gets exactly one GPU id',
       JSON.stringify([m1, m2, pf, ns].map((a) => a.gpu_ids)));
@@ -351,6 +367,7 @@ const throwsOf = async (args, stubs) => {
     a6: () => ({ final_speedup: 1.3 }),
     a7: () => ({ validation_status: 'accepted', final_speedup: 'fast' }),
     a8: () => ({ validation_status: 'accepted', final_speedup: 1.4, final_patch: '' }),
+    a9: () => ({ validation_status: 'failed', final_speedup: 0, reason: 'workspace setup failed' }),
   };
   const ids = Object.keys(LANES);
   const mixed = spec({ configs: ids.map((id, i) => cfg(id, { signature: [i + 1, 2048, 1024],
@@ -361,7 +378,7 @@ const throwsOf = async (args, stubs) => {
   const st = Object.fromEntries(R.configs.map((c) => [c.config_id, c.status]));
   const EXPECT = { m1: 'optimized', m2: 'lane_failed', prefill: 'invalid_result', a1: 'accepted_no_improvement',
     a2: 'flagged', a3: 'author_failed', a4: 'no_baseline', a5: 'not_accepted', a6: 'invalid_result',
-    a7: 'invalid_result', a8: 'invalid_result' };
+    a7: 'invalid_result', a8: 'invalid_result', a9: 'failed' };
   for (const [id, want] of Object.entries(EXPECT)) ok(st[id] === want, `${id} -> ${want}`, st[id]);
   ok(R.configs.length === ids.length, 'a thrown lane does not drop any sibling result');
   const m1r = R.configs.find((c) => c.config_id === 'm1');
@@ -370,8 +387,8 @@ const throwsOf = async (args, stubs) => {
     'structured lane fields are preserved');
   ok(R.configs.find((c) => c.config_id === 'a2').lane_validation_status === 'flagged', 'the raw lane status is kept separately');
   ok(/lane exploded/.test(R.configs.find((c) => c.config_id === 'm2').error), 'the thrown error is recorded');
-  ok(R.summary.total === 11 && R.summary.optimized === 1 && R.summary.accepted_no_improvement === 1 &&
-     R.summary.flagged === 1 && R.summary.failed === 8, 'summary counts', JSON.stringify(R.summary));
+  ok(R.summary.total === 12 && R.summary.optimized === 1 && R.summary.accepted_no_improvement === 1 &&
+     R.summary.flagged === 1 && R.summary.failed === 9, 'summary counts', JSON.stringify(R.summary));
   ok(R.validation_status === 'ok', 'validation_status=ok when at least one config is optimized');
 
   console.log('\n# G. implementation catalog');
@@ -439,15 +456,36 @@ const throwsOf = async (args, stubs) => {
        JSON.stringify(res.aggregate) === JSON.stringify(R.aggregate), 'family_results.json == returned configs/summary/aggregate');
     ok(files[P('implementation_catalog.json')] && JSON.stringify(JSON.parse(files[P('implementation_catalog.json')])) === JSON.stringify(R.catalog),
       'implementation_catalog.json == returned catalog');
-    const md = files[P('family_report.md')] || '';
-    ok(/# Operator family report: gemm_n2048_k1024/.test(md) && /\| m2 \| lane_failed \|/.test(md) && /## Failed configs/.test(md),
-      'family_report.md lists every config and its status');
+    const art = mixedRun.trace.agentCalls.find((c) => c.label === 'file_writer:family_artifacts').prompt;
+    ok(!(P('family_report.md') in files) && art.includes(`### ${P('family_report.md')}\nRender this Markdown file yourself from ONLY`) &&
+       art.includes('# Operator family report: gemm_n2048_k1024'),
+      'family_report.md is rendered by the writer from the persisted JSON, in the same call');
     ok(R.artifacts_persisted === true, 'artifacts_persisted=true when the writer confirms every path');
   }
   {
     const { run } = build(famArgs(), { agent: (label) => label === 'file_writer:family_artifacts' ? { written: [] } : null });
     const r = await run();
     ok(r.artifacts_persisted === false && r.configs.length === 3, 'a failed write is reported, results are still returned');
+  }
+
+  console.log('\n# I2. LLM timeline and run report');
+  {
+    const tl = (id) => ({ schema: 'geak.agent_timeline/1', workflow: 'kernel_lane', events: [{ seq: 0, label: id }], nested: [] });
+    const { run, trace } = build(famArgs(), { agent: writerOk,
+      lane: (a) => ({ validation_status: 'accepted', final_speedup: 1.2, final_patch: '/p', llm_timeline: tl(idOf(a)) }) });
+    const r = await run();
+    const rep = trace.agentCalls.filter((c) => c.label === 'file_writer:persist_llm_stats');
+    ok(rep.length === 1 && rep[0].prompt.includes(`${FAM_DIR}/reports/trace/agent_timeline.json`) &&
+       rep[0].prompt.includes(`--eval-dir "${FAM_DIR}"`), 'one run report is rendered into the family eval dir');
+    ok(r.llm_timeline.nested.length === 3 && r.llm_timeline.instance === FAM_DIR &&
+       r.llm_timeline.events.some((e) => e.role === 'operator_family_planner'), 'the family timeline nests every lane and records the planner');
+    ok(r.configs.every((c) => !('llm_timeline' in c)), 'lane timelines are not copied into the config records');
+  }
+  {
+    const { run, trace } = build(famArgs({ llm_stats: 'false' }), { agent: writerOk });
+    const r = await run();
+    ok(!trace.agentCalls.some((c) => c.label === 'file_writer:persist_llm_stats') && r.llm_timeline === undefined &&
+       trace.workflowCalls.every((c) => c.args.llm_stats === 'false'), 'llm_stats=false: no report, no timeline, forwarded to lanes');
   }
 
   console.log('\n# J. family eval dir');

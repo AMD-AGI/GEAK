@@ -11,9 +11,11 @@ lane's TechLead may drop it after profiling, and only measured, Director-accepte
 - `DEPLOYMENT`, `SIGNATURE_AXES` — deployment target and the names of the signature axes (e.g. `["M","N","K"]`), if given.
 - `EXPECTED_GFX` — the expected GPU ISA, or unknown. Each lane detects the real device on-box; treat this as an expectation only.
 - `GPU_POOL_SIZE` — how many lanes can run at once.
+- `LEARNED_KB` — `on` or `off`. It is `off` when any config turns the learned KB off or the expected
+  GPU family is isolated from the MI-series knowledge.
 - `OBJECTIVE` — what each lane is scored on.
 - `CONFIGS` — one entry per config: `id`, `mode`, `target_language`, `op_spec`, `signature`,
-  `contract` (`semantics`, `graph`), `tags`, `priority`, `workload_weight`, `has_incumbent`.
+  `contract` (`semantics`, `graph`), `priority`, `workload_weight`, `has_incumbent`.
 
 ## PHASE=plan
 
@@ -22,8 +24,10 @@ lane's TechLead may drop it after profiling, and only measured, Director-accepte
    it exposes. For GEMM, `ceil(M/BM) * ceil(N/BN)` estimates workgroups; a small `M` with a large `N`
    can still fill the GPU. Do not assume small `M` means underutilization.
 2. Use architecture knowledge when it helps: `knowledge/amd_instinct.md` (CDNA), `knowledge/amd_rdna4.md`,
-   `knowledge/profiling_guide.md`, and `knowledge/learned/INDEX.md` for cards that match this operator.
-   These are advisory. Do not carry gfx942 parameters over to gfx950 or the other way round.
+   and `knowledge/profiling_guide.md`. Read `knowledge/learned/INDEX.md` for cards that match this
+   operator **only when the `LEARNED_KB` input says `on`**; when it says `off`, do not open
+   `knowledge/learned/` at all. All of this is advisory. Do not carry gfx942 parameters over to gfx950
+   or the other way round.
 3. Group configs that are likely to benefit from the same algorithm family (for example packed GEMV
    vs MFMA tiling, split-K vs no split, fused vs staged). A group may contain one config.
 4. For each group, write one `strategy` (the algorithm family plus the schedule knobs worth tuning)

@@ -72,16 +72,21 @@ check("every role that reads the learned KB gates on LEARNED_KB",
 # (`planInputs(...)`), so follow one level of indirection rather than only matching the literal —
 # the first version of this check reported tech_lead as ungated when it was not, which would have
 # taught the next reader to distrust the test.
+disp = open(DISPATCH).read()
+
+
 def inputs_of(role):
-    """The text of the inputs expression handed to `role`, helper bodies inlined."""
+    """The text of the inputs expression handed to `role`, helper bodies inlined. Roles are invoked
+    from the lane and, for dispatcher-level roles such as operator_family_planner, the dispatcher."""
     out = []
-    for m in re.finditer(r"roleAgent\('" + role + r"'", lane):
-        seg = lane[m.start():m.start() + 4000]
-        out.append(seg)
-        for helper in set(re.findall(r"\b([a-zA-Z_]\w*)\(", seg)):
-            h = re.search(r"(?:function\s+" + helper + r"\s*\(|const\s+" + helper + r"\s*=)", lane)
-            if h:
-                out.append(lane[h.start():h.start() + 4000])
+    for src in (lane, disp):
+        for m in re.finditer(r"roleAgent\('" + role + r"'", src):
+            seg = src[m.start():m.start() + 4000]
+            out.append(seg)
+            for helper in set(re.findall(r"\b([a-zA-Z_]\w*)\(", seg)):
+                h = re.search(r"(?:function\s+" + helper + r"\s*\(|const\s+" + helper + r"\s*=)", src)
+                if h:
+                    out.append(src[h.start():h.start() + 4000])
     return "\n".join(out)
 
 
@@ -92,7 +97,6 @@ check("the lane hands LEARNED_KB to every gated role",
 # The bake-off path builds its lane args explicitly instead of spreading the caller's, so anything
 # left out silently reverts to the lane default. A caller asking for a KB-off bake-off used to get
 # eight KB-on lanes and no error.
-disp = open(DISPATCH).read()
 check("the bake-off dispatcher forwards use_learned_kb to each lane",
       "use_learned_kb:" in disp, "kernel_workflow.js builds lane args explicitly; the flag must be there")
 

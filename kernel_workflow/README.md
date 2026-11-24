@@ -300,21 +300,24 @@ Rules the dispatcher enforces:
 - `mode` is `optimize` or `author` per config. Parent `mode: "bakeoff"` is rejected.
 - `apply_to_original` is always `"false"`; any other value is rejected. Each lane writes only to
   `<eval_dir>/configs/<id>`.
-- `signature` (when given) must match `deployment.signature_axes` in rank, and one signature plus
-  contract may appear once. The planner may not group configs whose `contract.semantics` or
-  `contract.graph` differ.
-- Budget is per config: N configs cost about N lane budgets.
+- `signature` (when given) must match `deployment.signature_axes` in rank. The planner may not group
+  configs whose `contract.semantics` or `contract.graph` differ.
+- Budget is per config: N configs cost about N lane budgets. `family_plan.json` records the
+  per-config budgets and their total.
+- The planner reads the learned KB only when no config sets `use_learned_kb: "false"` and the
+  expected GPU family is not isolated (it receives `LEARNED_KB: on|off`, like the lane roles).
 
 A config is `optimized` only when its lane returns `validation_status: "accepted"` and a primary
-speedup above 1.0. Other statuses are `accepted_no_improvement`, `flagged`, `author_failed`,
-`no_baseline`, `not_accepted` (any other lane status), `lane_failed` (the lane threw) and
-`invalid_result` (malformed return). The run writes, and returns as the same objects:
+speedup above 1.0. Other statuses are `accepted_no_improvement`, the lane's own terminal statuses
+(`flagged`, `author_failed`, `no_baseline`, `failed`), `not_accepted` (any other lane status),
+`lane_failed` (the lane threw) and `invalid_result` (malformed return). The run writes, and returns
+as the same objects:
 
 | File | Content |
 |---|---|
-| `family_plan.json` | groups, strategy hints, planner or fallback source, report order, GPU pool |
+| `family_plan.json` | groups, strategy hints, planner or fallback source, report order, GPU pool, budget policy |
 | `family_results.json` | one normalized record per config, summary counts, family aggregate |
-| `family_report.md` | config table, plan, results, selection, aggregate, KB outcomes, failures |
+| `family_report.md` | config table, plan, results, selection, aggregate, KB outcomes, failures (rendered by the writer from the two JSON files; the JSON is authoritative) |
 | `implementation_catalog.json` | `optimized` configs under `implementations`, every other config under `fallback` (`incumbent` when one was supplied, else `stock`) |
 
 The catalog covers each config's own exact signature only (no ranges), points at the lane's
@@ -322,6 +325,8 @@ The catalog covers each config's own exact signature only (no ranges), points at
 and no sibling config is executed in this version, and cross-config evaluation is reported as
 `unsupported`. The family aggregate is the geomean of per-config speedups over accepted configs, and
 only when they share one metric kind and one known `timing_basis`; otherwise it is `null` with the reason.
+Unless `llm_stats: "false"`, the family eval dir also gets one token/time/cost run report under
+`reports/` and `report/` that nests every lane's agent timeline, as bake-off does.
 
 ### Learned knowledge (every run, not just bake-off)
 `kernel_lane.js` curates a card at the end of **every** lane run that earned a measured win — standalone,
