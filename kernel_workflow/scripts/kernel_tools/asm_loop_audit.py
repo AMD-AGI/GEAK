@@ -1,45 +1,28 @@
 #!/usr/bin/env python3
-"""Triton-family hot-loop schedule auditor (gfx950 / gfx942 / RDNA3-4 AMDGCN).
+"""Hot-loop schedule audit for AMDGCN (.s / .amdgcn from dump_ir.sh, or llvm-objdump -d). No GPU.
 
-Mechanical part of the asm-schedule audit
-(references/tile-programming/compiler-contract.md ## Auditing the hot-loop schedule).
-Consumes a stripped ``.s`` (from ``scripts/dump_ir.sh``; ``.amdgcn`` also works) and
-reports SIGNALS ONLY -- the structural-vs-schedulable VERDICT stays with the agent:
+Prints signals, not a verdict: the hot loop's op-class stream and histogram (MFMA/WMMA, LDS,
+global, scratch spill traffic, VALU, scalar, waits, barriers), the per-mnemonic histogram, memory
+waits split into relaxed (every counter > 0) and full drains (some counter == 0, counted per
+counter), barriers per iteration, MFMA<->VALU interleave, s_nop encodings, and the register / LDS
+occupancy limiters. Line numbers are file line numbers.
 
-  (1) the hot loop's op-class symbol stream + per-class histogram;
-  (2) every memory wait classified relaxed(``cnt>0``)=pipelined vs full-drain(``cnt==0``)
-      =serialized, with counts, in BOTH spellings: gfx9 ``s_waitcnt vmcnt(0)`` and
-      gfx11/12 ``s_wait_dscnt 0x1`` (counter in the mnemonic, value as an immediate).
-      ``s_wait_alu depctr_*`` / ``s_delay_alu`` are ALU-dependency waits, not memory
-      drains -- they are counted on their own line and kept OUT of the drain ratio;
-  (3) producer<->consumer sync barriers per iteration;
-  (4) ``s_nop`` count + requested stall cycles = the exposed FIXED-latency hazard
-      (e.g. MFMA/WMMA-write -> VALU-read), hidden by unroll/occupancy, never by reorder.
+  python3 asm_loop_audit.py <file.s> --arch gfx950 [--meta <ir dir>] [--kernel NAME]
+                            [--loop-label .LBB0_5] [--diff <previous audit.txt>]
 
-Matrix engines: CDNA MFMA (``v_mfma`` / ``v_smfmac``) and RDNA WMMA (``v_wmma``) are
-both classified as "mfma" — the audit treats any matrix-multiply instruction the same
-way. RDNA3/4 (gfx11*/gfx120*) use ``v_wmma_*`` exclusively; CDNA (gfx942/950) uses MFMA.
-
-It does NOT decide if an exposed single-class run is structural (no slack) or a real
-scheduling miss -- that judgment needs the dependency context the agent has. Pure
-text parsing, no GPU, stdlib only.
-
-Input forms (both accepted):
-  (a) assembler ``.s`` / ``.amdgcn`` from ``scripts/dump_ir.sh`` — labels are ``name:``.
-      This is the normal path when you control the kernel source (your own Triton/Gluon
-      kernel): one tight hot loop, auto-detect works.
-  (b) ``llvm-objdump -d`` of a prebuilt ``.hsaco`` / ``.co`` — labels are
-      ``<hexaddr> <name>:``. Use this for a **prebuilt comparator** (e.g. a vendor asm
-      kernel) where no ``.amdgcn`` source exists. Such a dump is the WHOLE function with
-      nested back-edges, so auto-detect may pick an *outer* loop; pass ``--loop-label``
-      with the inner MFMA loop's label to pin it.
-
-Usage:
-  python3 asm_loop_audit.py <file.s> [--loop-label .LBB0_5] [--max-stream 400]
-
-If --loop-label is omitted the hottest back-edge loop (most MFMA, tie-break longest)
-is auto-detected.
+The loop is picked innermost-first, then most matrix instructions, then shortest body; pass
+--loop-label for an objdump of a whole prebuilt function. With no back-edge the whole kernel body
+is audited and labelled as a per-thread total.
 """
+
+# Design notes (moved out of --help):
+# * Two wait spellings: gfx9 `s_waitcnt vmcnt(N) lgkmcnt(M)` (counter named, value in parens) and
+#   gfx11/12 `s_wait_dscnt 0x1` (counter in the mnemonic). `s_wait_alu` / `s_delay_alu` are
+#   register-dependency waits and stay out of the drain ratio.
+# * A wait with ANY counter at 0 fully drains that counter (`vmcnt(7) lgkmcnt(0)` drains all LDS
+#   ops), so it is a full drain even when another counter stays pipelined.
+# * scratch_load/store in the loop is spill traffic; it is its own class, not global memory.
+# * The structural-vs-schedulable judgement needs dependency context and stays with the reader.
 from __future__ import annotations
 
 import argparse
@@ -49,6 +32,7 @@ import os
 import re
 import sys
 from collections import Counter
+from pathlib import Path
 
 
 def _load_amd_occupancy():
@@ -80,11 +64,13 @@ _OCC = _load_amd_occupancy()
 _CLASSES = [
     ("mfma",      "M", re.compile(r"^v_mfma|^v_smfmac|^v_wmma")),
     ("exp",       "e", re.compile(r"^v_(exp|log|rcp|rsq|sqrt|sin|cos)")),
+    # scratch_* in a hot loop is register spill traffic: its own class, not global memory.
+    ("scratch",   "x", re.compile(r"^scratch_(load|store)")),
     ("atomic",    "A", re.compile(r"^(global|buffer|flat|ds|scratch)_atomic")),
     ("lds_read",  "R", re.compile(r"^ds_read|^ds_load")),
     ("lds_write", "W", re.compile(r"^ds_write|^ds_store")),
-    ("gld",       "g", re.compile(r"^(global|buffer|flat|scratch)_load")),
-    ("gst",       "G", re.compile(r"^(global|buffer|flat|scratch)_store")),
+    ("gld",       "g", re.compile(r"^(global|buffer|flat)_load")),
+    ("gst",       "G", re.compile(r"^(global|buffer|flat)_store")),
     # ALU-dependency waits must be split OUT of the memory-wait class: s_wait_alu depctr_*
     # (gfx11/12) and s_delay_alu (gfx11) resolve a register hazard, not an outstanding
     # memory op, so folding them into the waitcnt bucket inflates the "full drain" ratio.
@@ -123,7 +109,8 @@ _WAIT_IMM_RE = re.compile(
 def classify_wait(text: str):
     """(kind, [(counter, value), ...]) for one wait instruction.
 
-    kind: 'drain' (every named counter is 0 -- serialized), 'relaxed' (some counter > 0 --
+    kind: 'drain' (at least one named counter is 0 -- that counter is fully drained, e.g.
+    `vmcnt(7) lgkmcnt(0)` drains every outstanding LDS op), 'relaxed' (every counter > 0 --
     pipelined), 'alu' (register-dependency wait, not a memory drain), 'unknown' (a wait
     whose form this parser does not recognise; callers count it as a drain, conservatively,
     and it should be reported so the gap is visible instead of silently biasing the ratio).
@@ -142,7 +129,7 @@ def classify_wait(text: str):
             cnts = [(m.group(1), val)]
     if not cnts:
         return "unknown", []
-    return ("drain" if all(v == 0 for _, v in cnts) else "relaxed"), cnts
+    return ("drain" if any(v == 0 for _, v in cnts) else "relaxed"), cnts
 
 
 def _mnemonic(line: str) -> str | None:
@@ -157,17 +144,31 @@ def _mnemonic(line: str) -> str | None:
 #   (a) .amdhsa_kernel directive block: `.amdhsa_next_free_vgpr 244` / `.amdhsa_accum_offset 128`
 #       / `.amdhsa_next_free_sgpr 96`  (LLVM AMDGPU, all gfx9/10/11/12 -- arch-agnostic).
 #   (b) .amdgpu_metadata YAML tail:     `.vgpr_count: 244` / `.sgpr_count: 96` / `.agpr_count: 0`.
-# next_free_vgpr = ArchVGPR + AGPR combined budget on CDNA (matches calc_perf.py KD occupancy).
-_KD_RE = {
-    "vgpr":       re.compile(r"^\s*\.amdhsa_next_free_vgpr\s+(\d+)"),
-    "sgpr":       re.compile(r"^\s*\.amdhsa_next_free_sgpr\s+(\d+)"),
-    "accum_off":  re.compile(r"^\s*\.amdhsa_accum_offset\s+(\d+)"),
-}
-_MD_RE = {
-    "vgpr":  re.compile(r"^\s*\.vgpr_count:\s*(\d+)"),
-    "sgpr":  re.compile(r"^\s*\.sgpr_count:\s*(\d+)"),
-    "agpr":  re.compile(r"^\s*\.agpr_count:\s*(\d+)"),
-}
+# next_free_vgpr = ArchVGPR + AGPR combined budget on CDNA (the KD occupancy basis amd_occupancy.py uses).
+# A module may hold SEVERAL kernels. `.type <name>,@function` opens each one; an objdump-style
+# disasm has no `.type`, so `.amdhsa_kernel <name>` is the fallback anchor. The `.amdgpu_metadata`
+# YAML tail repeats every name and is NOT an anchor -- it would invent a second span per kernel.
+from amd_artifacts import kernels_in_asm, select_kernel
+
+
+def _is_cdna_family(arch) -> bool:
+    """True when `arch` is CDNA-lineage, i.e. its ArchVGPR and AGPR files are combined.
+
+    This was `_OCC.family_for(arch) == "cdna"` inline, which filed gfx1250 -- family "cdna5" --
+    under the no-AGPR branch: an equality test against ONE member of a family whose vocabulary
+    has more than one CDNA entry. Lifted out of the printer so the rule itself is assertable;
+    while it was an inline expression the only thing that could have caught it was a human
+    reading the label on a dump from a part nobody here had run.
+
+    Unknown/absent arch answers True, matching the prior behaviour: the label is cosmetic and
+    the CDNA form is the more informative of the two. Nothing numeric hangs off it.
+    """
+    if not _OCC or not arch:
+        return True
+    fam = _OCC.family_for(arch)
+    if not fam:
+        return True   # unclassifiable: keep the prior default rather than invent a family
+    return fam.startswith("cdna")
 
 
 def kd_regs(lines: list[str]) -> dict:
@@ -175,39 +176,25 @@ def kd_regs(lines: list[str]) -> dict:
     Directive block wins over metadata YAML when both are present. Returns {} if neither seen
     (e.g. an llvm-objdump disasm with no KD) -- callers treat that as 'vgpr unavailable', never
     fabricate. On multiple kernels in one file, reports the MAX (worst-case occupancy driver)."""
-    kd: dict = {}
-    for ln in lines:
-        for key, rx in _KD_RE.items():
-            m = rx.match(ln)
-            if m:
-                kd[key] = max(kd.get(key, 0), int(m.group(1)))
-        for key, rx in _MD_RE.items():
-            m = rx.match(ln)
-            if m:
-                kd.setdefault("_md_" + key, 0)
-                kd["_md_" + key] = max(kd["_md_" + key], int(m.group(1)))
-    out: dict = {}
-    vgpr = kd.get("vgpr", kd.get("_md_vgpr"))
-    sgpr = kd.get("sgpr", kd.get("_md_sgpr"))
-    if vgpr is not None:
-        out["vgpr"] = vgpr           # next_free_vgpr = arch+accum combined (CDNA)
-    if sgpr is not None:
-        out["sgpr"] = sgpr
-    if "_md_agpr" in kd:
-        out["accum_vgpr"] = kd["_md_agpr"]
-    elif "accum_off" in kd and vgpr is not None:
-        out["accum_vgpr"] = max(0, vgpr - kd["accum_off"])
-    return out
+    from amd_resources import analyze
+    r = analyze('\n'.join(lines))
+    return {name: value for name, value in {'vgpr': r['vgpr_combined'],
+            'sgpr': r['sgpr'], 'accum_vgpr': r['agpr']}.items() if value is not None}
 
 
-def print_kd_regs(lines: list[str]) -> None:
+def print_kd_regs(lines: list[str], arch: str | None = None) -> None:
     """Register budget + waves/SIMD. The occupancy answer is ARCH-SPECIFIC (CDNA divides a
     512-entry combined file, RDNA a 1536-entry one with a 256/wave cap), and LLVM already
     computed it for this exact subtarget when the dump carries `; Occupancy:` -- prefer that
-    over any model here."""
+    over any model here.
+
+    `arch` is a MODULE-level fact (`.amdgcn_target` sits above the first kernel), so when the
+    caller has narrowed `lines` to one kernel it must pass the arch it read from the whole
+    file -- otherwise narrowing the audit silently costs the occupancy verdict."""
     kd = kd_regs(lines)
     text = "\n".join(lines)
-    arch = _OCC.arch_from_asm(text) if _OCC else None
+    if arch is None and _OCC:
+        arch = _OCC.arch_from_asm(text)
     print("kernel-descriptor register budget (occupancy driver):")
     if not kd:
         print("  (no .amdhsa_next_free_vgpr / .vgpr_count found -- KD absent in this dump; "
@@ -216,7 +203,7 @@ def print_kd_regs(lines: list[str]) -> None:
         print()
         return
     v = kd.get("vgpr")
-    is_cdna = (_OCC.family_for(arch) == "cdna") if _OCC else True
+    is_cdna = _is_cdna_family(arch)
     if v is not None:
         combined = "  (ArchVGPR+AGPR combined, CDNA)" if is_cdna else \
                    "  (no AGPR file on this arch)"
@@ -225,22 +212,23 @@ def print_kd_regs(lines: list[str]) -> None:
             print("    waves/SIMD UNAVAILABLE -- amd_occupancy.py not importable; read LLVM's "
                   "`; Occupancy:` from the .s")
         else:
-            llvm_occ = _OCC.llvm_occupancy(text)
-            waves, model = _OCC.waves_by_vgpr(v, arch)
-            if llvm_occ is not None:
-                print(f"    -> waves/SIMD = {llvm_occ}   [LLVM `; Occupancy:` -- authoritative, "
-                      f"computed by the backend for {arch or 'this subtarget'}]")
-                if waves is not None and waves != llvm_occ:
-                    print(f"       (model for {arch} says {waves}; trust LLVM and report the "
-                          f"mismatch -- the model or the arch table is stale)")
-            elif waves is not None:
-                print(f"    -> waves/SIMD by VGPR <= {waves}   [model: {model}]")
+            from amd_resources import analyze
+            resources = analyze(text, arch=arch)
+            waves = resources['waves_by_vgpr_term']
+            if waves is None:
+                print(f"    -> waves/SIMD UNAVAILABLE: {resources['waves_warning']}")
             else:
-                print(f"    -> waves/SIMD UNAVAILABLE: {model}")
+                print(f"    -> waves/SIMD by VGPR = {waves} [{resources['waves_source']}; register bound]")
     if kd.get("accum_vgpr") is not None:
         print(f"  accum_vgpr     = {kd['accum_vgpr']}")
     if kd.get("sgpr") is not None:
         print(f"  next_free_sgpr = {kd['sgpr']}")
+    priv = re.search(r"^\s*\.amdhsa_private_segment_fixed_size\s+(\d+)", text, re.MULTILINE) or \
+        re.search(r"^\s*(?:-\s*)?\.private_segment_fixed_size:\s*(\d+)", text, re.MULTILINE)
+    spills = re.search(r"^\s*(?:-\s*)?\.vgpr_spill_count:\s*(\d+)", text, re.MULTILINE)
+    if priv:
+        print(f"  private_segment_fixed_size = {priv.group(1)} B (scratch per work-item"
+              + (f"; .vgpr_spill_count {spills.group(1)}" if spills else "") + ")")
     print(f"  (arch detected: {arch or 'UNKNOWN -- no .amdgcn_target in this dump'}; register "
           f"file geometry differs per arch -- use hotspot_analyzer.py for the full per-arch "
           f"limiter table.)")
@@ -270,41 +258,49 @@ def lds_from_meta(meta_path: str) -> list[tuple[str, int]]:
     out: list[tuple[str, int]] = []
     for p in sorted(cands):
         try:
-            d = json.load(open(p))
+            d = json.loads(Path(p).read_text())
         except (OSError, ValueError):
             continue
-        if isinstance(d, dict) and isinstance(d.get("shared"), int):
-            out.append((str(d.get("name") or os.path.basename(p))[:40], d["shared"]))
+        if (isinstance(d, dict) and type(d.get("shared")) is int and d["shared"] >= 0
+                and isinstance(d.get("name"), str) and d["name"]):
+            out.append((d["name"], d["shared"]))
     return out
 
 
 # LDS/CU comes from the shared vendor/amd occupancy model (per-arch there, because
 # gfx94*/gfx95* share the register family but not the LDS: 64 KiB vs 160 KiB).
-def lds_per_cu(arch, default=None):
-    """LDS bytes per CU for `arch`, or None when the shared model has no figure.
+def lds_per_cu(arch) -> int | None:
+    """LDS bytes per CU for `arch`, or None when no figure is available.
 
-    `default` is None for the same reason it is in `probe.py`: 65536 is the CDNA3 figure,
-    and handing it to a gfx950 kernel overstates LDS pressure by 2.5x -- a confident wrong
-    occupancy verdict, which is worse than declining. Pass `--lds-per-cu` to name it.
+    None is a real answer, and there is deliberately NO numeric default. The tempting default
+    is 65536, and it is the worst available one precisely because it is *correct* for gfx942:
+    a wrong application of it never looks wrong on inspection, it just emits a plausible number
+    instead of an error, and on a 160 KiB part it understates the LDS limiter by 2.5x. A
+    confident wrong occupancy verdict is worse than a withheld one.
     """
-    try:
-        import amd_occupancy as _o
-    except ImportError:
-        return default
-    return _o.lds_per_cu(arch) or default
+    if not arch:
+        return None
+    if _OCC is not None and hasattr(_OCC, "lds_per_cu"):
+        return _OCC.lds_per_cu(arch)
+    return None
 
 
-    for k, v in LDS_PER_CU_BY_ARCH.items():
-        if arch.startswith(k):
-            return v
-    return default
-
-
-def print_lds_budget(meta_path: str | None, lds_per_cu: int | None) -> None:
+def print_lds_budget(meta_path: str | None, cap: int | None,
+                     cap_src: str | None = None, kernel: str | None = None, records=None) -> None:
     """LDS/WG -> WGs/CU. A SECOND occupancy limiter, independent of the register one: a kernel
-    can be capped by both at once, and relieving only one buys nothing."""
+    can be capped by both at once, and relieving only one buys nothing.
+
+    `cap` is the LDS bytes/CU divisor, or None when it is not established. With None the
+    bytes/WG (a measured fact) are still printed and the WGs/CU verdict (a derived one) is
+    WITHHELD -- see `lds_per_cu` for why no default is offered.
+
+    `kernel` is the name the rest of the report is about. It is load-bearing: the metadata
+    directory holds an entry per kernel, and picking the largest here while the schedule audit
+    reads a different one is how a report ends up describing two kernels at once under one
+    name. With a kernel named, only its entry is used; a mismatch is reported, never silently
+    resolved."""
     print("LDS budget per workgroup (the SECOND occupancy limiter):")
-    kernels = lds_from_meta(meta_path) if meta_path else []
+    kernels = records if records is not None else lds_from_meta(meta_path) if meta_path else []
     if not kernels:
         print("  UNAVAILABLE -- pass --meta <ir-dir | kernel.json> (Triton cache metadata).")
         print("  Do NOT substitute the KD's group_segment_fixed_size or rocprof-compute 7.1.8: "
@@ -312,21 +308,46 @@ def print_lds_budget(meta_path: str | None, lds_per_cu: int | None) -> None:
         print("  structurally 0 for Triton kernels and will read as 'this kernel uses no LDS'.")
         print()
         return
-    # several kernels in one dump -> the MAX drives occupancy (same rule as kd_regs).
-    name, shared = max(kernels, key=lambda kv: kv[1])
-    if shared:
-        if lds_per_cu:
-            print(f"  lds_bytes_per_wg = {shared}  ({name})  -> WGs/CU by LDS <= "
-                  f"{lds_per_cu // shared}  ({lds_per_cu}/{shared})")
+    if not kernel:
+        print("  UNAVAILABLE -- no observable kernel identity; launch metadata is withheld.\n")
+        return
+    if kernel:
+        hit = [kv for kv in kernels if kv[0] == kernel]
+        if len(hit) == 1:
+            kernels = hit
+        elif not hit:
+            print(f"  UNAVAILABLE for {kernel} -- the metadata here names "
+                  f"{', '.join(n for n, _ in kernels[:4])}"
+                  + (" ..." if len(kernels) > 4 else "") + ".")
+            print("  Point --meta at the metadata for the kernel being audited; the LDS term is")
+            print("  WITHHELD rather than taken from another kernel in the same directory.")
+            print()
+            return
         else:
-            print(f"  lds_bytes_per_wg = {shared}  ({name})  -> WGs/CU by LDS UNKNOWN: no "
-                  f"hw_constants.json figure for this arch. Pass --lds-per-cu rather than "
-                  f"assuming 64 KiB, which is 2.5x wrong on CDNA4.")
-    else:
+            print(f"  UNAVAILABLE -- {len(hit)} metadata entries match {kernel!r}; cannot tell "
+                  f"which is this kernel's.")
+            print()
+            return
+    name, shared = kernels[0]
+    if not shared:
         print(f"  lds_bytes_per_wg = 0  ({name})  -> no LDS staging in this kernel")
+    elif cap:
+        alloc = _OCC.round_up_lds(shared, cap_src) if (_OCC and cap_src and cap_src.startswith("gfx")) else shared
+        print(f"  lds_bytes_per_wg = {shared}  ({name})  -> WGs/CU by LDS <= {cap // alloc}"
+              f"  ({cap}/{alloc}, {cap_src}{', allocation granule applied' if alloc != shared else ''})")
+    else:
+        print(f"  lds_bytes_per_wg = {shared}  ({name})  -> WGs/CU by LDS = WITHHELD")
+        print("  The divisor is per-arch and is not established here: LDS/CU is 64 KiB on "
+              "gfx94* and")
+        print("  160 KiB on gfx95*, a 2.5x spread, so a guess moves the limiter by 2.5x while "
+              "still")
+        print("  printing a plausible number. Pass --arch <gfx target>, or --lds-per-cu "
+              "<bytes> read")
+        print("  off the part (`rocminfo` -> Segment: GROUP, Size).")
     for n, s in sorted(kernels, key=lambda kv: -kv[1])[1:]:
         print(f"    (also: {n} = {s} B)")
-    print("  (source: Triton cache metadata `shared`; CDNA gfx942/gfx950 = 64 KiB LDS/CU.)")
+    print("  (source: Triton cache metadata `shared`; LDS/CU is per-arch, NOT a family "
+          "constant.)")
     print()
 
 
@@ -385,7 +406,7 @@ def kernel_body_span(lines: list[str]) -> tuple[str, int, int] | None:
             if not m:
                 continue
             lab = m.group("obj") or m.group("asm")
-            if lab.startswith(".LBB") or lab.startswith(".Lfunc"):
+            if lab.startswith((".LBB", ".Lfunc")):
                 continue          # a basic-block label, not the kernel entry
             start, name = i + 1, lab
             break
@@ -450,7 +471,7 @@ def parse_opcodes(path: str) -> dict[str, int]:
     out: dict[str, int] = {}
     inside = False
     try:
-        txt = open(path, errors="ignore").read()
+        txt = Path(path).read_text(errors="ignore")
     except OSError:
         return out
     for ln in txt.splitlines():
@@ -466,13 +487,42 @@ def parse_opcodes(path: str) -> dict[str, int]:
     return out
 
 
-def print_opcodes(opc: Counter, total: int, top: int, prev: dict[str, int] | None) -> None:
+_CLS_ROW = re.compile(r"^\s{2}\S\s(\w+)\s+(\d+)\s+\(")
+_DRAIN_ROW = re.compile(r"->\s*(\d+)% of memory waits are full drains")
+
+
+def parse_prev(path: str) -> dict:
+    """Op-class histogram and drain share of a previous run's stdout, for --diff."""
+    out: dict = {"classes": {}, "drain_pct": None}
+    try:
+        txt = Path(path).read_text(errors="ignore")
+    except OSError:
+        return out
+    inside = False
+    for ln in txt.splitlines():
+        if ln.startswith("histogram:"):
+            inside = True
+            continue
+        if inside:
+            m = _CLS_ROW.match(ln)
+            if m:
+                out["classes"][m.group(1)] = int(m.group(2))
+            elif not ln.strip():
+                inside = False
+        m = _DRAIN_ROW.search(ln)
+        if m:
+            out["drain_pct"] = float(m.group(1))
+    return out
+
+
+def print_opcodes(opc: Counter, total: int, top: int, prev: dict[str, int] | None,
+                  region: str = "hot loop") -> None:
     """Per-MNEMONIC histogram. The op-CLASS histogram above is one level too coarse to act on:
     a software dtype-conversion sequence, an address-arithmetic chain and a layout permute all
     land in 'valu' and have opposite fixes. This is the granularity a lever is chosen at."""
     if top <= 0 or not opc:
         return
-    print(f"per-opcode histogram (hot loop, top {top} of {len(opc)} distinct mnemonics):")
+    print(f"per-opcode histogram ({region}, top {top} of {len(opc)} distinct mnemonics):")
     for mn, n in opc.most_common(top):
         pct = 100.0 * n / total if total else 0.0
         d = ""
@@ -494,13 +544,18 @@ def print_opcodes(opc: Counter, total: int, top: int, prev: dict[str, int] | Non
 
 
 def audit(lines: list[str], start: int, end: int, max_stream: int,
-          top_opcodes: int = 12, prev_opcodes: dict[str, int] | None = None) -> None:
+          top_opcodes: int = 12, prev_opcodes: dict[str, int] | None = None,
+          line_offset: int = 0, prev: dict | None = None, region: str = "hot loop") -> None:
+    """`region` names the audited span in the output: "hot loop" for a back-edge loop, "kernel body"
+    when the kernel has none (a per-thread total, not a per-iteration cost)."""
     hist: Counter = Counter()
     opc: Counter = Counter()
     stream: list[str] = []
     relaxed = full_drain = unknown_wait = alu_waits = barriers = 0
-    nops = nop_cycles = 0
+    nops = nop_immediate_sum = 0
+    nop_immediates: Counter = Counter()
     waitcnt_detail: Counter = Counter()
+    drain_detail: Counter = Counter()
     alu_detail: Counter = Counter()
     for ln in lines[start:end]:
         mn = _mnemonic(ln)
@@ -516,7 +571,9 @@ def audit(lines: list[str], start: int, end: int, max_stream: int,
             nops += 1
             m = re.search(r"^s_nop\s+(?:0x([0-9a-fA-F]+)|(\d+))", ln.strip())
             if m:
-                nop_cycles += int(m.group(1), 16) if m.group(1) else int(m.group(2))
+                immediate = int(m.group(1), 16) if m.group(1) else int(m.group(2))
+                nop_immediate_sum += immediate
+                nop_immediates[immediate] += 1
         if name == "aluwait":
             alu_waits += 1
             alu_detail[re.split(r";|//", ln, 1)[0].strip()] += 1
@@ -524,6 +581,11 @@ def audit(lines: list[str], start: int, end: int, max_stream: int,
             kind, cnts = classify_wait(ln)
             if kind == "drain":
                 full_drain += 1
+                for k, v in cnts:
+                    if v == 0:
+                        drain_detail[f"{k}(0)"] += 1
+                    else:
+                        waitcnt_detail[f"{k}({v})"] += 1
             elif kind == "relaxed":
                 relaxed += 1
                 for k, v in cnts:
@@ -552,7 +614,8 @@ def audit(lines: list[str], start: int, end: int, max_stream: int,
         else:
             _cur = 0
     n_mfma_in_mv = mv.count("M")
-    print(f"hot loop: lines [{start + 1}, {end + 1}]  ({total} instructions)\n")
+    print(f"{region}: lines [{start + 1 + line_offset}, {end + 1 + line_offset}]  "
+          f"({total} instructions)  [file line numbers]\n")
 
     print("op-class symbol stream "
           "(M=mfma/wmma e=exp R=ldsRead W=ldsWrite g=gLoad G=gStore "
@@ -563,26 +626,38 @@ def audit(lines: list[str], start: int, end: int, max_stream: int,
     print("  " + s + "\n")
 
     print("histogram:")
+    prev_cls = (prev or {}).get("classes")
     for name, _sym, _rx in _CLASSES + [("other", ".", None)]:
-        if hist.get(name):
+        was = prev_cls.get(name, 0) if prev_cls is not None else None
+        if hist.get(name) or was:
             pct = 100.0 * hist[name] / total if total else 0.0
-            print(f"  {_SYMBOL.get(name, '.'):>1} {name:<10} {hist[name]:>5}  ({pct:4.1f}%)")
+            d = "" if was is None else (f"   {hist[name] - was:+d} vs prev" if hist[name] != was
+                                        else "    = prev")
+            print(f"  {_SYMBOL.get(name, '.'):>1} {name:<10} {hist[name]:>5}  ({pct:4.1f}%){d}")
+    if hist.get("scratch"):
+        print(f"  ({hist['scratch']} scratch_* op(s) in the {region}: register spill traffic -- see "
+              f"private_segment_fixed_size above)")
     print()
 
-    print_opcodes(opc, total, top_opcodes, prev_opcodes)
+    print_opcodes(opc, total, top_opcodes, prev_opcodes, region)
 
     wc_total = relaxed + full_drain
     print("memory-wait quality (s_waitcnt / s_wait_*cnt):")
-    print(f"  relaxed (cnt>0, pipelined) : {relaxed}")
-    print(f"  full-drain (cnt==0, serialized): {full_drain}")
+    print(f"  relaxed (every counter > 0, pipelined) : {relaxed}")
+    print(f"  full-drain (some counter == 0)         : {full_drain}")
+    if drain_detail:
+        print("  full drains per counter: " + ", ".join(f"{k}={n}" for k, n in sorted(drain_detail.items())))
+    share = 100.0 * full_drain / wc_total if wc_total else None
     if wc_total:
-        print(f"  -> {100.0 * full_drain / wc_total:.0f}% of memory waits are full drains")
+        print(f"  -> {share:.0f}% of memory waits are full drains (at least one counter at 0)")
+    if prev and prev.get("drain_pct") is not None and share is not None:
+        print(f"  drain share {prev['drain_pct']:.0f}% -> {share:.0f}% vs prev")
     if unknown_wait:
         print(f"  ({unknown_wait} wait(s) in an unrecognised form counted as drains -- PARSER "
               f"GAP, the ratio above is an upper bound; report the spelling)")
     if waitcnt_detail:
         top = ", ".join(f"{k}={n}" for k, n in waitcnt_detail.most_common(6))
-        print(f"  relaxed counts seen: {top}")
+        print(f"  non-zero counts seen: {top}")
     print(f"ALU-dependency waits (s_wait_alu / s_delay_alu): {alu_waits}")
     if alu_detail:
         top = ", ".join(f"{k}={n}" for k, n in alu_detail.most_common(4))
@@ -592,25 +667,30 @@ def audit(lines: list[str], start: int, end: int, max_stream: int,
           "not waitcnt relaxation.)")
     print()
 
-    print(f"producer<->consumer barriers in loop body: {barriers}")
+    print(f"producer<->consumer barriers in {'loop body' if region == 'hot loop' else region}: {barriers}")
     print()
     print("MFMA<->VALU interleave (pipeline schedule quality):")
     print(f"  MFMA<->VALU transitions: {mv_transitions}   (#MFMA in M/V stream: {n_mfma_in_mv})")
     print(f"  longest VALU-only run (no interleaved MFMA): {longest_v_run}")
     print("  (more transitions = finer interleave, but NOT automatically faster -- weigh")
     print("   against per-unit busy (PMC) + overhead classes; a long VALU-only run is an")
-    print("   exposed stretch no MFMA hides. Use kernel_breakdown.py to merge with PMC.)")
+    print("   exposed stretch no MFMA hides; parse_pmc.py gives the counters.)")
     print()
-    print("s_nop (exposed fixed-latency hazard, e.g. MFMA-write -> VALU-read):")
-    print(f"  count: {nops}   requested stall cycles: {nop_cycles}")
-    print("  (high s_nop => a fixed-latency hazard is NOT hidden; the fix is more")
-    print("   unroll/occupancy to fill it, NOT reorder -- reorder cannot create slack)")
+    print("s_nop (static encoding observations):")
+    print(f"  count: {nops}   raw immediate sum: {nop_immediate_sum}")
+    if nop_immediates:
+        counts = ", ".join(f"{value}={count}" for value, count in sorted(nop_immediates.items()))
+        print(f"  raw immediate counts: {counts}")
+    if nops != sum(nop_immediates.values()):
+        print(f"  unparsed immediates: {nops - sum(nop_immediates.values())}")
+    print("  (raw immediates are not measured stall time; no architecture-specific duration")
+    print("   formula is applied. Static presence alone does not establish a cause or fix.)")
     print()
-    print("VERDICT IS YOURS (signals only): scan the stream for an exposed single-class")
-    print("run with no interleaved M; ask whether any independent ready op could fill it")
-    print("(no => structural/no-slack; yes => scheduling miss). Many full drains =>")
-    print("conservative-waitcnt; barriers scaling with depth => excess-sync; high s_nop")
-    print("=> unhidden fixed-latency hazard (unroll/occupancy, not reorder). See")
+    print("VERDICT IS YOURS (signals only): inspect single-class runs and whether")
+    print("independent operations could be ready. For full drains, inspect outstanding")
+    print("dependencies; for barrier counts, inspect the synchronization protocol.")
+    print("Correlate these observations with runtime evidence before attributing a cause")
+    print("or choosing a change. Interpret s_nop with the target ISA and dependency context. See")
     print("compiler-contract.md ## Auditing the hot-loop schedule.")
 
 
@@ -651,7 +731,9 @@ def _selftest() -> int:
     # --- wait classification, both ISA spellings -------------------------------------
     # gfx9: counter named, value in parens
     assert classify_wait("s_waitcnt vmcnt(0) lgkmcnt(0)")[0] == "drain"
-    assert classify_wait("s_waitcnt vmcnt(0) lgkmcnt(3)")[0] == "relaxed"
+    assert classify_wait("s_waitcnt vmcnt(0) lgkmcnt(3)")[0] == "drain"      # VMEM fully drained
+    assert classify_wait("s_waitcnt vmcnt(7) lgkmcnt(0)")[0] == "drain"      # LDS fully drained
+    assert classify_wait("s_waitcnt vmcnt(7) lgkmcnt(3)")[0] == "relaxed"
     assert classify_wait("s_waitcnt_vscnt null, 0x0")[0] == "drain"
     # gfx11/12: counter in the mnemonic, hex or decimal immediate
     assert classify_wait("s_wait_dscnt 0x0")[0] == "drain"
@@ -696,15 +778,114 @@ def _selftest() -> int:
     assert kinds == Counter({"relaxed": 2, "drain": 1, "alu": 1}), kinds
     # WMMA counts as a matrix op, same as MFMA
     assert _count_mfma(rdna, s, e) == 1, _count_mfma(rdna, s, e)
+
+    # --- the LDS/CU divisor. Written so a WRONG value has to FAIL, which is stronger than
+    # agreeing with a right one: the constant this file used to default to (65536) is correct
+    # on gfx942, so any check that only looks at gfx942 passes under the bug. The inequality
+    # and the two None cases are what reject it.
+    assert lds_per_cu(None) is None, lds_per_cu(None)
+    assert lds_per_cu("") is None
+    # --- kernel selection: the audited object and the label must be the same thing -------
+    _two = ["\t.type\tk_main,@function", "k_main:", "\tv_mfma_f32_16x16x16f16 a[0:3], v0, v1, a[0:3]",
+            "\t.amdhsa_kernel k_main", "\t.amdhsa_next_free_vgpr 128", "\t.end_amdhsa_kernel",
+            "\t.type\tk_tail,@function", "k_tail:", "\tglobal_load_dwordx4 v[0:3], v[4:5], off",
+            "\t.amdhsa_kernel k_tail", "\t.amdhsa_next_free_vgpr 16", "\t.end_amdhsa_kernel",
+            ".amdgpu_metadata", "  - .name: k_main", "  - .name: k_tail"]
+    _ks = kernels_in_asm(_two)
+    assert [n for n, _, _ in _ks] == ["k_main", "k_tail"], _ks
+    # the metadata tail must not invent extra spans
+    assert len(_ks) == 2, _ks
+    # each span holds its OWN register budget -- the pre-fix whole-file scan maxed across both
+    assert kd_regs(_two[_ks[0][1]:_ks[0][2]])["vgpr"] == 128
+    assert kd_regs(_two[_ks[1][1]:_ks[1][2]])["vgpr"] == 16
+    try:
+        kd_regs(_two)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("multi-kernel resource analysis must refuse instead of mixing counts")
+    # a unique substring selects; the label comes from the same call that narrows the lines
+    _sel, _nm = select_kernel(_two, "tail")
+    assert _nm == "k_tail" and kd_regs(_sel)["vgpr"] == 16, (_nm, _sel)
+    # ambiguity and absence both REFUSE rather than pick
+    for _bad in (None, "k_"):
+        try:
+            select_kernel(_two, _bad)
+        except SystemExit as _e:
+            assert "k_main" in str(_e) and "k_tail" in str(_e), _e
+        else:
+            raise AssertionError(f"select_kernel({_bad!r}) should have refused")
+    # a single-kernel dump needs no selector and still yields its name
+    _one = _two[:6]
+    assert select_kernel(_one, None)[1] == "k_main"
+    # an unnamed excerpt is auditable but unlabelled -- not an error
+    assert select_kernel(["\tv_mfma_f32_16x16x16f16 a[0:3], v0, v1, a[0:3]"], None) == (
+        ["\tv_mfma_f32_16x16x16f16 a[0:3], v0, v1, a[0:3]"], None)
+    assert lds_per_cu("gfx942") == 65536, lds_per_cu("gfx942")
+    assert lds_per_cu("gfx950") == 163840, lds_per_cu("gfx950")
+    assert lds_per_cu("gfx942") != lds_per_cu("gfx950"), "a constant divisor is the bug"
+    assert lds_per_cu("gfx9999") is None, lds_per_cu("gfx9999")
+    # The MISS path, exercised with the shared model absent. Every assertion above reaches this
+    # function only while `_OCC` is importable, so its fallback `return` is unreachable from
+    # them and a literal parked there passes the lot -- which is exactly the shape of the
+    # default this file used to carry. The packs that ship without `amd_occupancy.py` take this
+    # path EXCLUSIVELY, so it is the one place a default does its damage and the one place
+    # nothing was looking.
+    _saved_occ = _OCC
+    try:
+        globals()["_OCC"] = None
+        assert lds_per_cu("gfx942") is None, (
+            f"with the occupancy model absent, lds_per_cu must return None, got "
+            f"{lds_per_cu('gfx942')} -- a numeric fallback here is a guess wearing a fact's hat")
+        assert lds_per_cu("gfx950") is None
+    finally:
+        globals()["_OCC"] = _saved_occ
+    assert _OCC is _saved_occ
+    # The AGPR label keys off the ISA family. Pin the classification AND the vocabulary it
+    # rests on: `startswith("cdna")` is only correct while every CDNA-lineage family name
+    # begins "cdna", so a new family added upstream must fail here rather than be labelled
+    # RDNA-like by silent fall-through.
+    # The RULE, not just its ingredient: assert _is_cdna_family directly, or `is_cdna = True`
+    # passes every family_for check below while labelling every RDNA dump as CDNA.
+    assert _is_cdna_family("gfx942") and _is_cdna_family("gfx950")
+    assert _is_cdna_family("gfx1250"), "gfx1250 is CDNA-lineage (family 'cdna5')"
+    if _OCC:
+        assert not _is_cdna_family("gfx1100"), "RDNA has a separate AGPR-free register file"
+        assert not _is_cdna_family("gfx1201")
+        assert _is_cdna_family("gfx0000"), "an arch with no family keeps the prior default"
+        _fam = _OCC.family_for
+        assert all((_fam(a) or "").startswith("cdna") for a in ("gfx942", "gfx950", "gfx1250")), \
+            [(a, _fam(a)) for a in ("gfx942", "gfx950", "gfx1250")]
+        assert not any((_fam(a) or "").startswith("cdna") for a in ("gfx1100", "gfx1201")), \
+            [(a, _fam(a)) for a in ("gfx1100", "gfx1201")]
+        assert set(_OCC.MODELS) == {"cdna", "cdna5", "rdna"}, (
+            f"ISA family vocabulary changed: {sorted(_OCC.MODELS)}. The AGPR label above is a "
+            f"cdna-prefix test -- classify the new family before shipping, or it reads as RDNA.")
+
     print("[asm_loop_audit] SELFTEST PASS")
     return 0
 
 
+def _line_offset(orig: list[str], sel: list[str], idx: int) -> int:
+    """Kernel selection rebuilds the line list (module target + one body + its descriptor), so
+    indices into it are not file lines. Map the anchor line `sel[idx]` (the loop label) back to
+    the file; 0 when it cannot be located uniquely."""
+    if not (0 <= idx < len(sel)) or sel is orig:
+        return 0
+    hits = [i for i, ln in enumerate(orig) if ln == sel[idx]]
+    return hits[0] - idx if len(hits) == 1 else 0
+
+
 def main() -> None:
+    if "--help-full" in sys.argv:          # one card; --help-full is accepted as an alias
+        sys.argv = [x for x in sys.argv if x != "--help-full"] + ["--help"]
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("asm", help="stripped .s (or .amdgcn) file from dump_ir.sh")
     ap.add_argument("--loop-label", help="force a specific loop back-edge label")
+    # A module with several kernels has no safe default pick: see select_kernel.
+    ap.add_argument("--kernel", default=None, metavar="NAME",
+                    help="kernel to audit (unique substring); required when the dump holds several")
     ap.add_argument("--max-stream", type=int, default=400,
                     help="truncate the printed symbol stream to N symbols (default 400)")
     # nargs="?" because the docs describe this as "LDS bytes/WG come from --meta", which
@@ -712,38 +893,76 @@ def main() -> None:
     # "expected one argument", and lost the LDS read for that round. The bare form now
     # means what the help already promised: look next to <asm>.
     ap.add_argument("--meta", nargs="?", const="",
-                    help="Triton cache metadata .json (or a dir to scan) for the LDS "
-                         "bytes/WG. Bare `--meta`, or omitted, defaults to the dir holding "
-                         "<asm>. The KD and rocprof-compute both report 0 LDS for Triton -- "
-                         "this is the only correct source.")
+                    help="Triton metadata .json or dir for LDS bytes/WG (metadata.shared; the KD "
+                         "reads 0 for launch-sized LDS). Bare/omitted: manifest or same-stem json")
     # The old help said "CDNA gfx942/gfx950 64 KiB", which is wrong and contradicts this
-    # pack's own arch cards: gfx950 has 160 KiB/CU. Left as a flag, but derivable from --arch.
+    # pack's own arch cards: gfx950 has 160 KiB/CU.
     ap.add_argument("--arch", default=None,
-                    help="gfx942 / gfx950 / ... -- used to pick the LDS-per-CU divisor")
+                    help="target when the dump names none (its .amdgcn_target wins)")
+    # There is NO default here, and the help must not promise one: the help and the behaviour
+    # have to say the same thing. Fixing the prose while leaving a 65536 fallback in place is
+    # worse than fixing neither, because it makes the reader trust the number.
     ap.add_argument("--lds-per-cu", type=int, default=None,
-                    help="LDS bytes per CU. Default is derived from --arch "
-                         "(gfx942 65536, gfx950 163840); 65536 if neither is given.")
+                    help="LDS bytes/CU for an unknown target (no default: WG/CU is withheld)")
     ap.add_argument("--opcodes", type=int, default=12, metavar="N",
-                    help="rows in the per-MNEMONIC hot-loop histogram (default 12, 0 = off). "
-                         "The op-CLASS histogram is one level too coarse to pick a lever from")
+                    help="rows in the per-mnemonic histogram (default 12, 0 = off)")
     ap.add_argument("--diff", metavar="PREV.TXT",
-                    help="a previous run's stdout -> per-opcode delta round-over-round")
+                    help="a previous run's stdout -> per-opcode, op-class and drain-share deltas")
     a = ap.parse_args()
+    if a.lds_per_cu is not None and a.lds_per_cu <= 0:
+        ap.error(f"--lds-per-cu must be a positive byte count, got {a.lds_per_cu}")
+    # A --diff file that cannot be read used to produce a report with no deltas, which reads the
+    # same as "nothing moved since the previous round".
+    if a.diff is not None and not Path(a.diff).is_file():
+        ap.error(f"--diff {a.diff!r} is not a readable file (save the previous run's stdout first)")
 
     try:
-        lines = open(a.asm).read().splitlines()
+        lines = Path(a.asm).read_text().splitlines()
     except OSError as e:
         sys.exit(f"cannot read {a.asm!r}: {e}")
 
     # KD register budget (vgpr/sgpr/accum) is a whole-file fact -- print it FIRST, before the
     # loop check, so a loop-less kernel (e.g. a trivial reduction) still yields the vgpr occupancy
     # driver instead of exiting empty. The loop schedule audit is separate and may be absent.
-    print(f"=== asm loop audit: {a.asm} ===\n")
-    print_kd_regs(lines)
+    # SELECT FIRST. Every reading below (register budget, LDS, loop pick, histogram) is a
+    # whole-`lines` scan, so narrowing here is what keeps the audited object and the printed
+    # label the same thing. They used to come from different places: the heading named the
+    # file, the LDS line named whichever kernel had the most shared memory, and the loop picker
+    # scored loops from every kernel at once.
+    # `.amdgcn_target` precedes the first kernel, so read the arch from the whole module
+    # BEFORE narrowing -- it is a property of the build, not of the kernel picked.
+    _arch = (_OCC.arch_from_asm("\n".join(lines)) if _OCC else None) or a.arch
+    orig_lines = lines
+    try:
+        lines, kname = select_kernel(lines, a.kernel)
+    except ValueError as exc:
+        # Inconsistent descriptors/metadata/code (e.g. several modules concatenated into one
+        # file) leave no trustworthy kernel identity; refuse with a message, not a traceback.
+        ap.error(f"cannot identify one kernel in {a.asm}: {exc}. Audit a single module's "
+                 f"assembly (one dump_ir.sh output or one llvm-objdump of a code object).")
+    print(f"=== asm loop audit: {a.asm}"
+          + (f"  [kernel: {kname}]" if kname else "  [single unnamed object]") + " ===\n")
+    print_kd_regs(lines, _arch)
     # The register file is only ONE of the two occupancy limiters; print the LDS one next to it
     # so they are never reasoned about separately.
-    _lds = a.lds_per_cu if a.lds_per_cu else lds_per_cu(a.arch)
-    print_lds_budget(a.meta or os.path.dirname(os.path.abspath(a.asm)), _lds)
+    # Precedence: an explicit figure (the caller read it off the part) > --arch > the target
+    # the dump names itself. If none of the three lands, `_lds` is None and the WGs/CU verdict
+    # is withheld -- it is NOT backfilled with a constant.
+    if a.lds_per_cu:
+        _lds, _src = a.lds_per_cu, "--lds-per-cu"
+    else:
+        _lds, _src = lds_per_cu(_arch), _arch
+    records = None
+    if not a.meta:
+        from amd_artifacts import inspect_artifact
+        try:
+            _name, metadata, _bound = inspect_artifact(a.asm, kernel=a.kernel)
+        except (ValueError, OSError) as exc:
+            ap.error(str(exc))
+        records = []
+        if (metadata and type(metadata.get('shared')) is int and metadata['shared'] >= 0):
+            records = [(metadata['name'], metadata['shared'])]
+    print_lds_budget(a.meta, _lds, _src, kname, records=records)
 
     loops = find_loops(lines)
     picked = pick_loop(lines, loops, a.loop_label)
@@ -766,12 +985,15 @@ def main() -> None:
               "per-iteration histogram.\n")
         print(f"--- kernel body @ {name} (no loop) ---\n")
         audit(lines, start, end, a.max_stream, a.opcodes,
-              parse_opcodes(a.diff) if a.diff else None)
+              parse_opcodes(a.diff) if a.diff else None,
+              _line_offset(orig_lines, lines, start - 1), parse_prev(a.diff) if a.diff else None,
+              region="kernel body")
         return
     lab, start, end = picked
     print(f"--- hot loop @ {lab} ---\n")
     audit(lines, start, end, a.max_stream, a.opcodes,
-          parse_opcodes(a.diff) if a.diff else None)
+          parse_opcodes(a.diff) if a.diff else None,
+          _line_offset(orig_lines, lines, start - 1), parse_prev(a.diff) if a.diff else None)
 
 
 if __name__ == "__main__":

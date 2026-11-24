@@ -37,17 +37,22 @@ def analyze(text, *, arch=None, vgpr=None, lds_bytes=None, workgroup_size=None,
     counts = [
         (vgpr, 'caller combined allocation'),
         (_integer(text, r'^\s*\.amdhsa_next_free_vgpr\s+(\d+)'), 'kernel descriptor'),
-        (_integer(text, r'^;\s*TotalNumVgprs:\s*(\d+)'), 'LLVM TotalNumVgprs'),
+        (_integer(text, r'^\s*;\s*TotalNumVgprs:\s*(\d+)'), 'LLVM TotalNumVgprs'),
         (_metadata(text, 'vgpr_count'), 'AMDHSA combined vgpr_count'),
     ]
     combined, sources['vgpr_combined'] = next(((n, src) for n, src in counts if n is not None),
                                              (None, 'missing'))
-    arch_vgpr = _integer(text, r'^;\s*NumVgprs:\s*(\d+)')
+    arch_vgpr = _integer(text, r'^\s*;\s*NumVgprs:\s*(\d+)')
     if arch_vgpr is None:
         arch_vgpr = _integer(text, r'^\s*\.set\s+\S*num_vgpr,\s*(\d+)')
     agpr = _metadata(text, 'agpr_count')
     if agpr is None:
-        agpr = _integer(text, r'^;\s*NumAgprs:\s*(\d+)')
+        agpr = _integer(text, r'^\s*;\s*NumAgprs:\s*(\d+)')
+    accum_offset = _integer(text, r'^\s*\.amdhsa_accum_offset\s+(\d+)')
+    if accum_offset is None:
+        accum_offset = _integer(text, r'^\s*;\s*AccumOffset\s*:\s*(\d+)')
+    if agpr is None and accum_offset is not None and combined is not None:
+        agpr = max(0, combined - accum_offset)
     if arch_vgpr is None and agpr == 0:
         arch_vgpr = combined
     sources['vgpr_arch'] = 'LLVM architectural count' if arch_vgpr is not None else 'missing'
@@ -113,7 +118,12 @@ def analyze(text, *, arch=None, vgpr=None, lds_bytes=None, workgroup_size=None,
     spill = _integer(text, r'^\s*\.amdhsa_private_segment_fixed_size\s+(\d+)')
     if spill is None:
         spill = _metadata(text, 'private_segment_fixed_size')
-    return {'arch': arch, 'wave_size': wave, 'vgpr_arch': arch_vgpr, 'agpr': agpr,
+    if spill is None:
+        spill = _integer(text, r'^\s*;\s*ScratchSize\s*:\s*(\d+)')
+    sgpr = _integer(text, r'^\s*\.amdhsa_next_free_sgpr\s+(\d+)')
+    if sgpr is None:
+        sgpr = _metadata(text, 'sgpr_count')
+    return {'sgpr': sgpr, 'accum_offset': accum_offset, 'arch': arch, 'wave_size': wave, 'vgpr_arch': arch_vgpr, 'agpr': agpr,
             'vgpr_combined': combined, 'spill_bytes': spill, 'kernel_name': kernel_name,
             'wg_size': workgroup_size, 'wg_size_compile_bound': bound,
             'lds_bytes_per_wg': lds_bytes, 'lds_capacity_scope': 'CU' if occupancy.lds_per_cu(arch) else None,
@@ -121,3 +131,8 @@ def analyze(text, *, arch=None, vgpr=None, lds_bytes=None, workgroup_size=None,
             'wg_per_cu_by_vgpr': wg_reg, 'wg_per_cu_by_lds': wg_lds,
             'waves_source': source, 'waves_warning': warning, 'lds_detail': detail,
             'sources': sources}
+
+
+if __name__ == "__main__":
+    print("amd_resources.py: library (analyze(asm_text, ...)) used by probe.py, asm_loop_audit.py and others; "
+          "no CLI. For a compiled kernel run `probe.py measure --dir <ir> --arch <gfx>`.")

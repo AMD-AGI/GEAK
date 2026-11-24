@@ -97,7 +97,7 @@ are datasheet numbers, not peaks measured on this box, so label the denominator 
 | 256        | 5              |
 
 Re-derive on a new ROCm with
-`perf_knowledge/expert_skills/skills/gluon_authoring/scripts/amd_occupancy.py --compiler-sweep --arch gfx1100`.
+`kernel_workflow/scripts/kernel_tools/amd_occupancy.py --compiler-sweep --arch gfx1100`.
 
 ## 3. Matrix ISA: gfx11 WMMA
 

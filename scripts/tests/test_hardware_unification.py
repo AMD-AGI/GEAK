@@ -32,7 +32,7 @@ def context_file(tmp_path, name='MI308X', cu=80):
 def test_legacy_consumers_use_shared_occupancy_and_data():
     script = f'''
 import sys
-sys.path.insert(0, {str(PACK / 'scripts')!r})
+sys.path.insert(0, {str(KT)!r})
 import amd_occupancy, probe, asm_loop_audit
 from pathlib import Path
 assert Path(amd_occupancy.__file__).resolve() == Path({str(KT / 'amd_occupancy.py')!r})
