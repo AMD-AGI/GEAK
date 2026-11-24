@@ -18,6 +18,7 @@ def test_maps_triton_as_source_and_injects_geak_paths(tmp_path):
     kernel.mkdir()
     config = RUNNER.make_config({
         "kernel_path": str(kernel),
+        "root_dir": str(tmp_path),
         "exp_root": str(tmp_path / "out"),
         "target_language": "triton",
         "budget_s": 7200,
@@ -49,6 +50,7 @@ def test_normalizes_natural_language_gpu_list_and_defaults(tmp_path):
     kernel.mkdir()
     args = RUNNER.make_config({
         "kernel_path": str(kernel),
+        "root_dir": str(tmp_path),
         "gpu_ids": [1],
     })["args"]
 
@@ -203,3 +205,19 @@ def test_rejects_a_location_outside_a_complete_geak_checkout(tmp_path, monkeypat
     with pytest.raises(ValueError, match="complete GEAK checkout"):
         RUNNER.make_config({"kernel_path": str(kernel)})
 
+
+def test_root_dir_is_required_when_the_default_would_be_the_filesystem_root(
+        tmp_path, monkeypatch):
+    kernel = tmp_path / "kernel"
+    kernel.mkdir()
+    monkeypatch.setattr(RUNNER, "ROOT", Path("/nonexistent-geak-checkout"))
+    with pytest.raises(ValueError, match="root_dir is required"):
+        RUNNER.default_root_dir(kernel)
+
+
+def test_explicit_root_dir_is_used_as_given(tmp_path):
+    kernel = tmp_path / "kernel"
+    kernel.mkdir()
+    for root in ("/", str(tmp_path)):
+        config = RUNNER.make_config({"kernel_path": str(kernel), "root_dir": root})
+        assert config["root_dir"] == str(Path(root).resolve())

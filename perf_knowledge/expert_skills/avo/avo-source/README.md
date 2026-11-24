@@ -148,8 +148,10 @@ Omitted operator fields normalize to `operator="team"`,
 path is rejected. A relative `exp_root` is resolved against the current
 directory; give an absolute path outside `<GEAK>`, or omit it to use
 `<GEAK>-runs/avo-source`. `root_dir` (the agents' working directory) defaults to
-the common parent of `<GEAK>` and `kernel_path`; set it explicitly when you want
-a narrower or a specific directory.
+the common parent of `<GEAK>` and `kernel_path`. When the two are on different
+top-level directories that common parent would be `/`; the wrapper then stops
+and asks for an explicit `root_dir`. Set it explicitly whenever you want a
+narrower or a specific directory.
 
 Validate without agents or a GPU:
 

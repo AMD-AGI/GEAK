@@ -20,7 +20,9 @@ The helper resolves the portable paths in `handoff.json` and delegates to
 to the output directory and optimizes that copy. Results and campaign output are
 written outside the GEAK checkout under the sibling directory
 `<GEAK>-runs/avo-examples/<case>/{kernel,.avo,runs}`.
-Set `AVO_EXAMPLE_RUNS_ROOT` to override that output root.
+Set `AVO_EXAMPLE_RUNS_ROOT` to override that output root. If that root is on a
+different top-level directory from `<GEAK>`, add `root_dir` to the case's
+`handoff.json`.
 
 ## Launch a campaign
 

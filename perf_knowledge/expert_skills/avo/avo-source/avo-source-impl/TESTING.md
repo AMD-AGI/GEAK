@@ -155,6 +155,8 @@ python3 run_geak_avo.py handoff.json result.json
 
 `budget_s: 900` is a 15-minute smoke; raise it once green. Pick the GPU with
 `rocm-smi`.
+If `<COPY>` and `<GEAK>` are on different top-level directories, add `root_dir`
+to the handoff.
 
 Pre-flight (fair baseline + idle GPU):
 ```bash

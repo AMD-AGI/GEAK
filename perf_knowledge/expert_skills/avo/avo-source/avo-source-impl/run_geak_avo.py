@@ -85,6 +85,20 @@ def check_geak_layout() -> None:
         )
 
 
+def default_root_dir(kernel: Path) -> str:
+    """Agents' working directory when the handoff does not name one."""
+    resolved = kernel.resolve()
+    common = os.path.commonpath([str(ROOT), str(resolved)])
+    if common == os.path.sep:
+        raise ValueError(
+            f"root_dir is required: {ROOT} and kernel_path {resolved} share no "
+            "parent directory below /, so the default would be the whole "
+            "filesystem; set root_dir in the handoff to the directory the "
+            "agents should work in"
+        )
+    return common
+
+
 def make_config(handoff: dict) -> dict:
     kernel = Path(str(handoff.get("kernel_path") or "")).expanduser()
     if not kernel.is_absolute() or not kernel.exists():
@@ -159,8 +173,7 @@ def make_config(handoff: dict) -> dict:
             or Path.home()
         ),
         "root_dir": str(Path(str(
-            handoff.get("root_dir")
-            or os.path.commonpath([str(ROOT), str(kernel.resolve())])
+            handoff.get("root_dir") or default_root_dir(kernel)
         )).resolve()),
         "model": str(handoff.get("model") or os.environ.get("GEAK_CLAUDE_MODEL") or ""),
         "agent_timeout_ms": int(handoff.get("agent_timeout_ms") or 2_400_000),
