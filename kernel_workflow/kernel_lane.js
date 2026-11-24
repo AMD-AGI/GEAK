@@ -86,6 +86,41 @@ if (EXPECTED_GFX === 'gfx1100' && EXPECTED_TARGET !== 'w7900') {
     'no other gfx1100 product is validated');
 }
 const BUDGET = parseInt(A.budget != null ? A.budget : 6, 10);
+// Optional hard cap on optimization rounds (0 / absent = no cap, i.e. unchanged behaviour). Budget
+// alone does not bound the round count: the TechLead may spend a budget of 2 as one round of two
+// directions or as two rounds of one, which roughly doubles the wall time.
+const MAX_ROUNDS = (() => {
+  const v = parseInt(A.max_rounds != null ? A.max_rounds : 0, 10);
+  return Number.isFinite(v) && v > 0 ? v : Infinity;
+})();
+// fast_mode (opt-in, for time-boxed runs such as workshops; absent/false = unchanged behaviour):
+//  - after the FINAL round, skip the re-profile and the cross-round memory update; their output
+//    only feeds a next round that will not happen;
+//  - give optimize engineers a wall-clock time box (engineer_minutes, default 6). Engineers stop on
+//    stalled STEPS (role + self_monitoring), not on time, and in practice reach most of their gain
+//    early: on an fp32 GEMM they had ~95% of their final speedup after ~5 min and spent the next
+//    ~20 min on <1%. A workflow script has no clock, so the box is enforced by the engineer reading
+//    `date +%s` -- a firm instruction, not a hard kill.
+const FAST_MODE = String(A.fast_mode != null ? A.fast_mode : 'false').trim().toLowerCase() === 'true';
+const ENGINEER_MINUTES = Math.max(1, parseFloat(A.engineer_minutes != null ? A.engineer_minutes : 6));
+function fastModeEngineerBlock(outDir) {
+  if (!FAST_MODE) return '';
+  const secs = Math.round(ENGINEER_MINUTES * 60);
+  return `
+
+## FAST MODE -- HARD TIME BOX (overrides the "Iterate" step and the self-monitoring stop rules)
+1. Your FIRST command: \`date +%s > ${outDir}/.t0\`
+2. Keep your current best kernel IN KERNEL_PATH (the workspace source file), never only in /tmp or a
+   scratch copy, and re-save best_patch.diff the moment your best improves.
+3. Before starting EACH new experiment run \`echo $(( $(date +%s) - $(cat ${outDir}/.t0) ))\`.
+   If it prints >= ${secs} (${ENGINEER_MINUTES} min), STOP experimenting.
+4. Also STOP when your last 3 benchmarked attempts together improved your best by < 3%, or after
+   3 consecutive attempts that failed correctness or were slower.
+5. Iterate with the quick BENCHMARK command; run FULL_BENCHMARK once, on your final best only.
+6. On STOP: workspace holds the best kernel, CORRECTNESS passes, best_patch.diff is saved AND non-empty
+   (check \`wc -c ${outDir}/best_patch.diff\`; an empty patch is DISCARDED by verify) -> return
+   the worker_result immediately. A correct result on time beats a marginally faster one delivered late.`;
+}
 // Minimum verified geomean improvement over the cumulative best for a round winner to be COMMITTED
 // into the canonical workspace (default 2%). Kept as a knob rather than a hard-coded constant so the
 // gate is tunable per run (e.g. raise it on a noisy box, lower it to bank small compounding wins).
@@ -125,7 +160,11 @@ const DEEP_COST = (() => {
   const v = parseInt(A.deep_cost != null ? A.deep_cost : 2, 10);
   return Number.isFinite(v) && v >= 1 ? v : 2;
 })();
-const GPU_IDS = String(A.gpu_ids != null ? A.gpu_ids : '0');
+// PD gpu_ids `decode:3`: every GPU_ID passed on names the engine again.
+const GPU_IDS_ARG = String(A.gpu_ids != null ? A.gpu_ids : '0').trim();
+const GPU_ENGINE = (/^([\w.-]+):(?=\d)/.exec(GPU_IDS_ARG) || [])[1] || '';
+const onEngine = spec => (GPU_ENGINE && spec ? `${GPU_ENGINE}:${spec}` : spec);
+const GPU_IDS = GPU_ENGINE ? GPU_IDS_ARG.slice(GPU_ENGINE.length + 1) : GPU_IDS_ARG;
 const GPU_LIST = GPU_IDS.split(',').map(s => s.trim()).filter(Boolean);
 // Every GPU consumer gets the WHOLE pool rather than a pinned lane. gpu_lock.sh
 // resolves a comma spec by flocking whichever lane is free AND idle at acquire
@@ -203,9 +242,9 @@ let GPU_POOL = '';
 let GPU_SINGLE = '';
 function applyGpuResource(r) {
   GPU_RESOURCE = r;
-  GPU_JOB = r.jobSpec;
-  GPU_POOL = GPU_JOB || (GPU_MODE === 'pin' ? GPU_LIST[0] : GPU_LIST.join(','));
-  GPU_SINGLE = GPU_JOB || GPU_LIST[0];
+  GPU_JOB = onEngine(r.jobSpec);
+  GPU_POOL = GPU_JOB || onEngine(GPU_MODE === 'pin' ? GPU_LIST[0] : GPU_LIST.join(','));
+  GPU_SINGLE = GPU_JOB || onEngine(GPU_LIST[0]);
 }
 applyGpuResource(resolveGpuRequest(A, GPU_LIST));
 const TASK = A.task || '';
@@ -2957,7 +2996,7 @@ if (EVO && !(await EVO.initialize())) {
 }
 
 let plannerStopReason = '';
-while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
+while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE && round < MAX_ROUNDS) {
   // --- (0) HARD STOP: no new round may START past the deadline ----------
   // Checked BEFORE round++ so an expired check does not inflate the round count. The in-flight round
   // is never interrupted — a killed round leaves a half-verified patch and no report.
@@ -3087,7 +3126,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE) {
     ...d,
     idx: i,
     id: d.id || `r${round}_d${i}`,
-    gpu_id: GPU_MODE === 'pin' && !GPU_JOB ? GPU_LIST[i % GPU_LIST.length] : GPU_POOL,
+    gpu_id: GPU_MODE === 'pin' && !GPU_JOB ? onEngine(GPU_LIST[i % GPU_LIST.length]) : GPU_POOL,
     out_dir: `${EVAL_DIR}/round_${round}/engineer_${i}`,
   }));
   // deep_explore is a DEDICATED-ROUND, heavyweight mandate: if the plan includes one, run ONLY it this
@@ -3175,7 +3214,8 @@ ${cfg({
 Return ONLY the worker_result.json structure as StructuredOutput.` +
       // Built inline, not via roleAgent(), so the injection has to be appended here too.
       expertSkillsBlock(isDeep ? 'deep_engineer' : 'engineer') +
-      (EVO ? `\n\nAlso Read ${WORKFLOW_DIR}/../evo/roles/engineer.md for the selected-parent and donor contract.` : ''),
+      (EVO ? `\n\nAlso Read ${WORKFLOW_DIR}/../evo/roles/engineer.md for the selected-parent and donor contract.` : '') +
+      fastModeEngineerBlock(d.out_dir),
       { phase: 'Optimize', label: `${isDeep ? 'deep' : 'eng'} ${d.id}:${d.specialty}`, schema: ENG_SCHEMA }, route
     ).then((eng) => ({ d, eng, route }));
     },
@@ -3557,12 +3597,16 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`;
 
       // --- (f) Re-profile the new best (only with args.profile='on') -------
       if (PROFILE_ON) {
-        profileSummary = await agentT(
-          roleAgent('profile_engineer', 'reprofile', 'Re-profile the new best and explain the bottleneck shift.', {
-            WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: round,
-            COMMANDMENT, PREVIOUS_METRICS: profileSummary, ...COUNTER_INPUTS,
-          }),
-          { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
+        if (FAST_MODE && (dispatched >= BUDGET || round >= MAX_ROUNDS)) {
+          log(`  [fast_mode] last round (${round}) -- skipping the re-profile.`);
+        } else {
+          profileSummary = await agentT(
+            roleAgent('profile_engineer', 'reprofile', 'Re-profile the new best and explain the bottleneck shift.', {
+              WORKSPACE: CANONICAL, EVAL_DIR, SKILL_DIR: WORKFLOW_DIR, GPU_ID: GPU_POOL, ROUND: round,
+              COMMANDMENT, PREVIOUS_METRICS: profileSummary, ...COUNTER_INPUTS,
+            }),
+            { phase: 'Optimize', label: `reprofile r${round}`, schema: PROFILE_SCHEMA });
+        }
       }
     } else {
       // eikos v2 E1 (R4 round-4 / Astra re-review #4): ABORT-AND-QUARANTINE (replaces round-3 recovery). The
@@ -3679,7 +3723,7 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`;
   }
 
   // --- update cross-round memory (insight blackboard + hypothesis ledger)
-  const mem = await agentT(
+  const mem = (FAST_MODE && (dispatched >= BUDGET || round >= MAX_ROUNDS)) ? null : await agentT(
     roleAgent('tech_lead', 'update_memory', 'Distill durable insights + update the hypothesis ledger.', {
       EVAL_DIR, ROUND: round, SKILL_DIR: WORKFLOW_DIR,
       ROUND_RESULTS: clean.map(r => ({ id: r.d.id, title: r.d.title, specialty: r.d.specialty,

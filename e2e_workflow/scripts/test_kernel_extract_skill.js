@@ -24,6 +24,7 @@ const carryFor = new Function('WORKLOAD_KIND', 'WORKLOAD_SPEC', `
   const profile = null, strategy = null, tuning = null, history = {};
   const headQueue = [], kernelQueue = [], acceptedHeads = [], flaggedHeads = [];
   const acceptedKernels = [], pendingIntegrations = [];
+  const MN_SPEC = null, IS_PD = false, pdOut = () => ({});
   ${carry}
   return carryState;
 `);
@@ -35,6 +36,7 @@ const make = new Function('A', 'process', `
   const E2E_LEARNED_KB_ENABLED = false, ARCH_CONSTRAINTS = '', cfg = o => JSON.stringify(o);
   const expertSkillsBlock = () => '', warmStartBlock = () => '';
   const correctnessEnvBlock = () => '', workloadIdentityBlock = () => '';
+  const SERVING_TOPOLOGY = '', IS_PD = false, MN = null, MN_SPEC = null, pdOut = () => ({}), pdFragmentBlock = () => '', mnRoleBlock = () => '';
   ${settings}
   ${measurementSettings}
   ${captureSettings}
