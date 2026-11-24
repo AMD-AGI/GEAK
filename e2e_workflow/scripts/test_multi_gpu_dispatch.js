@@ -6,7 +6,7 @@
 //
 //   1. The AgentX extractor's prompt and inputs are main's (A23): the arguments e2e reads, the
 //      kernel_extractor:prepare inputs and every rendered role prompt equal those of main's
-//      e2e_workflow.js (b3bb4e22) under the same arguments. A multi-rank UT leases SERVING_GPU, which
+//      e2e_workflow.js (7681c9f5) under the same arguments. A multi-rank UT leases SERVING_GPU, which
 //      the UT module's own documents say; the workflow adds nothing for it.
 //   2. makeSem refuses a request its pool can never hold instead of waiting forever.
 //   3. After the envelope / carried state is read, a multi-GPU candidate whose path in this run cannot
@@ -17,7 +17,7 @@
 //      lane reads the UT's time limit from the task. Single-GPU candidates keep byte-identical call objects.
 //
 // The code under test is EXTRACTED from the real source and run against stubs. main's e2e_workflow.js
-// is read from $GEAK_MAIN_TREE, else `git show b3bb4e22:`, else /src/commits/b3bb4e22; without any of
+// is read from $GEAK_MAIN_TREE, else `git show 7681c9f5:`, else /src/commits/7681c9f5; without any of
 // them section 1 compares with pinned digests of main's renderings.
 //
 // Run:  node e2e_workflow/scripts/test_multi_gpu_dispatch.js
@@ -30,7 +30,7 @@ const { execFileSync } = require('child_process');
 const ROOT = path.resolve(__dirname, '..');
 const src = fs.readFileSync(path.join(ROOT, 'e2e_workflow.js'), 'utf8');
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-const MAIN_COMMIT = 'b3bb4e22';
+const MAIN_COMMIT = '7681c9f5';
 const E2E_REL = 'e2e_workflow/e2e_workflow.js';
 function readMain() {
   const sources = [];
@@ -68,6 +68,13 @@ const makeSemSrc = between('function makeSem(', '\n// ---- Multi-GPU candidates'
 const helpers = between('// ---- Multi-GPU candidates', '// ---- SINGLE-KERNEL PASS-THROUGH');
 const phaseSelector = between('const PHASES =', 'const ST = A.state');
 const reuse = between('function preparedUtDefect(', '\n// abDone ==');
+// main's PD/multinode helpers the lanes call; the harnesses run them single-node (SERVING_TOPOLOGY '').
+const pdConsts = between('const IS_PD =', 'const MN_PY');
+const pdHelpers = between('// The one PD_KINDS x PD_ROLES walk', 'function roleAgent(');
+const engineHelpers = ['function engineWorkload(', 'function captureShard(', 'function engineRegimes(']
+  .map((start) => between(start, '\n}\n') + '\n}\n').join('');
+const singleNode = `${pdConsts}${pdHelpers}\n${engineHelpers}`;
+const SINGLE_NODE_ENV = { SERVING_TOPOLOGY: '', SERVING_TP: 4, SERVING_GPU: '4,5,6,7', curPd: { prefill: {}, decode: {} } };
 
 // A validated 4-rank task as agentx_kernel_preparation.mjs packs it (cf. /ci wf_neg_mimo_tp4).
 function multiRank(name, phase = 'extract', extra = {}) {
@@ -94,7 +101,7 @@ function singleGpu(name, phase = 'extract') {
   const argsRead = (text) => [...new Set([...text.matchAll(/(?<![\w$.])A\s*(?:\?\.|\.)\s*([A-Za-z_$][\w$]*)/g)].map((m) => m[1])
     .concat([...text.matchAll(/(?<![\w$.])A\s*(?:\?\.)?\[\s*(['"])([^'"]+)\1\s*\]/g)].map((m) => m[2])))].sort();
   // sha256 of the sorted args.* names main's e2e_workflow.js reads.
-  const MAIN_ARGS_SHA256 = '0611fd43a18c189aaee974dc900de9a95fb83e7146fa676a93450c009ad2c3d5';
+  const MAIN_ARGS_SHA256 = '8bb90bb6f82a13e020fd4bdf651360ed262dbd57fa76cfba95653f5f1d921809';
   if (process.env.PRINT_DIGESTS && MAIN) console.log(`    main args: ${sha(argsRead(MAIN.src))}`);
   ok(sha(argsRead(src)) === MAIN_ARGS_SHA256 && (!MAIN || sha(argsRead(MAIN.src)) === MAIN_ARGS_SHA256),
      'e2e reads exactly main\'s args.* set', MAIN && [argsRead(src).filter((k) => !argsRead(MAIN.src).includes(k)),
@@ -114,6 +121,7 @@ function singleGpu(name, phase = 'extract') {
         WORKLOAD: {}, TASK: 'Review extraction coverage.', curFlags: '--tp 4', curEnv: '', curOverlay: '/ov', profile: null,
         BUDGET: 1, HEAD_BUDGET: 1, remainingMin: () => 60, WORKFLOW_DIR: '/wf', TRACELENS_INPUTS: {},
         ANALYSIS_SKILL_INPUTS: {}, KB_REF_INPUTS: {}, BASELINE_TPUT: 1, AGENTX_PREPARATION_SCHEMA: {},
+        MN: null, IS_PD: false, PD_ROLES: ['prefill', 'decode'], captureShard: () => ({}),
         roleAgent: (r, ph, intro, inputs) => ({ role: r, ph, intro, inputs }),
         safeAgent: async (p, o) => { calls.push({ ...p, label: o && o.label }); return { delivery_path: '/eval/d.json', prepared: {} }; },
         readAgentXPreparation: () => ({ head_candidates: [], kernel_candidates: [], failed_tasks: [], deferred_tasks: [] }) };
@@ -127,6 +135,8 @@ function singleGpu(name, phase = 'extract') {
       const E2E_LEARNED_KB_ENABLED = false, ARCH_CONSTRAINTS = '', cfg = (o) => JSON.stringify(o);
       const expertSkillsBlock = () => '', warmStartBlock = () => '';
       const correctnessEnvBlock = () => '', workloadIdentityBlock = () => '';
+      const SERVING_TOPOLOGY = '', MN = null, MN_SPEC = null, MN_SERVING_ENV = '';
+      const pdOut = () => ({}), pdFragmentBlock = () => '', mnRoleBlock = () => '';
       ${settings}\n${measurementSettings}\n${captureSettings}\n${hook}\n${role}
       return roleAgent;`)(A, undefined);
     return { prepareInputs, roleAgentFor };
@@ -281,6 +291,7 @@ function singleGpu(name, phase = 'extract') {
       EVAL_DIR: '/eval', MODEL_PATH: '/m', WORKLOAD: {}, curOverlay: '', curFlags: '', curEnv: '', WORKFLOW_DIR: '/wf',
       profile: {}, EXTRACT_SCHEMA: {}, KERNEL_WF_SCRIPT: '/kwf/kernel_lane.js', KERNEL_WF_DIR: '/kwf',
       USE_EXPERT_SKILLS: false, EXPERT_SKILLS_DIR: '', KB_ARGS: {}, KERNEL_BUDGET: 1, GRAPH_REQ: '', TASK: '',
+      ...SINGLE_NODE_ENV,
       reserveBoundedWorkflow: async (ref, args, label) => {
         const ids = String(args.gpu_ids).split(',');
         if (ids.some((id) => busy.has(id))) overlaps.push(`${label}:${args.gpu_ids}`);
@@ -288,7 +299,7 @@ function singleGpu(name, phase = 'extract') {
         lanes.push({ label, args });
         try { return await laneFor(label); } finally { ids.forEach((id) => busy.delete(id)); }
       } };
-    const out = await new AsyncFunction('env', `let {${Object.keys(e).join(',')}} = env;\n${reuse}\n${helpers}
+    const out = await new AsyncFunction('env', `let {${Object.keys(e).join(',')}} = env;\n${singleNode}\n${reuse}\n${helpers}
       ${schedule}\n${optimize}\nreturn { cands, optimized };`)(e);
     return { ...out, lanes, overlaps };
   }
@@ -367,10 +378,11 @@ function singleGpu(name, phase = 'extract') {
       FP8_MMA: 'fp8 MFMA',
       GRAPH_REQ: '', TASK: '', A: {}, ABL_IMPL_MS: 0, ABL: () => false, ablCandId: () => 'incumbent',
       laneWindowShort: () => false, gemmSynthFor: () => 'false', flaggedHeads: [], history: { ledger: [] },
+      ...SINGLE_NODE_ENV,
       roleAgent: (role, ph, intro, inputs) => ({ role, ph, intro, inputs }),
       safeAgent: async (p) => { agents.push(p); return { gate: 'author_recommended', author_plan: [{ language: 'hip', route: 'rewrite' }] }; },
       fastBoundedWorkflow: async (ref, args, label) => { lanes.push({ label, args }); return { final_weighted: 0.9, final_patch: '' }; } };
-    await new AsyncFunction('env', `let {${Object.keys(e).join(',')}} = env;\n${reuse}\n${helpers}
+    await new AsyncFunction('env', `let {${Object.keys(e).join(',')}} = env;\n${singleNode}\n${reuse}\n${helpers}
       ${headsMap}\n${serial}`)(e);
     return { agents, lanes };
   }
@@ -407,13 +419,13 @@ function singleGpu(name, phase = 'extract') {
   const corrective = between('async function tryCorrectiveReauthor(', '\n// --- FAST-MODE wall-clock control');
   async function correct(spec) {
     const started = [], logs = [], profile = { deferred_tasks: [] };
-    const e = { rejectClass: () => 'integration', HEAD_CORRECTIVE_MAX: 1, FAST_MODE: false, FAST_DEADLINE_HIT: false,
+    const e = { ...SINGLE_NODE_ENV, rejectClass: () => 'integration', HEAD_CORRECTIVE_MAX: 1, FAST_MODE: false, FAST_DEADLINE_HIT: false,
       TIME_DEADLINE_HIT: false, GPU_LIST: ['0', '1', '2', '3'], SERVING_GPU: '0,1,2,3', profile, log: (m) => logs.push(String(m)),
       trySurgicalFix: async () => { started.push('surgeon'); return null; },
       fastBoundedWorkflow: async (ref, args) => { started.push(`lane:${args.gpu_ids}`); return { authored: false }; },
       KERNEL_WF_SCRIPT: '/k', KERNEL_WF_DIR: '/k', KERNEL_KNOWLEDGE_DIR: '', USE_EXPERT_SKILLS: false, EXPERT_SKILLS_DIR: '',
       KB_ARGS: {}, WARM_START_OFF: true, KERNEL_BUDGET: 1, EVAL_DIR: '/eval', GRAPH_REQ: '', TASK: '', theSpec: spec };
-    const r = await new AsyncFunction('env', `let {${Object.keys(e).join(',')}} = env;\n${helpers}\n${corrective}
+    const r = await new AsyncFunction('env', `let {${Object.keys(e).join(',')}} = env;\n${singleNode}\n${helpers}\n${corrective}
       return tryCorrectiveReauthor(theSpec);`)(e);
     return { r, started, logs, deferred: profile.deferred_tasks };
   }
