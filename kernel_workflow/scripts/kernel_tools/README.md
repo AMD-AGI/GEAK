@@ -14,10 +14,16 @@ and GEAK's verify step decides. Each tool's `--help` is its interface. Python 3.
 | `amd_occupancy.py` | VGPR/LDS -> waves/workgroups per CU (library + CLI) | — |
 | `asm_loop_audit.py` | hot-loop op mix, waits, barriers, spills; `--diff` between variants | AMD assembly |
 | `ab_bench.py` (+ `ab_task_adapter.py`) | interleaved A/B screening with a byte-identical control arm | kernel runtime + `e2e_workflow/scripts/harness_lib.py` |
+| `rocprofv3_safe.sh` | rocprofv3 with timeout, device guard and kernel filter | rocprofv3, GPU |
+| `parse_pmc.py` | counters -> busy, L2 hit, DRAM bytes, bank conflicts | rocprofv3 CSV |
+| `capture.sh` | ATT + ISA capture for one kernel | rocprofv3 + ATT decoder |
+| `hotspot_analyzer.py`, `att_opclass.py`, `mfma_efficiency.py`, `deep_mfma_analysis.py` | ATT stall hotspots, stall cycles by op class, MFMA cadence, what breaks the MFMA stream | decoded ATT or assembly |
 
 Libraries (imported or sourced, not commands): `_hwdata.py`, `_quickhelp.py`, `amd_resources.py`,
-`amd_artifacts.py`, `amd_targets.py`, `_amd_isa_db.py`, `_amd_matrix.py`.
+`amd_artifacts.py`, `amd_targets.py`, `_amd_isa_db.py`, `_amd_matrix.py`, `_kt_common.sh`,
+`locus.sh`, `rocprofv3_env.sh`, `profiler_deps.py`, `profiler_artifacts.py`, `_att_fixture.py`.
 Hardware data lives in `perf_knowledge/hardware/data/` (override with `GEAK_HW_DATA_DIR`).
+Profiler setup and the known rocprofv3 abort: [profiling-dependencies.md](profiling-dependencies.md);
 ISA data maintenance: [isa_tools.md](isa_tools.md).
 
 ## Contracts
@@ -35,7 +41,7 @@ ISA data maintenance: [isa_tools.md](isa_tools.md).
 ## Offline tests
 
 ```bash
-python -m pytest -q kernel_workflow/scripts/tests -k "kernel_tools or isa or audit or shared"
+python -m pytest -q kernel_workflow/scripts/tests -k "kernel_tools or isa or audit or pmc or shared"
 ```
 
-They need no GPU or network; GPU results are recorded separately.
+They need no GPU, network or profiler; GPU results are recorded separately.
