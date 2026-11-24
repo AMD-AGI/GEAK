@@ -29,13 +29,96 @@ schema:
   fast_harness:    (fast only) dir under <ep-root>/lib/Runtime/Kernels/test/example/
   numeric_test:    (numeric only) pytest -k expression run in <ep-root>/test/numeric/, i.e. a
                    test file name (its .py is dropped), optionally narrowed with and/not
+  frozen_functions: (numeric, optional) host functions whose whole definition is frozen
+                   (dispatch gates and the helpers they consult) - compile rejects any
+                   change beyond comments/whitespace. Calls are not followed, so list
+                   a gate's helpers too. Every extern "C" signature in kernel_hip is
+                   frozen regardless.
+  frozen_constants: (numeric, optional) extra namespace-scope constants to freeze; the
+                   ones a frozen function reads are frozen without being listed
+  ep_env:          (numeric, optional) env vars pinned for correctness/performance runs;
+                   every other inherited HIPDNN_* var is dropped
+  perf:            (numeric, optional) device-time cases for tools/ep_perf_driver.py, as
+                   op, warmup, iters, rotate_mib and a list of cases (id, M, K, N, ...).
+                   Without it, performance falls back to pytest --durations wall time.
   template:        (selfcheck only) dir under tools/selfcheck_templates/ holding kernel_src/, harness/, include/
   test_cpp:        (selfcheck only) frozen harness driver under <template>/harness/
   arches:          gfx arches the kernel supports
   shapes_preset:   named preset resolved by the generator (see gen_ep_task.py SHAPE_PRESETS)
 
 ops:
+  # 4-bit MatMulNBits as seen by a real ORT session on Strix Halo, autotune in
+  # lookup mode. Decode (M<=7) takes the dp4a path (quantize activations to int8,
+  # then dp4a GEMV) for uint8 or absent zero points; fp16 zero points at M=1 take
+  # the fp16 GEMV; from M=8 (kWmmaMinMDefault) dispatch prefers WMMA, whose core
+  # lives in the frozen matmul_nbits_wmma_core.h.
   - op: matmul_nbits
+    kernel_hip: matmul_nbits_kernel.hip
+    # The kernels the perf cases below reach on gfx1151 (rocprofv3 kernel trace).
+    entry_points:
+      - matmul_nbits_gemv_dp4a_kernel     # M<=7 with u8 or no zp: every case but the next two
+      - matmul_nbits_quant_act_i8_kernel  # quantizes A for the dp4a GEMV, its own launch
+      - matmul_nbits_gemv_kernel          # fp16 zp at M=1 (m1_o_proj_fp16zp)
+      - MatMulNBitsWMMA_NoZP              # M>=8 without zp (m8_down_proj_nozp)
+    frozen_symbols:                       # extern C entries the EP wrapper calls
+      - "hip_matmul_nbits"
+      - "hip_matmul_nbits_dp4a"
+      - "hip_matmul_nbits_unpack_zp_u8"
+      - "hip_matmul_nbits_convert_zp_fp16"
+      - "hip_matmul_nbits_u4_wmma_padrow"
+    # Path selection must not move: the gates decide which kernel a shape reaches,
+    # so editing them would change what the numeric suite covers, not how fast a
+    # kernel is. QMoE (real/qmoe.cpp) also calls the grouped *_supported gates.
+    frozen_functions:
+      - hip_matmul_nbits
+      - hip_matmul_nbits_dp4a
+      - hip_matmul_nbits_u4_wmma_padrow
+      - hip_matmul_nbits_u4_wmma_stride
+      - hip_matmul_nbits_wmma_smallm_grouped_supported
+      - hip_matmul_nbits_wmma_tiled_grouped_supported
+      - wmmaMinM
+      - preferWmmaTier
+      - gemvMBlockedEnabled
+      - gemvMBlockedEnabledI8
+      - wmmaTierTuningEnabled
+      # what those gates call: the WMMA cutoff override, the autotune-mode lever,
+      # the grouped small-M plan, and the timing behind the measured tier choice
+      - wmmaMinMOverride
+      - matmulNbitsLutLookupEnabled
+      - matmulNbitsMode
+      - matmulNbitsChooseMode
+      - matmulNbitsModeLever
+      - smallMWmmaDefaultConfig
+      - smallMWmmaPlan
+      - wmmaCacheKey
+      - timeLaunchIsolated
+      - settleClock
+    frozen_constants: [kBlockDim]
+    oracle: numeric
+    # QMoE links against the grouped WMMA entries in this file, so its suite runs too.
+    numeric_test: "test_matmul_nbits or test_qmoe"
+    ep_env:
+      HIPDNN_MATMUL_AUTOTUNE_MODE: lookup # no online re-tuning between runs
+    perf:
+      op: matmul_nbits
+      warmup: 5
+      iters: 20
+      rotate_mib: 128                     # weights per inference > Strix Halo's caches
+      cases:                              # Llama-3.1-8B AWQ g128 + GPT-OSS-20B g32 decode
+        - {id: m1_q_proj_u8zp,    M: 1, K: 4096,  N: 4096,  zp: u8}
+        - {id: m1_gate_up_nozp,   M: 1, K: 4096,  N: 14336}
+        - {id: m1_down_proj_u8zp, M: 1, K: 14336, N: 4096,  zp: u8, scale: 0.005}
+        - {id: m1_gptoss_qkv_g32, M: 1, K: 2880,  N: 5120,  block_size: 32, scale: 0.02}
+        - {id: m1_o_proj_fp16zp,  M: 1, K: 4096,  N: 4096,  zp: fp16}
+        - {id: m4_q_proj_u8zp,    M: 4, K: 4096,  N: 4096,  zp: u8}
+        - {id: m8_down_proj_nozp, M: 8, K: 14336, N: 4096,  scale: 0.005}
+    arches: [gfx1151]
+    shapes_preset: numeric_default
+
+  # Standalone hipcc harness from the 2-bit fork's test/example/gemm_fp16u2 (not
+  # present in ROCm/hip-ep main). Kept for that fork; use `matmul_nbits` above
+  # for upstream hip-ep.
+  - op: matmul_nbits_fast
     kernel_hip: matmul_nbits_kernel.hip
     entry_points:
       - matmul_nbits_kernel_u2
