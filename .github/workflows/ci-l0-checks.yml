@@ -188,6 +188,7 @@ jobs:
             tools/tests/test_ep_task_runner.py \
             tools/tests/test_gen_ep_task.py \
             tools/tests/test_ep_abi.py \
+            tools/tests/test_ep_perf_driver.py \
             geak/test_bootstrap.py
 
       - name: expert skill static validation
