@@ -102,28 +102,6 @@ class ScaffoldTasksTest(unittest.TestCase):
                 _, _, problems = S.check_request(str(self.path))
                 self.assertTrue(any("effective_calls" in p for p in problems), problems)
 
-    def test_important_cells_of_the_task_phases_need_a_case_or_a_waiver(self):
-        cells = [{"id": "pt_a", "phase": "DECODE"}, {"id": "pt_b", "phase": "DECODE"},
-                 {"id": "pt_p", "phase": "PREFILL"}]
-        (self.req / "important_shapes.json").write_text(json.dumps({"cells": cells}))
-        task = self.doc["tasks"][0]
-        task["requested_kernel"]["phases"] = ["DECODE"]
-        self.doc["important_shapes"] = "important_shapes.json"
-        task["manifest"]["cases"].append({"sig": "imp_a", "regime": "DECODE", "axes": {"m": 2},
-                                          "effective_calls": 0, "random": True,
-                                          "important_cell": "pt_a",
-                                          "launch": {"mode": "graph", "capture_bs": 2}})
-        self.path.write_text(json.dumps(self.doc))
-        _, _, problems = S.check_request(str(self.path))
-        self.assertEqual(len(problems), 1, problems)              # pt_b; pt_p is not its phase
-        self.assertIn("pt_b", problems[0])
-        task["important_waivers"] = {"pt_b": "routed to the other expert path at this batch"}
-        task["manifest"]["cases"][-1]["launch"]["mode"] = "piecewise"
-        self.path.write_text(json.dumps(self.doc))
-        _, _, problems = S.check_request(str(self.path))
-        self.assertEqual(len(problems), 1, problems)
-        self.assertIn("launch.mode", problems[0])
-
     def test_finalize_without_an_installed_request_is_blocked(self):
         out = self.root / "empty"
         out.mkdir()

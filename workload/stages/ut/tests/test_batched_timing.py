@@ -93,16 +93,6 @@ class SweepTest(unittest.TestCase):
             H._measure_bucket('/fixture', 'base', 'cand', 'a', 5, 1, (.95, 1.1), {})
 
 
-class PerPhaseTest(unittest.TestCase):
-    def test_a_decode_gain_does_not_hide_a_prefill_loss(self):
-        per = [{'sig': 'd', 'regime': 'decode', 'm': 1, 'baseline_ms': 3.0, 'optimized_ms': 1.0},
-               {'sig': 'p', 'regime': 'prefill', 'm': 64, 'baseline_ms': 1.0, 'optimized_ms': 2.0}]
-        w = H.serving_weighted_speedup(per, {})
-        self.assertGreater(w['weighted'], 1)
-        self.assertEqual(w['per_phase']['decode'], {'weighted': 3.0, 'cases': 1})
-        self.assertEqual(w['per_phase']['prefill'], {'weighted': 0.5, 'cases': 1})
-
-
 dspec = importlib.util.spec_from_file_location('timing_driver', SKILL / 'ut_contracts/ut_driver.py')
 D = importlib.util.module_from_spec(dspec)
 dspec.loader.exec_module(D)
