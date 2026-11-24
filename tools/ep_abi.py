@@ -115,9 +115,36 @@ def _decl_start(mask, i):
     return j
 
 
-_AFTER_PARAMS = re.compile(
-    r"\s*(?:const|noexcept|override|final|volatile|&|&&|"
-    r"__attribute__\s*\(\(.*?\)\)|->\s*[\w:<>,\s*&]+?)*\s*\{", re.DOTALL)
+_ATTRIBUTE_OPEN = re.compile(r"__attribute__\s*\(\(")
+_AFTER_PARAMS_TOKEN = re.compile(
+    r"(?:const|noexcept|override|final|volatile)\b|&+|->[\w:<>,\s*&]+")
+
+
+def _body_open(mask, i):
+    """Index of the `{` opening a function body after the parameter list that
+    closes just before mask[i], or -1. Only qualifiers, `&`/`&&`,
+    `__attribute__((...))` and a trailing return type may come between. A
+    scanner, not one regex: a repeated group of overlapping alternatives
+    backtracks exponentially on a long run of them."""
+    n = len(mask)
+    while True:
+        while i < n and mask[i].isspace():
+            i += 1
+        if i == n:
+            return -1
+        if mask[i] == "{":
+            return i
+        attr = _ATTRIBUTE_OPEN.match(mask, i)
+        if attr:
+            close = _match(mask, attr.end() - 2, "(", ")")
+            if close < 0:
+                return -1
+            i = close + 1
+            continue
+        token = _AFTER_PARAMS_TOKEN.match(mask, i)
+        if not token:
+            return -1
+        i = token.end()
 
 
 def function_definitions(src, name):
@@ -132,10 +159,9 @@ def function_definitions(src, name):
         close = _match(mask, m.end() - 1, "(", ")")
         if close < 0:
             continue
-        after = _AFTER_PARAMS.match(mask, close + 1)
-        if not after:
+        body_open = _body_open(mask, close + 1)
+        if body_open < 0:
             continue
-        body_open = after.end() - 1
         body_close = _match(mask, body_open, "{", "}")
         if body_close < 0:
             continue
@@ -178,8 +204,7 @@ def extern_c_definitions(src):
         if not names:
             continue
         close = _match(mask, paren, "(", ")")
-        after = _AFTER_PARAMS.match(mask, close + 1) if close >= 0 else None
-        if not after:
+        if close < 0 or _body_open(mask, close + 1) < 0:
             continue
         out[names[-1]] = normalize(code[m.start():close + 1])
     return out

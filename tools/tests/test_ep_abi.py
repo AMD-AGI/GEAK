@@ -109,6 +109,33 @@ def test_calls_and_prototypes_are_not_definitions():
     assert ep_abi.function_definitions(src, "f") == []
 
 
+@pytest.mark.parametrize("src", [
+    "int f() const noexcept { }",
+    "int f() && { }",
+    "auto f() -> int { }",
+    "void f(int x) __attribute__((foo(1))) { }",
+])
+def test_qualifiers_attributes_and_trailing_returns_before_the_body(src):
+    assert ep_abi.function_definitions(src, "f") == [(0, len(src) - 1)]
+
+
+def test_an_attribute_after_a_prototype_does_not_reach_a_later_body():
+    src = "void f(int x) __attribute__((x));\nint g() __attribute__((y)) { return 0; }\n"
+    assert ep_abi.function_definitions(src, "f") == []
+    assert len(ep_abi.function_definitions(src, "g")) == 1
+
+
+# A single regex of repeated, overlapping alternatives backtracks exponentially
+# on each of these (CodeQL py/redos).
+@pytest.mark.parametrize("tail", [
+    "&&" * 5000,
+    "__attribute__((" + "))__attribute__((" * 5000,
+    "->" + "\t&->" * 5000,
+])
+def test_long_runs_after_the_parameters_are_rejected_quickly(tail):
+    assert ep_abi.function_definitions(f"int f() {tail} x", "f") == []
+
+
 def test_function_hash_ignores_comments_and_whitespace():
     edited = KERNEL.replace("static const bool on = true;   /* cached */",
                             "static const bool on =   true; // cached")
