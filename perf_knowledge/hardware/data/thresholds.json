@@ -1,0 +1,8 @@
+{
+  "_doc": "Constants a GEAK tool reads. Only keys with a consumer live here; per-arch hardware facts are in hw_constants.json and per-SKU peaks in sku.json.",
+  "hw_budget": {
+    "_doc": "Stop/continue verdict on measured_ms / floor (hw_budget.py room_verdict). Heuristic, not calibrated; quoted by hw_budget --help.",
+    "little_room_below": 1.25,
+    "large_room_from": 2.0
+  }
+}
