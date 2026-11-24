@@ -13,6 +13,7 @@ input/output and acceptance contract. Implementation skills describe how to perf
 | Module | Responsibility | Initial implementation |
 | --- | --- | --- |
 | [Setup / Benchmark](stages/setup/README.md) | Establish usable task and measurement inputs | [Task inspection](stages/setup/task-inspect/SKILL.md) |
+| [Task](stages/task/README.md) | Derive cheaper probes from a supplied task | [Native UT slice](stages/task/native-slice/SKILL.md) |
 | [Profile](stages/profile/README.md) | Resolve a bottleneck question | [Native inspection and profiling](stages/profile/native-profile/SKILL.md) |
 | [Research](stages/research/README.md) | Find applicable prior evidence or approaches | [Evidence search](stages/research/evidence-search/SKILL.md) |
 | [Optimize](stages/optimize/README.md) | Produce an isolated candidate | [Native coding](stages/optimize/native-coding/SKILL.md) |

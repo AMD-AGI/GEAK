@@ -21,8 +21,8 @@ Source / native-entry tools: $GEAK_ROOT/workload/engine/campaign
 Worker status: $WORK_ROOT/state/$K.status.json
 Prior handoff: $RUN_DIR/HANDOFF.md
 ATTEMPT: $ATTEMPT
-ATTEMPT_CAP (seconds): $ATTEMPT_CAP
-MEASURE_TIMEOUT (seconds): $MEASURE_TIMEOUT
+ATTEMPT_CAP (this method-call window, seconds): $ATTEMPT_CAP
+MEASURE_TIMEOUT (outer measurement hard timeout, seconds): $MEASURE_TIMEOUT
 GPU_IDS (complete assigned logical set): $GPU_IDS
 BUDGET (optimization directions this attempt): $BUDGET
 MIN_IMPROVE (relative inner-incumbent gain): $MIN_IMPROVE

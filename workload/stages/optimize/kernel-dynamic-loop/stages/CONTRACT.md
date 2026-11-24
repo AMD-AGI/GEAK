@@ -18,6 +18,8 @@ where native bindings support relocation; otherwise the canonical task is a seri
 test location. Restore its prior source after a diagnostic or verification call there.
 Delivery to the canonical task is always serialized.
 A required UT/build-boundary change returns to the parent for a new qualified task.
+Task may derive probes outside the frozen parent. Their scope and source mapping remain
+explicit; Profile evidence from them does not substitute for full-parent Verify.
 
 The same agent may implement several modules. Independent coding/research can run in
 parallel on separate copies; GPU calls are serialized unless the parent permits disjoint
@@ -25,12 +27,18 @@ measurement resources. Preserve each task's required device/rank width and any a
 gang; pool capacity is not an implicit rank count. Resource allocation and release belong
 to the parent.
 
-`BUDGET` bounds optimization directions per attempt, including parallel alternatives,
-not module calls. All calls consume wall time. `MIN_IMPROVE` is the configured relative
-gain for advancing the inner incumbent, not a replacement for native validity or outer
-KEEP. Use the native full-task aggregate. Plan within `ATTEMPT_CAP`, including tests
-and handoff; check observed test cost before launching measurements. Preserve active
-calls and evidence before changing source or exiting; do not pad time or switch methods.
+`BUDGET` bounds explored directions per attempt, including parallel alternatives,
+not module calls or source-file counts. All calls consume wall time. `MIN_IMPROVE`
+governs inner advancement; native PASS, useful measured gains and parent KEEP remain
+separate. Preserve useful tested alternatives without claiming their admission.
+Use the native full-task aggregate and state each comparison source and scope.
+
+`ATTEMPT_CAP` bounds this method call, including inner tests and handoff. The worker's
+outer measurement follows the return; its reservation belongs to the parent. Do not
+subtract that reservation again unless the caller explicitly includes it in this window.
+`MEASURE_TIMEOUT` is the outer hook's hard limit, not a test-duration estimate. Plan
+from observed costs and do not reserve optional tests as mandatory work. Preserve calls
+and evidence before changing source or exiting; do not pad time or switch methods.
 
 ## Acceptance and ownership
 

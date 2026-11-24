@@ -10,6 +10,10 @@ Inspect the declared computation, editable leaves, full case sweep and native en
 Check missing or suspect prerequisites and reuse valid qualification. Keep the original
 baseline distinct from the currently accepted source. Obtain a required fresh baseline
 through the unchanged native measurement path in the parent-provided environment.
+Use writable private task copies for native-generated files and paths suited to the
+native tools' temporary/cache requirements. Keep process diagnostics and source
+checkpoints durable across tool sessions and shared-storage failures; publish preserved
+evidence to the parent's handoff location before claiming delivery.
 
 Return the supporting receipts and observed test cost. Report a defect requiring changed
 frozen inputs, bindings or device width to the parent instead of redefining the task.
