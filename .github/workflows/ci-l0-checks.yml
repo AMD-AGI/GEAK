@@ -189,6 +189,12 @@ jobs:
             tools/tests/test_gen_ep_task.py \
             geak/test_bootstrap.py
 
+      # Own run: kernel_workflow/tests repeats test file names of expert_workflows/mega_fusion/tests,
+      # which pytest cannot collect in one session (until that package is removed).
+      - name: kernel_workflow mode=mega and lane golden tests (no GPU)
+        run: |
+          python -m pytest -q kernel_workflow/scripts/tests/test_lane_golden.py kernel_workflow/tests
+
       - name: expert skill static validation
         run: |
           for skill in \
@@ -441,6 +447,10 @@ jobs:
         run: |
           set -e
           for t in perf_knowledge/expert_skills/expert_workflows/*/tests/test_*.js; do node "$t"; done
+      - name: kernel_workflow mode=mega regression tests
+        run: |
+          set -e
+          for t in kernel_workflow/tests/test_*.js; do node "$t"; done
       # Extraction smoke must be exactly "pass"/"fail": a prose "PASS (exit 0) ..." once read as a
       # failed extraction and silently dropped heads whose unittest had passed.
       - name: extraction smoke status contract

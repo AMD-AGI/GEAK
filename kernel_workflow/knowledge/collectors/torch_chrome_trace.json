@@ -1,0 +1,50 @@
+{
+  "schema_version": "geak-collector-v1",
+  "id": "torch_chrome_trace",
+  "maturity": "ready",
+  "tool": "torch.profiler",
+  "purpose": "Per-rank launch timeline, logical-stage duration, and physical interval overlap",
+  "capability_probe": [
+    "python -c \"import torch; print(torch.__version__, hasattr(torch, 'profiler'))\"",
+    "verify the benchmark supports --profile-dir and exports one JSON per rank"
+  ],
+  "command_template": "torchrun --nproc-per-node=8 {aiter_root}/op_tests/multigpu_tests/bench_mega_moe_v2.py --mega-only --tokens {tokens} --route {route} --iters {iterations} --profile-dir {output_dir}",
+  "bundle_fields": {
+    "trace_files": "one Chrome trace path per rank",
+    "trace_replays": "exact graph replay count captured inside each trace file",
+    "trace_provenance": "geak-collection-provenance-v1 with units in microseconds/milliseconds"
+  },
+  "preconditions": [
+    "warm JIT and tuned-config caches before profiler start",
+    "use the same fixed workload and rank mapping as the unprofiled timing run",
+    "export one trace per rank",
+    "measure profiler perturbation against an otherwise identical unprofiled replay"
+  ],
+  "outputs": [
+    {
+      "artifact": "mega_{route}_rank{rank}.json",
+      "information": "CPU launch and GPU-kernel intervals with rank identity"
+    },
+    {
+      "artifact": "geak-collection-provenance-v1 JSON",
+      "information": "tool version, command, scope, repetitions, perturbation and raw paths"
+    }
+  ],
+  "parser": "kernel_workflow/scripts/multi_rank_analysis/trace_categories.py",
+  "helps_diagnose": [
+    "logical-category rank-max duration",
+    "launch/materialization gaps",
+    "physical interval overlap",
+    "rank skew and critical-path ordering"
+  ],
+  "not_measured": [
+    "XGMI bytes",
+    "instruction stalls",
+    "exact useful versus padded rows",
+    "causal exposed time from summed category durations"
+  ],
+  "provenance": {
+    "reference": "AITER op_tests/multigpu_tests/bench_mega_moe_v2.py profile_graph",
+    "notes": "Category mapping is caller supplied; default regex matches lower confidence than explicit event labels."
+  }
+}

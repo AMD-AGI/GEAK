@@ -112,7 +112,7 @@ ok(/onEngine\(GPU_LIST\[i % GPU_LIST\.length\]\)/.test(lane), 'pinned placement 
 console.log('\n# propagation');
 ok(!/GPU_ID: GPU_LIST\[0\]/.test(lane), 'no phase takes GPU_LIST[0] directly');
 ok(/GPU_POOL = GPU_JOB \|\|/.test(lane), 'GPU_POOL is the group spec for multi-GPU jobs');
-ok(/if \(!GPU_RESOURCE\.explicit && setup\.gpu_requirement\) \{\n  applyGpuResource\(resolveGpuRequest\(A, GPU_LIST, setup\.gpu_requirement\)\)/.test(lane),
+ok(/if \(!MEGA && !GPU_RESOURCE\.explicit && setup\.gpu_requirement\) \{\n  applyGpuResource\(resolveGpuRequest\(A, GPU_LIST, setup\.gpu_requirement\)\)/.test(lane),
   'an implicit request is re-sized from Setup before any GPU phase');
 ok(/setup\.gpu_requirement\)\);\n  if \(GPU_RESOURCE\.warning\) log\(/.test(lane),
   'a detected requirement that cannot run is logged as a warning');
