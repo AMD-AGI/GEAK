@@ -37,6 +37,7 @@ expert_skills/
 │   ├── tuning-<backend>/SKILL.md   #   one skill per backend, upstream layout, byte-for-byte
 │   └── validate/claims.py     #   its own executable validator (drives validation_status)
 ├── expert_workflows/<id>/     # self-contained expert workflows (workflow.js + roles/knowledge/tools/tests)
+├── avo/avo-source/            # AVO source-level optimizer: standalone workflow, started by hand (see its README)
 ├── _template/                 # skill, optional contract, and validation templates
 └── _contribute/               # the "add a skill to GEAK" skill: scaffold / validate / make_pr / SKILL.md
 ```
