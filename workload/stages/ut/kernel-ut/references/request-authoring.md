@@ -66,18 +66,15 @@ reason, or a companion of a task with its reason.
      overstates calls by the kernels per call.
    - Check conservation: in every phase a task runs, its cases' instances add up to the
      phase's observed total.
-   - Add one correctness case (`random: true`, `timed: false`, `effective_calls: 0`, no
-     `instances`, so conservation is unchanged) per
-     important cell of the task's phases that no point or bucket case already exercises,
-     and name the cell in every case built from one (`important_cell: <id>`). A cell the
-     task's kernels never run at gets a reason in `important_waivers`. Weights stay on the
-     point and bucket cases: important cells widen what is checked, not what is timed.
-     A prefill cell may stand for a band (`shape_range`, `context_range`): build one case at
-     the cell's own observed shape, not one per range end. Important cases are judged against
-     the baseline only (no float64 reference, no oracle leg), so they stay cheap.
-   - Copy the cell's `launch` into the case. A graph case's axes use `capture_bs`, the
-     batch the server replays, not the logical batch. A case without `launch` follows its
-     phase's `phase_regimes`.
+   - Each important cell of the task's phases that no point or bucket case exercises gets one
+     correctness case at the cell's own shape (`kind: important`, `random: true`,
+     `timed: false`, `effective_calls: 0`, no `instances`); every case built from a cell names
+     it (`important_cell`). A cell the task never runs at gets a reason in
+     `important_waivers`. Important cases widen what is checked, not what is weighted or
+     timed, and the driver judges them against the baseline unless a bound needs the
+     float64 reference.
+   - Copy the cell's `launch` into the case; a graph case's axes use `capture_bs` (the batch
+     the server replays). A case without `launch` follows its phase's `phase_regimes`.
 7. **Case axes.** Derive each axis from the host-op dims in `evidence/shapes`, as an
    expression in the phase shape and context. Under speculation, decode rows are
    requests × tokens per step. Kernels launched straight through `hipModuleLaunchKernel` (FlyDSL,

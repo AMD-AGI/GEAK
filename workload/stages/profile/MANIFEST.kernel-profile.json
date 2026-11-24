@@ -6,7 +6,7 @@
     "references/capture.md": "e1c7d8d3f2ca541853103ae57c701c13ed7ed7aae1391912a33873279cfbb001",
     "references/dynamic-workloads.md": "53c974f61cbe15c08e0d4b5f09a31547343f5f873a3d7737627ae577d0086cc4",
     "references/pipeline-handoff.md": "d397bae4bd46818cf70e1e2e9c3ecf1e2f997e17a07d47bb3d0e83a70f39e1e0",
-    "references/sampling.md": "54eefefe8ce24b98c3e8f2ffda6fb4999a3c542009a269e6fd143d881f22fbbb",
+    "references/sampling.md": "13d2253056aefd946745450cf6f6c5699136bcb00283e39947a93e8bc31473f1",
     "references/selection-coverage.md": "1c794251a59740d056c5dbef44691e4d9e6fbe37224254ad3e2561f710d7e5ce",
     "references/setup.md": "f1f930798820cfb36008330f1617cc158535f53d6e9c213a7a770ba31a89d018",
     "references/vllm.md": "7f9b086bff150f02b11e04728e8f586acaf45d39622ae620dcaca21bc0d345e1",
@@ -38,5 +38,5 @@
   "origin": "AMD-AGI/GEAK refactor/profile-ut-split: profile half of kernel-extract",
   "skill": "kernel-profile",
   "stage": "profile",
-  "tree_sha256": "48c865e64030c7105c5672d913f0dc18b08d3c4b7788b8fc122615c05acd5ee7"
+  "tree_sha256": "1f94caed42b85ea259a56910904eddeb8b7bfe7fde48b005212df589350cc48d"
 }

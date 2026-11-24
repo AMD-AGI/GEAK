@@ -31,21 +31,12 @@ python3 "$SKILL_ROOT/scripts/plan_points.py" --eval-dir "$EVAL_DIR" \
   --num-points 24 --prefill-points 6 --context-tolerance 1.5 --target-pct 90
 ```
 
-Budget by time, not habit. Measured on a TP4 MXFP4 deployment (2026-11-20): graph server
-start 325 s with a warm page cache, decode points 36-53 s each, a 16k-token prefill point
-11 s without a cached prefix (a cached prefix adds the prefill that fills it). By that
-estimate ~20 decode and ~6 prefill points fit a 30-minute profile. Do not cut the budget
-below what the phases need to meet the target; `budget_limited` is reported downstream as
-missing coverage.
-
-`--important-cells` (default 24) caps the cells per phase that `important_shapes.py` hands
-to UT. Each becomes a correctness case per stream of every task (layer kind, site, quant):
-66 prefill cells once made 330 attention cases and a correctness gate that outlasted its lane.
-
-`--prefill-points` spreads prefill over its observed range (quantiles of prefill new tokens,
-ordered by shape and context) rather than spending it on the heaviest cells: new tokens say
-little about prefill time once most of the context is cached, so `important_shapes.py`
-needs measured points on both sides of every cell it estimates.
+Budget by time: on a TP4 MXFP4 deployment (2026-11-23) a decode point took 12-35 s on the
+graph server and a prefill point 12-33 s, after a 5-27 min server start (warm/cold page
+cache), so ~20 decode and ~6 prefill points fit a 30-minute profile. A phase that misses
+the target is reported `budget_limited`. `--prefill-points` spreads prefill over its range
+(new tokens say little about prefill time once the context is cached); `--important-cells`
+caps the cells per phase that become UT correctness cases (see `important_shapes.py`).
 
 Planning is CPU-only. Observed rows are grouped by phase, exact shape, sequence count,
 observed graph mode and a context band; adjacent M values are never assumed to share a

@@ -7,7 +7,7 @@
     "references/delivery-contract.md": "960e0192567be1267c61fb09968fee0152e707d94462b9e9c6d8b86f9baaa14d",
     "references/joint-indexer-ut.md": "815a3f4099040035289e7e714621f96e4fed1f85f5be98934fc8ac5d20612e9f",
     "references/pipeline-handoff.md": "55a3aa37f370e23c20d86e762d4b7552d0f66f96fd5563e77ff1f5f1da94cbba",
-    "references/request-authoring.md": "6e6d26cc176a5233dba70cdba77e6cba11bcff746c2c714afd0cc6e744b3459d",
+    "references/request-authoring.md": "3002f30518d437c903a5b919b1f2ca2ed088d093a58c223b93e287973b82e115",
     "references/setup.md": "d36e392bd7dbb41f697883310b3ba56b3a8763f4089af8bdb918815bede0dbcc",
     "references/source-delivery-records.md": "52890f74ed1731f8c90e11abcf6f8e9ec720ae42e2ea1192b5b837c4ca327c6d",
     "references/source-extraction.md": "eb5a218097f18c05a543ad5d3342f2ba09e50247da815f4ce2f72c557a798c46",
@@ -60,5 +60,5 @@
   "origin": "AMD-AGI/GEAK refactor/profile-ut-split: UT half of kernel-extract",
   "skill": "kernel-ut",
   "stage": "ut",
-  "tree_sha256": "b193e762e89c68526d07231c4a3b1b416d7eabd8653c9cc4f4b2db4adbd59ada"
+  "tree_sha256": "25d56e3a1b9fe7ddf018192747bc64502c50b21fd158d06799f40276457937bd"
 }
