@@ -219,9 +219,12 @@ def _validate_delta(doc, name, bound, where="output"):
     if bound["kind"] not in ("tolerance", "sqnr"):
         raise ContractError("%s %s: delta applies to tolerance or sqnr bounds" % (where, name))
     if "along" in d:
-        shape = doc["outputs"][name].get("shape")
-        if not isinstance(shape, list) or d["along"] not in shape:
+        shapes = shape_cases(doc["outputs"][name].get("shape"))
+        if not shapes or any(d["along"] not in sh for sh in shapes):
             raise ContractError("%s %s: delta.along %r is not an axis of the output's shape"
+                                % (where, name, d["along"]))
+        if len({sh.index(d["along"]) for sh in shapes}) > 1:
+            raise ContractError("%s %s: delta.along %r sits at different positions in the shape's cases"
                                 % (where, name, d["along"]))
     if f64_reference(doc):
         raise ContractError("%s %s: delta is for oracle-referenced contracts (no float64 "
@@ -277,6 +280,11 @@ def _validate_oracles(doc):
 def _validate_control_categories(doc):
     """`required_control_categories`: the kinds of injected bug a task's negative controls must
     cover, `{"by": <attr>, "cases": {<attr value>: [category, ...]}}` or a plain list."""
+    mins = doc.get("min_controls_per_category")
+    if mins is not None and (not isinstance(mins, dict) or not all(
+            isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool) and v >= 1
+            for k, v in mins.items())):
+        raise ContractError("min_controls_per_category must map a category to an int >= 1")
     req = doc.get("required_control_categories")
     if req is None or isinstance(req, list) and all(isinstance(c, str) for c in req):
         return
@@ -432,6 +440,16 @@ def present(spec, sym):
     return True if when is None else bool(evaluate(when, sym))
 
 
+def shape_cases(shape):
+    """Every axis-name list a `shape` can take: itself, or each case of a `{"by", "cases"}` shape
+    (a list of lists; [] for anything else)."""
+    if isinstance(shape, list):
+        return [shape]
+    if isinstance(shape, dict) and isinstance(shape.get("cases"), dict):
+        return [c for c in shape["cases"].values() if isinstance(c, list)]
+    return []
+
+
 def shape_of(spec, sym):
     """`shape` is a list of axis expressions, or `{"by": <attr>, "cases": {<value>: [...]}}`
     when an attribute changes the layout (`trans_b`: (n, k) or (k, n))."""
@@ -490,6 +508,32 @@ def _lint_rank_chain(task_dir, doc, meta):
         errors.append("cases.py defines no rank_chain(rank, world, group, case)")
     elif "NotImplementedError(\"FILL _Chain" in src:
         errors.append("cases.py rank_chain is still the scaffold's FILL stub")
+    # the template form (scaffold_ut MONO_FAMILIES): rank_chain is the generic rank_harness.Chain,
+    # what is left to write is rank_model.py's RankModel
+    model = os.path.join(task_dir, "rank_model.py")
+    if os.path.exists(model):
+        with open(model) as f:
+            msrc = f.read()
+        stubs = sorted(set(re.findall(r'NotImplementedError\("FILL (RankModel\.[A-Za-z_]+)', msrc)))
+        if stubs:
+            errors.append("rank_model.py RankModel (what call() and rank_chain run) is still the scaffold's FILL stub: %s" % ", ".join(stubs))
+        # rank_harness replays one static step a width: every replay case of a phase shares rows
+        try:
+            with open(os.path.join(task_dir, "run", "ut_cases.json")) as f:
+                man = json.load(f)
+        except (OSError, ValueError):
+            man = {}
+        by_sig = {c.get("sig"): c for c in man.get("cases") or []}
+        widths = {}
+        for sig in man.get("replay_sigs") or []:
+            c = by_sig.get(sig) or {}
+            widths.setdefault(c.get("regime"), set()).add((c.get("axes") or {}).get("rows"))
+        for ph, ws in sorted(widths.items(), key=lambda kv: str(kv[0])):
+            if len(ws) > 1:
+                errors.append("replay_sigs of %s span rows %s: rank_harness captures one graph a width, "
+                              "so a phase's replay cases must share one row count" % (ph, sorted(ws, key=str)))
+    elif "_harness().Chain(" in src:
+        errors.append("cases.py rank_chain uses rank_harness.Chain but the task has no rank_model.py")
     return errors
 
 
@@ -516,6 +560,22 @@ def _lint_leg_env(task_dir, meta):
     for d in (meta.get("ut_contract") or {}).get("process_state_allow") or []:
         if not (isinstance(d, dict) and d.get("prefix") and (d.get("why") or "").strip()):
             errors.append("process_state_allow entries need prefix and why: %r" % (d,))
+    return errors
+
+
+def _lint_launch_waivers(meta):
+    """meta.ut_contract.launch_waivers (ut_driver gate_launches): each entry names a kernel and
+    a phase the server launched it in (meta.expected_launches) and says why the UT never does.
+    A waiver of a kernel the evidence does not expect there waives nothing and goes stale
+    silently; one without a why would let the gate pass on an unexplained gap."""
+    errors = []
+    want = meta.get("expected_launches") or {}
+    for w in (meta.get("ut_contract") or {}).get("launch_waivers") or []:
+        if not (isinstance(w, dict) and w.get("kernel") and w.get("phase") and (w.get("why") or "").strip()):
+            errors.append("launch_waivers entries need kernel, phase and why: %r" % (w,))
+        elif w["kernel"] not in set(want.get(w["phase"]) or []):
+            errors.append("launch_waivers: %s in %s is not an expected launch of that phase "
+                          "(meta.expected_launches): the waiver waives nothing" % (w["kernel"], w["phase"]))
     return errors
 
 
@@ -658,6 +718,36 @@ def _lint_package_diff(task_dir, meta, leaves):
     return errors
 
 
+def _lint_control_categories(doc, controls):
+    """DESIGN 3: when the contract names the kinds of injected bug a task must cover
+    (`required_control_categories`, selected by the task's pinned attrs), every negative control
+    states its `category`, every required category has at least one control, and a category the
+    contract asks for more than once (`min_controls_per_category`, e.g. kv_slot: 3 -- a wrong
+    page, a one-slot shift on a block's last row, the full table used for a sliding layer) has
+    that many. Categories outside the required set are allowed: they document extra coverage."""
+    errors = []
+    if not doc.get("required_control_categories"):
+        return errors
+    try:
+        required = control_categories(doc, (doc.get("task") or {}).get("attrs") or {})
+    except ContractError as e:
+        return [str(e)]
+    seen = {}
+    for c in controls:
+        cat = c.get("category")
+        if not isinstance(cat, str) or not cat.strip():
+            errors.append("negative control on %s (find %r) has no category; the contract requires %s"
+                          % (c.get("leaf"), (c.get("find") or "")[:40], required))
+            continue
+        seen[cat] = seen.get(cat, 0) + 1
+    for cat in required:
+        need = int((doc.get("min_controls_per_category") or {}).get(cat, 1))
+        if seen.get(cat, 0) < need:
+            errors.append("negative controls: category %s has %d control(s), the contract requires %d"
+                          % (cat, seen.get(cat, 0), need))
+    return errors
+
+
 def _leaf_control_waivers(mc, leaves, controls, meta=None):
     """`meta.ut_contract.leaf_control_waivers: [{leaf, why}]`: editable leaves that carry no
     negative control of their own. A whole-package candidate (a monokernel bound at its package,
@@ -731,6 +821,7 @@ def lint_task(task_dir):
         errors.append("meta.op_kind %r != contract op_kind %r" % (meta["op_kind"], doc["op_kind"]))
     errors.extend(_lint_rank_chain(task_dir, doc, meta))
     errors.extend(_lint_leg_env(task_dir, meta))
+    errors.extend(_lint_launch_waivers(meta))
 
     cases = manifest.get("cases") or []
     if not cases:
@@ -839,6 +930,7 @@ def lint_task(task_dir):
             if (not isinstance(probes, list) or any(not isinstance(s, str) for s in probes)
                     or len(set(probes)) != len(probes) or set(probes) - known):
                 errors.append("negative control on %s: probe_sigs must name unique random cases" % leaf)
+    errors.extend(_lint_control_categories(doc, controls))
 
     # The server compiles the kernel after its framework has been imported; a framework can
     # rebind library functions at import (sglang: triton.next_power_of_2), so a leg that never
@@ -1612,7 +1704,8 @@ def _delta(spec, d, c, b, ref, cand, base, refs, rows):
     nothing, or the harness returned the input as the output)."""
     torch = _torch()
     minus = d["minus"]
-    axis = spec["shape"].index(d["along"]) if "along" in d else None
+    # the axis's position (_validate_delta: the same in every case of a `{"by", "cases"}` shape)
+    axis = shape_cases(spec["shape"])[0].index(d["along"]) if "along" in d else None
 
     def diff(x, m):
         x, m = x.detach().cpu().to(torch.float64), m.detach().cpu().to(torch.float64)

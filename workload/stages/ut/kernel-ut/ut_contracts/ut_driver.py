@@ -40,8 +40,12 @@ hand-written UT used to re-implement (500+ lines per task) lives here once:
 With several GPUs (--gpus, else $UT_GPUS / $GPU_IDS) the oracle legs are sharded by case and
 run concurrently, the two server_calls legs run side by side, and timing spreads its buckets
 (each bucket's B,C pairs stay on one device). --quick runs every gate except timing on the
-boundary cases of each phase, for fix iterations; --reuse keeps gates that already passed
-on an unchanged task (reuse key over helpers, contract, cases, evidence and kernel_src).
+boundary cases of each phase, for fix iterations; --quick-timing runs ONLY timing, on a few
+representative buckets (per phase and row count: the most-called one and the shortest and
+longest context), for search iterations — its number is an aid, printed as
+GEAK_QUICK_TIMING_SPEEDUP, never GEAK_WEIGHTED_SPEEDUP, and never a pass or a receipt;
+--reuse keeps gates that already passed on an unchanged task (reuse key over helpers,
+contract, cases, evidence and kernel_src).
 
 Exit status: 0 every required gate passed; 1 a gate failed or could not run (incomplete);
 3 the UT itself is incomplete (UT_HARNESS_INCOMPLETE printed) — regenerate the UT, do not
@@ -107,6 +111,7 @@ class Task:
         self._h = self._cases = self._R = None
         self.gpus = None          # logical GPU indices the gates may spread legs over
         self.sig_filter = None    # --quick: the random cases kept
+        self.timing_filter = None  # --quick-timing: the timed buckets kept (None = all)
         self.call_filter = None   # --quick: the server calls kept
 
     @property
@@ -353,7 +358,8 @@ class OracleWorker:
         try:
             self.proc = subprocess.Popen([sys.executable, os.path.join(T.dir, "leg_runner.py"),
                 "--task", T.dir, "--mode", "oracle-worker"], env=env, stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE, stderr=self.log, start_new_session=True)
+                stdout=subprocess.PIPE, stderr=self.log, start_new_session=True,
+                cwd=(getattr(T.h, "leg_cwd", None) or (lambda d: None))(T.dir))
         except BaseException:
             self.log.close()
             raise
@@ -1093,12 +1099,22 @@ def negative_control_batches(T, control):
 def numerical_control_outputs(T, comparison):
     # Missing outputs and shape errors are not numerical rejections. In particular,
     # control_margin's generic exact-bound fallback must not turn them into infinity.
+    # A mutated SUBJECT that holds non-finite values where the compared-against side is finite
+    # (require_finite: `subject_nonfinite`, a poisoned slot the mutation left unwritten) is the
+    # most definite rejection there is -- counted, at an infinite margin. Dropping it made every
+    # poison-catching control look caught only by the exact outputs (ids / kv_stray) or not at
+    # all (I1, 11-12). Non-finite values on the reference / baseline side are a harness fault,
+    # never a detection.
     metrics = {"peak_bound_multiple", "sqnr_db", "mismatches", "mismatched_bytes",
                "bad_rows", "max_rel_err", "nonfinite_mismatches"}
     return {name: result for name, result in comparison.items()
             if name in T.doc["outputs"] and isinstance(result, dict) and result.get("ok") is False
-            and (bool(metrics.intersection(result)) or
+            and (bool(metrics.intersection(result)) or result.get("status") == "subject_nonfinite" or
                  result.get("kind") == "harness" and result.get("why") == "non-finite mismatch")}
+
+
+CONTROL_DETAIL = ("kind", "status", "why", "peak_bound_multiple", "sqnr_db", "min_db", "mismatches",
+                  "mismatched_bytes", "bad_rows", "max_rel_err", "nonfinite_mismatches")
 
 
 def gate_negative_controls(T, a, state):
@@ -1106,9 +1122,16 @@ def gate_negative_controls(T, a, state):
     if not controls:
         return {"status": "fail", "why": "meta.ut_contract.negative_controls is empty"}
     margin_needed = float(T.mc.get("min_control_margin", DEFAULT_CONTROL_MARGIN))
+    # DESIGN 3: besides the baseline call leg, the mutated candidate is judged against every oracle
+    # leg that does not opt out (`controls: false`). Oracle legs run the baseline overlay, so the
+    # mutation never reaches them; a control is caught by whichever comparison rejects it first.
+    ctl_oracles = {n: o for n, o in oracle_legs(T).items() if o.get("controls", True)}
+    covered = {n: set(oracle_case_sigs(T, o)) for n, o in ctl_oracles.items()}
+    torch = T.U._torch() if ctl_oracles else None
     rows = []
     for i, c in enumerate(controls):
-        row = {"leaf": c["leaf"], "expect": c.get("expect"), "caught": False,
+        row = {"leaf": c["leaf"], "category": c.get("category"), "expect": c.get("expect"),
+               "caught": False, "caught_by": [],
                "margin": 0.0, "cases": [], "restored": True,
                "available_cases": len(T.random_specs()), "checked_cases": 0,
                "early_stopped": False, "witness_case": None}
@@ -1141,22 +1164,51 @@ def gate_negative_controls(T, a, state):
                         if _needs_noise(T):
                             jobs.append({"overlay": base, "path": os.path.join(state["scratch"], "base2.pt"),
                                          "seed": a.seed, "draws": 1})
+                        legs = [n for n in ctl_oracles if covered[n].intersection(sigs)]
+                        for n in legs:
+                            jobs.append({"overlay": base, "path": os.path.join(state["scratch"], "oracle_%s.pt" % n),
+                                         "seed": a.seed, "draws": 1, "oracle_path": ctl_oracles[n]["path"],
+                                         "env": ctl_oracles[n].get("env") or {}})
                         try:
                             blobs = _oracles(T, state, jobs)
                         except Exception as exc:
                             row["why"] = "control legs did not run to completion (%s); not a numerical control" % str(exc)[-300:]
                             break
+                        n_call = 3 if _needs_noise(T) else 2
+                        oracle_blobs = dict(zip(legs, blobs[n_call:]))
                         _, comparisons = compare_blobs(T, blobs[1], blobs[0], a.seed, 1,
                                                        blobs[2] if _needs_noise(T) else None, only_draw=0)
                         for result in comparisons:
-                            numerical = numerical_control_outputs(T, result)
-                            if not result["ok"] and numerical:
-                                row["caught"] = True
-                                margin = T.U.control_margin({"outputs": numerical})
-                                row["margin"] = max(row["margin"], margin)
-                                if margin >= margin_needed and row["witness_case"] is None:
-                                    row["witness_case"] = result["case"]
-                            row["cases"].append({"case": result["case"], "ok": result["ok"]})
+                            judged = [("baseline", result)]
+                            sig = result["case"].rsplit("|", 1)[0]
+                            for n in legs:
+                                if sig not in covered[n] or result["case"] not in blobs[1] \
+                                        or result["case"] not in oracle_blobs[n]:
+                                    continue
+                                sym = T.cases.make_args(T.spec(sig), gen=_gen(torch, _device(torch), a.seed),
+                                                        with_logical=False)["_sym"]
+                                judged.append(("oracle:%s" % n, _summarize(compare_vs_oracle(
+                                    T, n, blobs[1][result["case"]], oracle_blobs[n][result["case"]], sym))))
+                            case_row = {"case": result["case"], "ok": result["ok"]}
+                            for by, res in judged:
+                                numerical = numerical_control_outputs(T, res)
+                                if by != "baseline":
+                                    case_row["vs_" + by.split(":", 1)[1]] = res["ok"]
+                                if not res["ok"] and numerical:
+                                    row["caught"] = True
+                                    if by not in row["caught_by"]:
+                                        row["caught_by"].append(by)
+                                    # which outputs rejected the mutation, by what measure: an exact
+                                    # output (ids, kv_stray) counts as an infinite margin, so the
+                                    # margin alone cannot say whether the intended output saw it
+                                    case_row.setdefault("rejected_by", {})[by] = {
+                                        name: {k: r[k] for k in CONTROL_DETAIL if k in r}
+                                        for name, r in numerical.items()}
+                                    margin = T.U.control_margin({"outputs": numerical})
+                                    row["margin"] = max(row["margin"], margin)
+                                    if margin >= margin_needed and row["witness_case"] is None:
+                                        row["witness_case"] = result["case"]
+                            row["cases"].append(case_row)
                         row["checked_cases"] = len(row["cases"])
                         del blobs
                         if row["witness_case"] is not None:
@@ -1231,7 +1283,8 @@ def _timing_resume(T, a, state):
     budget (--reuse only), and the callback that persists each new one at once."""
     path = os.path.join(T.dir, "run", TIMING_CHECKPOINT)
     key = [state.get("reuse_key"), int(a.max_reps), 'batched/v1']
-    quick, out = getattr(a, "quick", False), getattr(a, "out", None)
+    quick = getattr(a, "quick", False) or getattr(a, "quick_timing", False)
+    out = getattr(a, "out", None)
     done = {}
     if getattr(a, "reuse", False) and not quick:
         try:
@@ -1259,8 +1312,12 @@ def _timing_resume(T, a, state):
 def gate_timing(T, a, state):
     done, on_bucket = _timing_resume(T, a, state)
     per = T.h.measure_legs(T.dir, T.meta, max_reps=a.max_reps, gpus=getattr(T, "rank_group", None) or T.gpus,
-                           done=done, on_bucket=on_bucket)
-    w = T.h.serving_weighted_speedup(per, T.meta)
+                           done=done, on_bucket=on_bucket, only=getattr(T, "timing_filter", None))
+    if getattr(a, "quick_timing", False):
+        # a representative subset by construction: weight over what was measured, say so in the report
+        w = T.h.serving_weighted_speedup(per, T.meta, subset=True)
+    else:
+        w = T.h.serving_weighted_speedup(per, T.meta)
     early = [c["sig"] for c in per if c.get("reps", 0) < a.max_reps]
     defects = timing_basis_defects(T, per)
     if defects:
@@ -1268,7 +1325,9 @@ def gate_timing(T, a, state):
                 "defects": defects, "per_case": per, "aggregate": w,
                 "cache_condition": T.h.cache_policy()}
     if w.get("primary") is not None:
-        print("GEAK_WEIGHTED_SPEEDUP=%s" % w["primary"], flush=True)
+        # a quick-timing number must never be read as the figure of record
+        key = "GEAK_QUICK_TIMING_SPEEDUP" if getattr(a, "quick_timing", False) else "GEAK_WEIGHTED_SPEEDUP"
+        print("%s=%s" % (key, w["primary"]), flush=True)
     return {"status": "pass" if w.get("primary") is not None else "fail",
             "process_mode": 'batched',
             "weighted_speedup": w.get("primary"), "geomean": w.get("geomean"),
@@ -1496,6 +1555,10 @@ def run_gates(T, a):
         verdict, code = "harness_incomplete", 3
     elif a.quick:
         verdict, code = "quick", 1        # a subset of cases: an iteration aid, never a pass
+    elif getattr(a, "quick_timing", False):
+        # a subset of buckets, timing only: never a pass, but a failed timing still reads as fail
+        ok = all(s in ("pass", "not_required") for s in statuses)
+        verdict, code = ("quick_timing" if ok else "fail"), 1
     elif all(s in ("pass", "not_required") for s in statuses) and set(wanted) == set(required):
         verdict, code = "pass", 0
     elif all(s in ("pass", "not_required") for s in statuses):
@@ -1537,8 +1600,9 @@ CHECKPOINT = "ut_report.checkpoint.json"
 def _checkpoint(T, a, report):
     """Every finished gate, on disk at once: a run cut short (a preempted node, a killed
     container) keeps what it measured, and the next --reuse run starts at the first gate that
-    has not passed. Removed once the full report is written. Never for --quick or --out."""
-    if a.quick or a.out:
+    has not passed. Removed once the full report is written. Never for --quick, --quick-timing
+    or --out."""
+    if a.quick or getattr(a, "quick_timing", False) or a.out:
         return
     path = os.path.join(T.dir, "run", CHECKPOINT)
     try:
@@ -1555,7 +1619,7 @@ def _checkpoint(T, a, report):
 def _reusable(T, a, key):
     """--reuse: gates that passed under the same reuse key, in the last full report or in the
     checkpoint of a run that did not finish (the checkpoint is newer, so it wins)."""
-    if not a.reuse or a.quick:
+    if not a.reuse or a.quick or getattr(a, "quick_timing", False):
         return {}
     out = {}
     for name in ("ut_report.json", CHECKPOINT):
@@ -1603,6 +1667,41 @@ def _quick_subset(T, per_phase=3, calls=8):
         T.call_filter = picked[:calls]
 
 
+def _quick_timing_subset(T):
+    """Representative timed buckets: per (phase, m), the most-called bucket and the shortest
+    and longest `axes.context` one. Kernel time on the Muse Spark target layer is ~flat in
+    context (m8 0.111-0.122 ms, m16 0.159-0.180 ms over 23 buckets, c4k..c472k), so these
+    track the full sweep; the ends of the context range keep a context-dependent change
+    visible. None (= every bucket) when the manifest has no timed rows."""
+    groups = {}
+    for c in T.manifest["cases"]:
+        if c.get("timed"):
+            groups.setdefault((c.get("regime"), c.get("m")), []).append(c)
+    if not groups:
+        return None
+
+    def calls(c):
+        try:
+            return float(c.get("effective_calls") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def context(c):
+        ax = c.get("axes") or {}
+        try:
+            return float(ax.get("context"))
+        except (TypeError, ValueError):
+            return None
+    keep = set()
+    for rows in groups.values():
+        keep.add(max(rows, key=lambda c: (calls(c), c["sig"]))["sig"])
+        ctx = [c for c in rows if context(c) is not None]
+        if ctx:
+            keep.add(min(ctx, key=lambda c: (context(c), c["sig"]))["sig"])
+            keep.add(max(ctx, key=lambda c: (context(c), c["sig"]))["sig"])
+    return keep
+
+
 def _snapshot(T):
     """Use the delivery verifier's native owner, including its declared file set."""
     owner = os.path.join(T.dir, "kernel_source_delivery.mjs")
@@ -1631,6 +1730,11 @@ def main(task=None, argv=None):
                     help="boundary cases of every phase, one draw, a few server calls, no "
                          "timing: for fix iterations. Writes run/ut_report.quick.json; never a "
                          "pass and never a receipt")
+    ap.add_argument("--quick-timing", action="store_true",
+                    help="timing only, on representative buckets (per phase and m: the most-called "
+                         "one, the shortest and longest context), for search iterations. Prints "
+                         "GEAK_QUICK_TIMING_SPEEDUP; writes run/ut_report.quick_timing.json; never a "
+                         "pass and never a receipt. Accept a candidate only on a full run")
     ap.add_argument("--reuse", action="store_true",
                     help="reuse gates that passed in run/ut_report.json when nothing they "
                          "depend on changed (e.g. rerun only timing)")
@@ -1656,11 +1760,16 @@ def main(task=None, argv=None):
         return 0
     a.draws = a.draws or int(T.meta.get("random_draws", 3))
     skip = {g for g in a.skip.split(",") if g}
+    if a.quick and a.quick_timing:
+        ap.error("--quick and --quick-timing are exclusive (correctness subset vs timing subset)")
     if a.quick:
         a.draws = 1
         skip.add("timing")
         _quick_subset(T)
     a.gates = [g for g in a.gates.split(",") if g and g not in skip]
+    if a.quick_timing:
+        a.gates = ["timing"]
+        T.timing_filter = _quick_timing_subset(T)
     _snapshot(T)  # Resolve the native owner/runtime before spending GPU time.
     report, code = run_gates(T, a)
     report["snapshot_sha256"] = _snapshot(T)
@@ -1668,19 +1777,24 @@ def main(task=None, argv=None):
     report["gpus"] = T.gpus
     if a.quick:
         report["quick"] = {"cases": sorted(T.sig_filter or []), "server_calls": T.call_filter}
-    out = a.out or os.path.join(T.dir, "run", "ut_report%s.json" % (".quick" if a.quick else ""))
+    if a.quick_timing:
+        report["quick_timing"] = {"buckets": sorted(T.timing_filter) if T.timing_filter is not None
+                                  else "all", "timed_buckets": sum(1 for c in T.manifest["cases"]
+                                                                   if c.get("timed"))}
+    suffix = ".quick" if a.quick else ".quick_timing" if a.quick_timing else ""
+    out = a.out or os.path.join(T.dir, "run", "ut_report%s.json" % suffix)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, "w") as f:
         json.dump(report, f, indent=2, default=str)
         f.write("\n")
-    if not a.quick and not a.out:
+    if not a.quick and not a.quick_timing and not a.out:
         for name in (CHECKPOINT, TIMING_CHECKPOINT):           # the full report supersedes them
             try:
                 os.unlink(os.path.join(T.dir, "run", name))
             except OSError:
                 pass
-    if a.quick:
-        print("UT_VERDICT quick (exit 1) -> %s" % out, flush=True)
+    if a.quick or a.quick_timing:
+        print("UT_VERDICT %s (exit %d) -> %s" % (report["verdict"], code, out), flush=True)
         return code
     # run/ut_result.json is the receipt the optimize stage reads (scripts/run_task_entry.py,
     # scripts/worker.sh): `started`, `ok`, `exit_code`, a dict per gate with `ok`, and the

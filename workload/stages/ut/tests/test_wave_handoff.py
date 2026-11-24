@@ -101,6 +101,14 @@ class WaveHandoffTest(unittest.TestCase):
         self.assertEqual((rec['path'], rec['env_keys']), (str(serving), ['VLLM_ROCM_USE_AITER']))
         self.assertIsNone(W.serving_record(self.args())['path'])
 
+    def test_lanes_do_not_inherit_the_profiled_servers_cache_dirs(self):
+        # node-local cache / scratch dirs of the profiled server select no code path and may not
+        # exist or be writable for a lane on another node or user
+        env = W.lane_env({'env': {'SGLANG_USE_AITER': '1', 'TRITON_CACHE_DIR': '/mnt/a/triton',
+                                  'XDG_CACHE_HOME': '/mnt/a/xdg', 'TMPDIR': '/mnt/a/tmp',
+                                  'AITER_JIT_CACHE_PATH': '/mnt/a/aiter'}}, [])
+        self.assertEqual({k: v for k, v in env.items() if k not in W.PASS_ENV}, {'SGLANG_USE_AITER': '1'})
+
     def test_passing_correctness_without_return_is_planned_for_resume(self):
         self.assertTrue(W.passed(str(self.task)))
         self.assertFalse(W.completed(str(self.task)))

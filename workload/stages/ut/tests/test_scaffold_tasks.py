@@ -78,6 +78,55 @@ class ScaffoldTasksTest(unittest.TestCase):
         self.assertEqual(meta["expected_launches"], {"DECODE": ["k"]})
         self.assertEqual(meta["provenance"], {"from": "anywhere"})
 
+    def test_a_mono_layer_request_binds_the_package_and_applies_its_overrides(self):
+        """A mono_layer task filled from references/mono_models.json (Muse Spark target): the
+        whole package binds, and an oracle the model's example does not cover leaves the frozen
+        contract through a contract override with its why."""
+        models = json.loads((SLOT / "kernel-ut/references/mono_models.json").read_text())["models"]
+        m = next(x for x in models if x["name"] == "muse_spark_target")
+        task = self.doc["tasks"][0]
+        task["label"] = m["label"]
+        task["scaffold"] = {
+            "family": "mono_layer", "target_callable": m["target_callable"],
+            "bind_module": m["bind_module"],
+            "bind_file": "kernel_src/%s/__init__.py" % m["bind_module"].replace(".", "/"),
+            "attrs": m["attrs"], "axes": dict(m["axes"], world=8),
+            "phase_regimes": {"DECODE": {"cuda_graph": True}},
+            "contract_overrides": [{"path": "oracles", "value": {"split": {"path": "split"}},
+                                    "why": "native: not implemented by this example yet"}]}
+        task["manifest"]["cases"] = [{"sig": "DECODE_8_c1024", "regime": "DECODE",
+                                      "axes": {"rows": 8, "context": 1024}, "effective_calls": 3}]
+        self.path.write_text(json.dumps(self.doc))
+        req, root, problems = S.check_request(str(self.path))
+        self.assertEqual(problems, [])
+        tdir = self.out / "tasks" / m["label"]
+        sc = S.install(req, root, str(self.out))["tasks"][0]["scaffold"]
+        self.assertEqual(sc["status"], "ok", sc.get("output"))
+        self.assertIn("--bind-module", sc["command"])
+        meta = json.loads((tdir / "meta.json").read_text())
+        self.assertEqual(meta["candidate_bind"]["module"], m["bind_module"])
+        frozen = json.loads((tdir / "run/ut_contract.json").read_text())
+        self.assertEqual(sorted(frozen["oracles"]), ["split"])
+        self.assertTrue((tdir / "rank_harness.py").exists())
+
+        task["scaffold"]["contract_overrides"][0]["why"] = " "
+        self.path.write_text(json.dumps(self.doc))
+        _, _, problems = S.check_request(str(self.path))
+        self.assertTrue(any("override" in p for p in problems), problems)
+
+    def test_launch_waivers_and_controls_need_their_reasons(self):
+        task = self.doc["tasks"][0]
+        for key, bad in (("launch_waivers", [{"pattern": "_f0_", "why": " "}]),
+                         ("launch_waivers", [{"pattern": "(", "why": "x"}]),
+                         ("negative_controls", [{"leaf": "kernel_src/x.py", "category": "kv_slot",
+                                                 "find": "a", "replace": "b", "expect": ""}])):
+            with self.subTest(key=key, bad=bad):
+                task[key] = bad
+                self.path.write_text(json.dumps(self.doc))
+                _, _, problems = S.check_request(str(self.path))
+                self.assertTrue(any(key.replace("_", " ")[:-1] in p for p in problems), problems)
+                task.pop(key)
+
     def test_share_evidence_for_roofline_is_carried_only_when_passed(self):
         selection = self.root / "profile_selection.json"
         selection.write_text(json.dumps({"targets": [{"id": "k", "overall_pct": 12.5}]}))

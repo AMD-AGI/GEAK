@@ -18,7 +18,8 @@ to this invocation's absolute output path (`$OUT`) before task construction; rel
 exported paths change meaning under a container's working directory. Read
 [setup](references/setup.md), [UT contracts](ut_contracts/README.md),
 [source extraction](references/source-extraction.md),
-[task authoring](references/task-authoring.md) and
+[task authoring](references/task-authoring.md),
+[mono_layer UT](references/mono-layer-ut.md) and
 [source delivery records](references/source-delivery-records.md); in the pipeline also
 [pipeline handoff](references/pipeline-handoff.md).
 

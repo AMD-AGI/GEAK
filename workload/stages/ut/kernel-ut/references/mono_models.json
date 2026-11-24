@@ -1,0 +1,254 @@
+{
+  "contract": "kernel_extract/mono_models/v1",
+  "doc": "Per-model facts of mono_layer monokernels (NOT part of the family schema). The UT request author (references/request-authoring.md, references/mono-layer-ut.md 'Requesting a mono_layer task') makes the profiled kernels matching a model's `kernel` pattern one mono_layer task per model and copies that model's entry, bind, attrs and const axes into the task's `scaffold`. `case_axes` expressions may use shape / context and {serving-arg} placeholders filled from the serving launch args (e.g. --speculative-num-draft-tokens). `world` is the deployment's tp. Values come from the model's config and the serving launch: check them. `oracles_ready` lists the contract oracle legs this model's worked example implements and a GPU run verified; `oracles_unverified` the legs it implements that no GPU run has verified yet (kept in the task's contract with their family bounds, provisional until the first GPU floor run calibrates them; the request says so); any other family oracle is dropped from the task's contract with a `scaffold.contract_overrides` entry and its why (the FILL agent is never left to write an oracle no example covers). `not_exposed`: outputs the model's runner never exposes, each with the reason (the request gives them `present_when: \"False\"` through contract_overrides). `entry_ops`: the profile's operator key(s) the model's launches resolve to (source_map op.key), for matching a graph-replayed per-width symbol whose stack did not resolve. `launch_waivers`: [{pattern, why}] builds of the model's kernels the worked example does not reach; the request carries them and scaffold_tasks.py expands them over expected_launches into meta.ut_contract.launch_waivers (the lint refuses one that waives nothing). `negative_controls`: [{leaf, category, find, replace, expect}] the model's mutations of its own kernel source, GPU-verified with its worked example; the request carries them and scaffold_tasks.py writes them into meta.ut_contract.negative_controls in place of the scaffold's FILL stubs (references/mono-layer-ut.md section 3 lists what a control must satisfy).",
+  "models": [
+    {
+      "name": "muse_spark_target",
+      "label": "muse_mono_target_layer",
+      "kernel": "muse_spark_(layer|k1)_",
+      "target_callable": "sgl_amd_mono.muse_spark.gfx950.runner:MuseMonoRunner.launch",
+      "bind_module": "sgl_amd_mono",
+      "attrs": {
+        "layer_kind": "routed_moe",
+        "stream_dtype": "float32"
+      },
+      "axes": {
+        "hidden": 8192,
+        "launches": 2,
+        "pools": 2,
+        "kv_width": 128,
+        "topk": 8
+      },
+      "case_axes": {
+        "DECODE": {
+          "rows": "shape * {speculative-num-draft-tokens}",
+          "context": "context"
+        }
+      },
+      "widths_from": "rows: verify tokens = requests x --speculative-num-draft-tokens; the launch names carry it as s<rows> (muse_spark_layer_s8_*, s16_*)",
+      "worked_example": "references/examples/muse_spark_target_rank_model.py",
+      "oracles_ready": [
+        "split",
+        "native"
+      ],
+      "oracles_verified": "runs/gpu/W8b 2026-11-12: every gate incl. the native oracle floor (worked example references/examples/muse_spark_target_rank_model.py)"
+    },
+    {
+      "name": "muse_spark_draft",
+      "label": "muse_mono_draft_layer",
+      "kernel": "muse_spark_d(pre|attn|post|mlp)_|muse_spark_draft_layer",
+      "target_callable": "sgl_amd_mono.muse_spark.draft:_Draft.forward",
+      "bind_module": "sgl_amd_mono",
+      "attrs": {
+        "layer_kind": "dense",
+        "stream_dtype": "bfloat16"
+      },
+      "axes": {
+        "hidden": 8192,
+        "launches": 5,
+        "pools": 1,
+        "kv_width": 128
+      },
+      "case_axes": {
+        "DECODE": {
+          "rows": "shape * {speculative-num-draft-tokens}",
+          "context": "context"
+        }
+      },
+      "widths_from": "rows: draft tokens = requests x --speculative-num-draft-tokens (muse_spark_dpre_s8 / s16); launches = the draft's 5 layers (DRAFT_CONFIG num_hidden_layers), each = D-pre, D-attn, D-post, D-MLP device launches; pools = 1 (the compact windowed draft cache through req_to_token)",
+      "review": [
+        "draft: the server calls _Draft.forward (sglang monokernels/runtime.py:349 -> built.forward); RankModel drives one layer a launch through it (references/examples/muse_spark_draft_rank_model.py)",
+        "draft: split == the deployed per-stage path (no merged launch): correctness rests on the native oracle"
+      ],
+      "oracles_ready": [
+        "split",
+        "native"
+      ],
+      "worked_example": "references/examples/muse_spark_draft_rank_model.py",
+      "oracles_verified": "runs/gpu/W10b 2026-11-12: every gate incl. the native oracle floor (SGLang DFlash modules; worked example references/examples/muse_spark_draft_rank_model.py)"
+    },
+    {
+      "name": "dsv41_flash_target",
+      "label": "dsv41_mono_target_layer",
+      "kernel": "dsv41_mono_k[12]_s\\d+_tp\\d+_(?!\\S*_e\\d+_k\\d+)",
+      "target_callable": "vllm.models.deepseek_v41.amd.mono.runner:DSV41MonoLayer.forward",
+      "bind_module": "vllm.models.deepseek_v41.amd.mono",
+      "attrs": {
+        "layer_kind": "routed_moe",
+        "stream_dtype": "bfloat16",
+        "stream_layout": "mhc"
+      },
+      "axes": {
+        "hidden": 5120,
+        "launches": 5,
+        "pools": 2,
+        "kv_width": 512,
+        "topk": 6,
+        "hc": 4
+      },
+      "case_axes": {
+        "DECODE": {
+          "rows": "shape * (1 + {num_speculative_tokens})",
+          "context": "context"
+        }
+      },
+      "widths_from": "rows: decode tokens = requests x (1 + speculative_config.num_speculative_tokens) (DSpark 5: 6 a request); the launch names carry it as s<rows> (aiter::dsv41_mono_k1_s<rows>_tp<tp>_r<ratio>_tl<..>_f<fold>_i<index>, k2 the same without f). Served widths 6..48 (mono_decode.MAX_ROWS = 48, FULL graphs of 6, 12, 18, 24, 36, 42, 48); a step above 48 rows takes vLLM's path. launches = 5 UT layers a step, one of each served layer type: r0 fold 0 (served 1, Engram), r2 (3), r1 (21), r2 index source (8), r1 index source (24), each = K1 + K2 device launches (config compress_ratios, index_source_layer_ids, engram_layer_ids); pools = 2 (0: the layer's SWA fp8_ds_mla cache, written by K1; 1: the compressed cache, read only); kv_width = 512 (a record decoded: 448 e4m3 x UE8M0 + 64 bf16 rope dims); hc = config hc_mult; topk = num_experts_per_tok; world = tp (deployment TP2)",
+      "review": [
+        "dsv41: the server calls MonoDecodeLayer.__call__ (vllm/models/deepseek_v41/amd/mono_decode.py:650, runner.forward at :726) -> runner.forward (mono/runner.py:351) once a backbone layer; RankModel drives one layer a launch through DSV41MonoLayer.forward (references/examples/dsv41_flash_target_rank_model.py)",
+        "dsv41: the worked example's step is the 5 served layer types (r0 fold 0, r2, r1, r2 index, r1 index); an index layer's select copies a precomputed top-512 (vLLM's compressor + indexer stand-in). Not exercised: K1 r2 fold 0 index (served layer 14 only, waived by launch_waivers), the FFN launch (dsv41_mono_ffn_: no layer of this deployment takes it), the Engram write itself (vLLM's, before K1)",
+        "dsv41: the kernel pattern excludes the draft's builds (_e<experts>_k<topk>): model dsv41_flash_draft takes them"
+      ],
+      "worked_example": "references/examples/dsv41_flash_target_rank_model.py",
+      "oracles_ready": [
+        "split",
+        "native"
+      ],
+      "oracles_note": "2026-11-16 (no GPU): split = the deployed K1 + K2 call on the baseline overlay (DSV41MonoLayer has no per-stage mode; the Muse draft precedent): the candidate is judged against the baseline on every case at the family's bounds, and the baseline's floor is trivially met. native = vLLM's own non-mono chain (the op chain of vLLM's tests/models/test_dsv41_mono_numerics.py: MHCPreDelayedOp seams, the ROCm attention ops, the all-reduce over gloo, DeepseekV4MoE at TP 1 on the rank's shard), teacher-forced per launch, near-tie routing aligned on the FFN input K2 used. Bounds: the family's native SQNR floors, provisional until the first GPU floor run (/shared_nfs/hongtaom/dsv41_mono/gpu_validate_1116.sh) records the baseline's sqnr against native. 2026-11-13: deployed path GPU-verified (oracles then dropped).",
+      "not_exposed": {
+        "ids": "DSV41MonoLayer keeps the top-6 picks in scratch mailbox pairs (stages/moe.py 'route' region), whose layout is the kernel's own and may change under optimization; a routing bug is caught through stream_out / layer_out / stream_aux_out, which the routing_ids negative control has to prove"
+      },
+      "entry_ops": [
+        "vllm.v1.attention.ops.flydsl_kernels:_run_compiled@DeepseekV4DecoderLayer"
+      ],
+      "oracles_verified": "015 job 285905, 2026-11-17 (vllm image 6f126f27): every gate incl. the native oracle floor and 6 / 6 negative controls; baseline vs native min SQNR attn_out 31.9 dB, layer_out 49.0, stream_out 57.0, kv_rows 73.4 (floor 20); split bit-exact on 69 / 69; A/A full 0.99995, quick-timing 1.0007 (worked example references/examples/dsv41_flash_target_rank_model.py)",
+      "launch_waivers": [
+        {
+          "pattern": "dsv41_mono_k1_s\\d+_tp\\d+_r2_tl\\d+_f0_i1(?!\\S*_e\\d+_k\\d+)",
+          "why": "K1 of served layer 14 alone (an Engram layer that is also an index source: fold 0 AND the index hand-out). Both branches run in the worked example's step on their own -- fold 0 at launch 0 (r0, Engram), the index hand-out at launches 3 / 4 (f1 i1) -- and the build key is the product of the two constexpr flags; K2 has no fold flag (its r2 i1 build runs at launch 3)"
+        }
+      ],
+      "negative_controls": [
+        {
+          "leaf": "kernel_src/vllm/models/deepseek_v41/amd/mono/attention/back.py",
+          "category": "softmax_scale",
+          "find": "scale = fx.Int32(a[\"qk_scale\"]).bitcast(fx.Float32)",
+          "replace": "scale = fx.Int32(a[\"qk_scale\"]).bitcast(fx.Float32) * fx.Float32(0.5)",
+          "expect": "K2's split attention scores scaled by half the softmax scale (qk_scale = HEAD_DIM^-0.5 log2 e): the attention output of every layer moves on every rank -> stream_out, layer_out, attn_out, stream_aux_out"
+        },
+        {
+          "leaf": "kernel_src/vllm/models/deepseek_v41/amd/mono/stages/seam.py",
+          "category": "peer_partial",
+          "find": "            for src in range_constexpr(1, len(ws)):\n                lo, hi = bf2_f32(ws[src][p])",
+          "replace": "            for src in range_constexpr(1, len(ws) - 1):\n                lo, hi = bf2_f32(ws[src][p])",
+          "expect": "the FFN seam's TP sum of the attention output (wo_b partials pushed by every rank) drops the last rank's partial: at TP2 the attention contribution is rank 0's half on every rank -> stream_out, layer_out, attn_out, stream_aux_out on both ranks"
+        },
+        {
+          "leaf": "kernel_src/vllm/models/deepseek_v41/amd/mono/attention/front.py",
+          "category": "kv_slot",
+          "find": "    soff = slot % blk\n",
+          "replace": "    soff = (slot + 1) % blk\n",
+          "expect": "K1 writes every token's fp8_ds_mla record one slot later in its SWA page (a wrong slot): the step's target records keep the 0x7F poison -> kv_rows non-finite, the neighbour records change -> kv_stray > 0; K2 reads the window through the right slots -> poisoned keys -> stream_out / layer_out / attn_out"
+        },
+        {
+          "leaf": "kernel_src/vllm/models/deepseek_v41/amd/mono/attention/front.py",
+          "category": "kv_slot",
+          "find": "    pos = ld_i32(a[\"pos\"], 2 * t)\n    slot = ld_i32(a[\"slot\"], 2 * t)\n    jr = tt - NOPE // 2",
+          "replace": "    pos = ld_i32(a[\"pos\"], 2 * t)\n    slot = ld_i32(a[\"slot\"], 2 * (t + 1 - 2 * (t % 2)))\n    jr = tt - NOPE // 2",
+          "expect": "the right slots in the wrong row order (token 2k's record into token 2k+1's slot and back; 6 rows a request, so pairs stay in a request): kv_stray stays 0, only the per-row kv_rows check sees the swap directly; the attention then reads swapped neighbours -> layer_out / stream_out move by less"
+        },
+        {
+          "leaf": "kernel_src/vllm/models/deepseek_v41/amd/mono/attention/front.py",
+          "category": "kv_slot",
+          "find": "            gstore(sc, fx.Vector.from_elements([w0, w1], fx.Int32), words=2)\n",
+          "replace": "            pass  # the record's scale word dropped\n",
+          "expect": "a dropped store (the record's 8-B UE8M0 scale word): the step's scale bytes keep the 0x7F poison -> kv_decode marks the rows NaN (their zero pad byte is 0x7F) -> kv_rows; K2 dequantizes the step's own keys with scale 2^0 -> stream_out / layer_out / attn_out"
+        },
+        {
+          "leaf": "kernel_src/vllm/models/deepseek_v41/amd/mono/stages/moe.py",
+          "category": "routing_ids",
+          "find": "            val = fx.max(sc + b, neg)\n",
+          "replace": "            val = fx.max(sc - b, neg)\n",
+          "expect": "the router picks its top-6 by score - bias instead of score + bias (e_score_correction_bias sign flipped): other experts for many tokens. The runner does not expose routing ids (the contract drops ids with an override), so the stream must catch it -> stream_out, layer_out, attn_out, stream_aux_out"
+        }
+      ]
+    },
+    {
+      "name": "dsv41_flash_draft",
+      "label": "dsv41_mono_draft_layer",
+      "kernel": "dsv41_mono_k[12]_s\\d+_tp\\d+_\\S*?_e\\d+_k\\d+_",
+      "target_callable": "vllm.models.deepseek_v41.amd.mono.runner:DSV41MonoLayer.forward",
+      "bind_module": "vllm.models.deepseek_v41.amd.mono",
+      "entry_ops": [
+        "vllm.v1.attention.ops.flydsl_kernels:_run_compiled@DeepseekV4DecoderLayer"
+      ],
+      "attrs": {
+        "layer_kind": "routed_moe",
+        "stream_dtype": "bfloat16",
+        "stream_layout": "mhc"
+      },
+      "axes": {
+        "hidden": 5120,
+        "launches": 3,
+        "pools": 1,
+        "kv_width": 512,
+        "topk": 3,
+        "hc": 4
+      },
+      "case_axes": {
+        "DECODE": {
+          "rows": "shape * {num_speculative_tokens}",
+          "context": "context"
+        }
+      },
+      "widths_from": "rows: the DSpark draft block = requests x speculative_config.num_speculative_tokens (= config dspark_block_size 5); the launch names carry it as s<rows> (aiter::dsv41_mono_k1_s<rows>_tp<tp>_r0_tl<..>_f<fold>_i0_e128_k3_g1_w192, k2 the same without f): s5, s10, s20, s40 served (at most 8 requests). launches = 3: the draft's num_nextn_predict_layers (served layers 40, 41, 42: compress ratio 0, no indexer), the first fold 0 (the broadcast embedding), each = K1 + K2; pools = 1 (the layer's SWA fp8_ds_mla cache; no compressed cache); kv_width = 512; hc = config hc_mult; topk = dspark_num_experts_per_tok (3 of dspark_n_routed_experts 128); the runner's swa_width = get_dspark_swa_index_width(128, 5) = 192 (w192), ug_groups = mono_decode.DRAFT_UG_GROUPS (g1); world = tp (deployment TP2)",
+      "review": [
+        "dsv41 draft: DSparkDeepseekV4Model.forward (vllm/models/deepseek_v41/amd/dspark.py:188) runs its 3 DeepseekV4DecoderLayer's; each one's MonoDecodeLayer.__call__ (draft=True) calls the draft runner's DSV41MonoLayer.forward (mono_decode.py:726); RankModel drives one draft layer a launch (references/examples/dsv41_flash_draft_rank_model.py)",
+        "dsv41 draft: the block is non-causal (vLLM's DSpark SWA indices: the 128 context keys before the block plus the whole block, width 192); context records are random (served: precompute_and_store_context_kv)"
+      ],
+      "worked_example": "references/examples/dsv41_flash_draft_rank_model.py",
+      "oracles_ready": [
+        "split",
+        "native"
+      ],
+      "oracles_note": "2026-11-16 (no GPU): written from the target example; split = the deployed call on the baseline overlay, native = vLLM's non-mono chain with the DSpark DeepseekV4MoE (128 / 3), teacher-forced, near-tie routing aligned. Nothing of this model is GPU-verified yet (deployed path included): /shared_nfs/hongtaom/dsv41_mono/gpu_validate_1116.sh. Bounds: the family's native SQNR floors, provisional.",
+      "oracles_verified": "015 job 285905, 2026-11-17 (vllm image 6f126f27): every gate incl. the native oracle floor and 6 / 6 negative controls; baseline vs native min SQNR attn_out 30.6 dB, layer_out 48.1, stream_out 53.0 (floor 20); split bit-exact; A/A full 1.0006, quick-timing 0.9993; launch 0 (fold 0) shows a few beyond-tie routing picks (random per-copy stream, served copies are equal) within the floor (worked example references/examples/dsv41_flash_draft_rank_model.py)",
+      "not_exposed": {
+        "ids": "DSV41MonoLayer keeps the top-3 picks in scratch mailbox pairs (stages/moe.py 'route' region), whose layout is the kernel's own and may change under optimization; a routing bug is caught through stream_out / layer_out / stream_aux_out, which the routing_ids negative control has to prove"
+      },
+      "negative_controls": [
+        {
+          "leaf": "kernel_src/vllm/models/deepseek_v41/amd/mono/attention/back.py",
+          "category": "softmax_scale",
+          "find": "scale = fx.Int32(a[\"qk_scale\"]).bitcast(fx.Float32)",
+          "replace": "scale = fx.Int32(a[\"qk_scale\"]).bitcast(fx.Float32) * fx.Float32(0.5)",
+          "expect": "K2's split attention scores scaled by half the softmax scale (qk_scale = HEAD_DIM^-0.5 log2 e): the attention output of every layer moves on every rank -> stream_out, layer_out, attn_out, stream_aux_out"
+        },
+        {
+          "leaf": "kernel_src/vllm/models/deepseek_v41/amd/mono/stages/seam.py",
+          "category": "peer_partial",
+          "find": "        acc0, acc1 = sum_partials(\n            c[\"poll\"],\n            own,\n            lambda src: attn_region_pair(src, t, s, col),\n            c[\"d\"].tp,\n        )\n",
+          "replace": "        ws = c[\"poll\"]([(own, attn_region_pair(src, t, s, col), 1) for src in range(c[\"d\"].tp)])\n        acc0, acc1 = bf2_f32(ws[0][0])\n        for src in range_constexpr(1, c[\"d\"].tp - 1):\n            lo, hi = bf2_f32(ws[src][0])\n            acc0, acc1 = acc0 + lo, acc1 + hi\n",
+          "expect": "the FFN seam's TP sum of the attention output (generic builds: stage_reduce / reduce_attn_pair, the path every draft layer takes; the tuned reduce_slice_quad is target-only) still polls every rank's wo_b partial but drops the last one from the sum: at TP2 the attention contribution is rank 0's half on every rank -> stream_out, layer_out, attn_out, stream_aux_out on both ranks"
+        },
+        {
+          "leaf": "kernel_src/vllm/models/deepseek_v41/amd/mono/attention/front.py",
+          "category": "kv_slot",
+          "find": "    soff = slot % blk\n",
+          "replace": "    soff = (slot + 1) % blk\n",
+          "expect": "K1 writes every token's fp8_ds_mla record one slot later in its SWA page (a wrong slot): the step's target records keep the 0x7F poison -> kv_rows non-finite, the neighbour records change -> kv_stray > 0; K2 reads the window through the right slots -> poisoned keys -> stream_out / layer_out / attn_out"
+        },
+        {
+          "leaf": "kernel_src/vllm/models/deepseek_v41/amd/mono/attention/front.py",
+          "category": "kv_slot",
+          "find": "    pos = ld_i32(a[\"pos\"], 2 * t)\n    slot = ld_i32(a[\"slot\"], 2 * t)\n    jr = tt - NOPE // 2",
+          "replace": "    pos = ld_i32(a[\"pos\"], 2 * t)\n    slot = ld_i32(a[\"slot\"], 2 * fx.min(t + 1 - 2 * (t % 2), s - 1))\n    jr = tt - NOPE // 2",
+          "expect": "the right slots in the wrong row order (token 2k's record into token 2k+1's slot and back; 5 rows a request, so a pair can span two requests; the step's last row has no partner when the width is odd and keeps its own slot, never reading past the slot table): kv_stray stays 0, only the per-row kv_rows check sees the swap directly; the attention then reads swapped neighbours -> layer_out / stream_out move by less"
+        },
+        {
+          "leaf": "kernel_src/vllm/models/deepseek_v41/amd/mono/attention/front.py",
+          "category": "kv_slot",
+          "find": "            gstore(sc, fx.Vector.from_elements([w0, w1], fx.Int32), words=2)\n",
+          "replace": "            pass  # the record's scale word dropped\n",
+          "expect": "a dropped store (the record's 8-B UE8M0 scale word): the step's scale bytes keep the 0x7F poison -> kv_decode marks the rows NaN (their zero pad byte is 0x7F) -> kv_rows; K2 dequantizes the step's own keys with scale 2^0 -> stream_out / layer_out / attn_out"
+        },
+        {
+          "leaf": "kernel_src/vllm/models/deepseek_v41/amd/mono/stages/moe.py",
+          "category": "routing_ids",
+          "find": "            val = fx.max(sc + b, neg)\n",
+          "replace": "            val = fx.max(sc - b, neg)\n",
+          "expect": "the router picks its top-3 by score - bias instead of score + bias (e_score_correction_bias sign flipped): other experts for many tokens. The runner does not expose routing ids (the contract drops ids with an override), so the stream must catch it -> stream_out, layer_out, attn_out, stream_aux_out"
+        }
+      ]
+    }
+  ]
+}

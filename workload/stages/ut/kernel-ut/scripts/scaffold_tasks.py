@@ -11,10 +11,12 @@ For every task:
   tasks/<label>/run/requested_kernel.json   the request's KERNEL object, with task_dir and
                                 the server evidence installed here
   tasks/<label>/...             `ut_contracts/scaffold_ut.py new` with the family, target,
-                                const axes/attrs, phase regimes and the case manifest
+                                bind module/file, const axes/attrs, contract overrides,
+                                phase regimes and the case manifest
                                 (an existing unittest.py is never overwritten without --force)
-  tasks/<label>/meta.json       server_preimports, server_evidence, expected_launches and
-                                compile_variant_waivers stamped from the request
+  tasks/<label>/meta.json       server_preimports, server_evidence, expected_launches,
+                                compile_variant_waivers, launch_waivers (rules expanded over
+                                expected_launches) and negative_controls stamped from the request
   task_plan.json                tasks[] and blocked_identities[], the shape downstream reads
   selection_targets.json        only with --selection: the profile's shares, for Roofline
 
@@ -38,6 +40,7 @@ SCAFFOLD = os.path.join(SKILL, "ut_contracts", "scaffold_ut.py")
 FAMILIES = os.path.join(SKILL, "ut_contracts", "families")
 COMPILE_WATCH = os.path.join(STAGES, "_shared", "compile_watch.py")
 CONTRACT = "workload/ut_request/v1"
+CONTROL_KEYS = ("leaf", "category", "find", "replace", "expect")
 LABEL_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
@@ -85,6 +88,23 @@ def check_request(path):
         sc = t.get("scaffold") or {}
         if sc.get("family") not in known | {"custom"} and not sc.get("family_file"):
             problems.append("%s: unknown family %r" % (lab, sc.get("family")))
+        for w in t.get("launch_waivers") or []:
+            if not (isinstance(w, dict) and w.get("pattern") and str(w.get("why") or "").strip()):
+                problems.append("%s: every launch waiver rule needs pattern and why" % lab)
+                break
+            try:
+                re.compile(w["pattern"])
+            except re.error as e:
+                problems.append("%s: launch waiver pattern %r: %s" % (lab, w["pattern"], e))
+        for c in t.get("negative_controls") or []:
+            if not (isinstance(c, dict) and all(str(c.get(k) or "").strip() for k in CONTROL_KEYS)):
+                problems.append("%s: every negative control needs %s" % (lab, ", ".join(CONTROL_KEYS)))
+                break
+        for o in sc.get("contract_overrides") or []:
+            if not (isinstance(o, dict) and o.get("path") and "value" in o
+                    and str(o.get("why") or "").strip()):
+                problems.append("%s: every contract override needs path, value and why" % lab)
+                break
         rk = t.get("requested_kernel") or {}
         if rk.get("entity_kind") != "gpu_kernel" or not rk.get("selected_identities"):
             problems.append("%s: requested_kernel needs entity_kind gpu_kernel and its kernels" % lab)
@@ -117,6 +137,17 @@ def scaffold(task, tdir, force):
            "--manifest", mpath, "--phase-regimes", rpath]
     if sc.get("target_callable"):
         cmd += ["--target", sc["target_callable"]]
+    # a whole-package bind (mono_layer: the model's runner package, references/mono_models.json)
+    if sc.get("bind_module"):
+        cmd += ["--bind-module", sc["bind_module"]]
+    if sc.get("bind_file"):
+        cmd += ["--bind-file", sc["bind_file"]]
+    # contract changes the request decided, each with its why (mono_layer: oracles the model's
+    # worked example does not implement, outputs its runner never exposes)
+    if sc.get("contract_overrides"):
+        opath = os.path.join(tdir, "run", "contract_overrides.json")
+        dump(sc["contract_overrides"], opath)
+        cmd += ["--override", opath]
     # scaffold_ut parses non-strings as JSON: a bool must arrive as `true`, not `True`
     for k, v in (sc.get("axes") or {}).items():
         cmd += ["--axis", "%s=%s" % (k, v if isinstance(v, str) else json.dumps(v))]
@@ -131,8 +162,26 @@ def scaffold(task, tdir, force):
             "command": cmd, "output": "\n".join(lines[-30:])}
 
 
+def expand_launch_waivers(rules, expected):
+    """The request's `launch_waivers` rules ([{pattern, why}], e.g. a mono_layer model's in
+    references/mono_models.json: builds its worked example does not reach) ->
+    meta.ut_contract.launch_waivers [{kernel, phase, why}] for every expected launch a rule
+    matches. None when there are no rules."""
+    if not rules:
+        return None
+    out = []
+    for ph, ks in sorted((expected or {}).items()):
+        for k in ks:
+            for r in rules:
+                if re.search(r["pattern"], k):
+                    out.append({"kernel": k, "phase": ph, "why": r["why"]})
+                    break
+    return out
+
+
 def stamp_meta(tdir, task):
-    """Write the request's server evidence and launch expectations into meta.json."""
+    """Write the request's server evidence, launch expectations, launch waivers and negative
+    controls into meta.json."""
     path = os.path.join(tdir, "meta.json")
     meta = load(path)
     if meta is None:
@@ -147,6 +196,22 @@ def stamp_meta(tdir, task):
         meta.setdefault("ut_contract", {})["compile_variant_waivers"] = task["compile_variant_waivers"]
     if task.get("provenance") is not None:
         meta["provenance"] = task["provenance"]
+    waivers = expand_launch_waivers(task.get("launch_waivers"), task.get("expected_launches"))
+    if waivers is not None:
+        # the rules' entries replace their own earlier ones; hand-written ones stay
+        mc = meta.setdefault("ut_contract", {})
+        mine = {(w["kernel"], w["phase"]) for w in waivers}
+        mc["launch_waivers"] = [w for w in mc.get("launch_waivers") or []
+                                if (w.get("kernel"), w.get("phase")) not in mine] + waivers
+    if task.get("negative_controls"):
+        # the request's controls (a model's GPU-verified set) replace the scaffold's FILL stubs and
+        # any earlier copy of themselves (same leaf + find); hand-written controls stay
+        mc = meta.setdefault("ut_contract", {})
+        ctl = [dict(c) for c in task["negative_controls"]]
+        mine = {(c["leaf"], c["find"]) for c in ctl}
+        mc["negative_controls"] = [c for c in mc.get("negative_controls") or []
+                                   if not str(c.get("find", "")).startswith("FILL")
+                                   and (c.get("leaf"), c.get("find")) not in mine] + ctl
     if "invocation_counts" in load(os.path.join(tdir, "run", "ut_case_plan.json"), {}):
         files = meta.setdefault("kernel_extraction", {}).setdefault("source_delivery_files", [])
         if "run/ut_case_plan.json" not in files:
