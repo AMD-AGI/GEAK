@@ -4615,12 +4615,11 @@ function megaFinalSelectionVerdict(selection, finalists, opts) {
   if (source && String(s.selected_source || '') !== source.source) reasons.push('selected source mismatches registry');
   if (source && row && String(row.source || '') !== source.source) reasons.push('finalist row source mismatches registry');
   if (source && row && String(row.tree || '') !== source.tree) reasons.push('finalist row tree mismatches registry');
-  if (source && row && String(row.head || '') !== source.head) reasons.push('finalist row head mismatches registry');
+  if (source && row && !sameCommit(row.head, source.head)) reasons.push('finalist row head mismatches registry');
   if (String(s.selected_tree || '') !== String(o.selectedWorkspace || '')) {
     reasons.push('selected tree is not the controlled materialized workspace');
   }
-  if (!String(s.selected_head || '') ||
-      !source || String(s.materialized_from_head || '') !== source.head) {
+  if (!String(s.selected_head || '') || !source || !sameCommit(s.materialized_from_head, source.head)) {
     reasons.push('materialized workspace is not bound to the selected candidate head');
   }
   if (!(Number(s.selected_score) > 1.0)) reasons.push('selected score does not beat frozen baseline');

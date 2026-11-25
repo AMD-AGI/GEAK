@@ -69,7 +69,11 @@ const sameCommitFn = src.match(/function sameCommit\(a, b\) \{[\s\S]*?\n\}\n/);
 const sameCommit = new Function(`${sameCommitFn[0]}; return sameCommit;`)();
 ok(sameCommit('16ac8b6', '16ac8b6708624258b383220ad236264a275b6b9a') &&
    !sameCommit('16ac8b6', '16ac8b7708624258b383220ad236264a275b6b9a') && !sameCommit('', '') &&
-   /sameCommit\(identity\.source_head, finalistOrder\[i\]\.head\)/.test(src),
+   /sameCommit\(identity\.source_head, finalistOrder\[i\]\.head\)/.test(src) &&
+   // The final selection verdict binds the materialized workspace and the finalist row by commit too: a
+   // registry head is often short ("41ff2d2") while the director reports the full SHA.
+   /!sameCommit\(s\.materialized_from_head, source\.head\)/.test(src) &&
+   /!sameCommit\(row\.head, source\.head\)/.test(src),
   'materialization identity accepts an abbreviated candidate head for the same commit');
 
 console.log(failures === 0

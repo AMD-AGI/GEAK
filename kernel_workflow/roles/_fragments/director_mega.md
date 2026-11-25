@@ -262,7 +262,9 @@ batch may contain all finalists for one exhaustive comparison.
    `IMPORT_IDENTITY_VOID`, never candidate evidence.
 2. On one collective lease, independently run every finalist with the same command/environment. Interleave
    candidate arms with the frozen baseline on each supplied target/regression guard, use the supplied
-   promotion metric, and run every supplied regression guard. Recheck the supplied accuracy metric,
+   promotion metric, and run every supplied regression guard. Every target AND regression guard needs at
+   least `REQUIRED_PAIRS_BY_GUARD[guard]` (else `REQUIRED_PAIRS`) paired readings in `paired_readings`: the
+   verdict rejects a guard with fewer, even one that clearly holds its floor. Recheck the supplied accuracy metric,
    candidate-path activation on every rank,
    graph safety and required liveness. Every finalist may be a complete partial fusion: require a measured
    launch reduction satisfying `1 <= launches_cand < launches_base` (and `launches_cand <= LAUNCH_TARGET`
