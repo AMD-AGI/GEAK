@@ -29,8 +29,10 @@ import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 # this file lives IN the task dir next to a file named unittest.py — drop it from sys.path before
-# torch is imported, or that file shadows stdlib unittest.
-sys.path[:] = [p for p in sys.path if os.path.abspath(p or ".") != _HERE]
+# torch is imported, or that file shadows stdlib unittest. Python puts the script's REAL directory there:
+# a re-run dir that symlinks the task's files (fusion_handback) puts the task dir itself on sys.path.
+_DIRS = {_HERE, os.path.dirname(os.path.realpath(__file__))}
+sys.path[:] = [p for p in sys.path if os.path.abspath(p or ".") not in _DIRS]
 
 
 def _load(name, path):
@@ -273,10 +275,10 @@ def main():
     cases = _load("cases", os.path.join(task, "cases.py"))
     regime = meta.get("regime", {})
 
-    if a.mode == "list":
+    d = _Dist(meta)
+    if a.mode == "list" and d.world <= 1:
         print(json.dumps({"sigs": [c["sig"] for c in cases.timing_cases(h, meta)]}))
         return
-    d = _Dist(meta)
     if d.world > 1:
         d.start(h, cases)
         try:
@@ -360,6 +362,9 @@ def _main_ranks(a, h, cases, meta, regime, d):
     torch = h._torch()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     draws = a.draws or int(meta.get("random_draws", 3))
+    if a.mode == "list":                     # a multi-rank task's cases build their inputs on every rank
+        d.emit({"sigs": [c["sig"] for c in cases.timing_cases(h, meta)]})
+        return
     if a.mode == "time":
         sel = [c for c in cases.timing_cases(h, meta) if not a.bucket or c["sig"] == a.bucket]
         out = []

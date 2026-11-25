@@ -1520,9 +1520,9 @@ def _run_leg(task_dir, overlay, mode, *, bucket="", out="", seed=0, draws=0, tim
              target_callable="", ref="", tol=0.0):
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join([overlay] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
-    world = world_size(task_dir) if mode in ("time", "oracle", "check") else 1
+    world = world_size(task_dir) if mode in ("list", "time", "oracle", "check") else 1
     # A multi-rank leg runs every rank of the operator under torchrun on the GPUs this process was leased
-    # (HIP_VISIBLE_DEVICES); list / resolve only import code and stay single-process.
+    # (HIP_VISIBLE_DEVICES); resolve only imports code and stays single-process.
     launcher = [sys.executable] if world <= 1 else [
         sys.executable, "-m", "torch.distributed.run", "--standalone", f"--nproc-per-node={world}"]
     cmd = launcher + [os.path.join(task_dir, "leg_runner.py"),

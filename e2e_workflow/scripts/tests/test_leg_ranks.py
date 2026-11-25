@@ -52,8 +52,9 @@ CASES = textwrap.dedent('''
 
     def timing_cases(h, meta):
         import torch
-        for n in (8, 64):
-            yield {"sig": f"n{n}", "regime": "decode", "args": {"x": torch.ones(n)}, "m": n}
+        import torch.distributed as dist
+        for n in (8, 64):   # inputs are built per rank, so listing the cases needs the process group too
+            yield {"sig": f"n{n}", "regime": "decode", "args": {"x": torch.ones(n) * (dist.get_rank() + 1)}, "m": n}
 
     def random_shapes(h, meta):
         import torch
@@ -146,6 +147,18 @@ class MultiRankLegs(unittest.TestCase):
         base, cand = self.h.build_candidate_overlay(self.task, self.meta)
         man = json.load(open(os.path.join(cand, "_overlay_manifest.json")))
         self.assertEqual(sorted(m["module"] for m in man["modules"]), ["toyregion.helper", "toyregion.op"])
+
+    def test_a_rerun_dir_of_symlinks_keeps_the_task_dir_off_sys_path(self):
+        # fusion_handback re-runs a hand-back in a dir that symlinks the task's files; Python puts the
+        # REAL dir (the task, with its unittest.py) on sys.path, which must not shadow stdlib unittest.
+        with open(os.path.join(self.task, "unittest.py"), "w") as fh:
+            fh.write("raise SystemExit('the task unittest.py shadowed stdlib unittest')\n")
+        rerun = os.path.join(self.root, "rerun")
+        os.makedirs(rerun)
+        for name in os.listdir(self.task):
+            os.symlink(os.path.join(self.task, name), os.path.join(rerun, name))
+        res = self.h._run_leg(rerun, os.path.join(rerun, "baseline_overlay"), "time", bucket="n8", timeout=300)
+        self.assertEqual(len(res["cases"][0]["per_rank_ms"]), 2)
 
     def test_measure_legs_scores_the_slowest_rank(self):
         per_case = self.h.measure_legs(self.task, self.meta, timeout=300, max_reps=1)
