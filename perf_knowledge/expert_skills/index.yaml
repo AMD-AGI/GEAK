@@ -44,6 +44,40 @@ skills:
   constraint_validation_status: ''
   auto_apply: true
   explicit_pin_modes: []
+- id: apply_mono_kernel_to_framework
+  file: skills/apply_mono_kernel_to_framework/skill.md
+  scope: e2e
+  revision: ''
+  playbook_file: skills/apply_mono_kernel_to_framework/skill.md
+  planner_extension_file: ''
+  contract_file: ''
+  validation_file: skills/apply_mono_kernel_to_framework/skill.md
+  validation_schema: ''
+  runtime_validation_file: ''
+  embedded_components: []
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    dtypes:
+    - bf16
+    - fp8_e4m3_fnuz
+    - mxfp4
+    regimes:
+    - decode
+    - graph
+    from_backend: ''
+    to_backend: ''
+  expects:
+    e2e_delta_min_pct: 1.0
+    parity: required
+  validation_status: draft
+  reference_evidence_status: ''
+  constraint_validation_status: ''
+  auto_apply: false
+  explicit_pin_modes: []
 - id: ensure_flydsl
   file: skills/ensure_flydsl/skill.md
   scope: dependency
@@ -100,6 +134,57 @@ skills:
   reference_evidence_status: ''
   constraint_validation_status: ''
   auto_apply: true
+  explicit_pin_modes: []
+- id: flydsl_decode_op_authoring
+  file: skills/flydsl_decode_op_authoring/skill.md
+  scope: kernel
+  revision: ''
+  playbook_file: skills/flydsl_decode_op_authoring/skill.md
+  planner_extension_file: ''
+  contract_file: ''
+  validation_file: skills/flydsl_decode_op_authoring/skill.md
+  validation_schema: ''
+  runtime_validation_file: ''
+  embedded_components: []
+  match:
+    operator:
+    - skinny_gemv_decode
+    - scaled_quant_gemm
+    - dense_gemm
+    - rmsnorm
+    - fused_add_rmsnorm
+    - fused_norm_quant
+    - rope
+    - kv_cache_quant
+    - attention_decode_paged
+    - gqa_mqa_attention
+    - sliding_window_attention
+    - mla_attention
+    - sparse_attention_nsa
+    - moe_routing_topk
+    - fused_moe_grouped_gemm
+    - grouped_gemm_moe
+    - linear_attention_gated_delta
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    dtypes:
+    - bf16
+    - fp8_e4m3_fnuz
+    - mxfp4
+    regimes:
+    - decode
+    - graph
+    from_backend: ''
+    to_backend: flydsl
+  expects:
+    isolated_speedup_min: 1.0
+    parity: required
+  validation_status: draft
+  reference_evidence_status: ''
+  constraint_validation_status: ''
+  auto_apply: false
   explicit_pin_modes: []
 - id: flydsl_fp8_blockscale_gemm
   file: skills/flydsl_fp8_blockscale_gemm/skill.md
@@ -443,6 +528,135 @@ skills:
     to_backend: triton
   expects:
     isolated_speedup_min: 1.15
+    parity: required
+  validation_status: draft
+  reference_evidence_status: ''
+  constraint_validation_status: ''
+  auto_apply: false
+  explicit_pin_modes: []
+- id: mono_kernel_authoring
+  file: skills/mono_kernel_authoring/skill.md
+  scope: kernel
+  revision: ''
+  playbook_file: skills/mono_kernel_authoring/skill.md
+  planner_extension_file: ''
+  contract_file: ''
+  validation_file: skills/mono_kernel_authoring/skill.md
+  validation_schema: ''
+  runtime_validation_file: ''
+  embedded_components: []
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    dtypes:
+    - bf16
+    - fp8_e4m3_fnuz
+    - mxfp4
+    regimes:
+    - decode
+    - graph
+    from_backend: ''
+    to_backend: flydsl
+    config:
+      kernel_class: decoder_layer_monokernel
+      ranks: multi
+      entry: author
+  expects:
+    isolated_speedup_min: 1.0
+    parity: required
+  validation_status: draft
+  reference_evidence_status: ''
+  constraint_validation_status: ''
+  auto_apply: false
+  explicit_pin_modes: []
+- id: mono_kernel_optimize
+  file: skills/mono_kernel_optimize/skill.md
+  scope: kernel
+  revision: ''
+  playbook_file: skills/mono_kernel_optimize/skill.md
+  planner_extension_file: ''
+  contract_file: ''
+  validation_file: skills/mono_kernel_optimize/skill.md
+  validation_schema: ''
+  runtime_validation_file: ''
+  embedded_components: []
+  match:
+    operator: '*'
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    dtypes:
+    - bf16
+    - fp8_e4m3_fnuz
+    - mxfp4
+    regimes:
+    - decode
+    - graph
+    from_backend:
+    - flydsl
+    - hip
+    to_backend: ''
+    config:
+      kernel_class: decoder_layer_monokernel
+      ranks: multi
+  expects:
+    isolated_speedup_min: 1.05
+    parity: required
+  validation_status: draft
+  reference_evidence_status: ''
+  constraint_validation_status: ''
+  auto_apply: false
+  explicit_pin_modes: []
+- id: native_decode_numerics
+  file: skills/native_decode_numerics/skill.md
+  scope: kernel
+  revision: ''
+  playbook_file: skills/native_decode_numerics/skill.md
+  planner_extension_file: ''
+  contract_file: ''
+  validation_file: skills/native_decode_numerics/skill.md
+  validation_schema: ''
+  runtime_validation_file: ''
+  embedded_components: []
+  match:
+    operator:
+    - attention_decode_paged
+    - gqa_mqa_attention
+    - sliding_window_attention
+    - mla_attention
+    - sparse_attention_nsa
+    - fused_moe_grouped_gemm
+    - grouped_gemm_moe
+    - moe_routing_topk
+    - scaled_quant_gemm
+    - dense_gemm
+    - skinny_gemv_decode
+    - rmsnorm
+    - fused_add_rmsnorm
+    - fused_norm_quant
+    - rope
+    - kv_cache_quant
+    - allreduce
+    - fused_allreduce_rmsnorm
+    arch_class:
+    - '*'
+    gens:
+    - gfx942
+    dtypes:
+    - bf16
+    - fp8_e4m3_fnuz
+    - mxfp4
+    regimes:
+    - decode
+    - graph
+    from_backend: ''
+    to_backend: ''
+  expects:
+    isolated_speedup_min: 1.0
     parity: required
   validation_status: draft
   reference_evidence_status: ''
