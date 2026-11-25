@@ -10,11 +10,19 @@ hypothesis, inputs, allowed changes, resources, budget and decisive check. The a
 chooses its coding approach. Scope comes from the plan; a supplied frozen kernel task
 keeps its frozen contract throughout.
 
+Delegate with a short goal, task entry and necessary time/device constraints. Keep the
+current direction concise and link larger contracts or evidence for reading as needed;
+do not paste the campaign history or duplicate the harness's checks into the prompt.
+
 ## Qualified kernel task
 
-Select `stages.optimize.skill=oob`. Use [Optimize's kernel recipe](../README.md#kernel-recipe)
+Select `stages.optimize.skill=oob`. Use [Optimize's kernel calls](../README.md#kernel-calls)
 and this directory's worker hooks. Dispatch, accounting, KEEP and cold verification
 remain with the shared scheduler/worker and native measurement reader.
+An attempt is a checkpoint within the task's [search horizon](../README.md#budget-and-resume),
+not its completion. Continue through the retained source, measurements and handoff.
+If the promising change needs a wider computation boundary, return that proposal to Brain
+for UT or a separate system call; do not enlarge a frozen task in place.
 
 Reuse the qualified harness and edit only declared computation sources with native
 coding tools. Preserve every output and the complete case sweep, source/build bindings,

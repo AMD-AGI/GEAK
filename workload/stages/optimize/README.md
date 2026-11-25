@@ -197,6 +197,21 @@ Confusing these two tests can discard useful directions before they are measured
 
 ## Budget and resume
 
+Resolve the distinct limits in the plan and retain the actual dispatch arguments:
+
+| Limit | Meaning |
+| --- | --- |
+| Campaign budget in `BRIEF.md` | Shared preparation, search and delivery under its declared accounting basis |
+| `time_budget_sec` → scheduler `--target` | Target per task; concurrent tasks share an overlapping window |
+| `agent_budget_sec` | Outer agent supervision when using the sequential driver; it is not the worker target |
+| `attempt_cap_sec` → `--attempt-cap` | One coding session, followed by the worker's measurement |
+| `measure_timeout_sec` → `--measure-timeout` | One complete native measurement, priced from the current task |
+
+Set the outer supervision or supported renewal to cover retained workers and completion;
+do not rely on unrelated defaults. A correctness-only UT duration does not price a full
+performance sweep. Worker credit includes time inside its loop; it does not by itself
+certify useful search. Reconcile observed waits and phases without rewriting native credit.
+
 For a required full search, pass `--require-full-budget`; it preserves each task's
 target across allocation windows. Resume the same work root for compatible inputs.
 A changed harness needs its own work root and qualification, with earlier costs retained.

@@ -44,6 +44,9 @@ preserve the inputs and evidence of in-flight calls.
    or resolve an uncertainty that changes the plan; consult
    [experience](experience/README.md). Compare expected serving benefit or decision value
    with the full remaining cost, including delay to a useful serving comparison.
+   Compare the requested gains across objectives with bottleneck coverage and remaining
+   headroom. If the current scope cannot plausibly reach them, consider broader operator
+   boundaries or serving strategies; keep unknown bounds and existing commitments explicit.
    Missing evidence can justify a bounded probe, not a claim that the opportunity is absent.
    Keep user/native requirements and their owners distinct from optional investigations;
    a generated plan does not make diagnostic completeness an acceptance requirement.
@@ -60,6 +63,9 @@ preserve the inputs and evidence of in-flight calls.
    remaining budget; a heartbeat alone is insufficient.
    Confirm steering reached the running method; a changed file is not an acknowledgement.
    If live updates are unsupported, carry the plan through its next safe native checkpoint.
+   Delegate a concise task-local objective, its entry point and necessary constraints.
+   Pass detailed contracts and evidence by reference; leave campaign transcripts and
+   unrelated diagnoses out of the child prompt. Preserve relevant user steering.
 4. Read native receipts and `REPORT.md`, including partial reports. State what they answer
    or leave unresolved in the plan's question. Reconcile input versions, observed costs and
    remaining opportunities; record the next bounded action or justified wait/stop in
@@ -101,7 +107,15 @@ Preserve task coverage, parallelism, selected method, required search credit, co
 and a verified floor with recovery artifacts. A scoped alternative does not complete the
 starting route; revisit unfinished work when that alternative no longer advances the objective.
 Plan sustained search horizons and adoption evidence together from observed costs and
-authorized parallel capacity. Independent kernels can share an overlapping search window;
+authorized parallel capacity. When kernel changes remain the main opportunity, give
+sustained parallel search on ready priority tasks most of the available time. Price preparation
+and delivery around it; prior allocations are planning experience, not fixed hours,
+fractions or equal quotas. Update from headroom, progress and delivery costs.
+Work backward from delivery costs and task readiness to
+check whether each committed horizon fits, including the last attempt's completion.
+Price the critical path with actual device widths; summed task-hours alone do not prove
+feasibility. Report a projected shortfall before changing a committed search horizon.
+Independent kernels can share an overlapping search window;
 do not divide that window by task count as if they ran serially. Priorities resolve resource
 competition; ready work on independent idle slots need not wait for higher-ranked work.
 A short probe or module-call limit is a checkpoint within a task's search horizon, not
