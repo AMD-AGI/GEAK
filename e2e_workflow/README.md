@@ -130,7 +130,7 @@ Workflow({
     workflow_dir: "<E2E_DIR>",                       // REQUIRED: this folder
     expected_gfx: "gfx950",                          // REQUIRED direct E2E identity
     expected_target: "unknown",                      // REQUIRED: r9700|r9600d|w7900|unknown; gfx1201 never implies a product; gfx1100 requires w7900
-    backend: "sglang",                               // optional: sglang|vllm|atom (selects scripts/adapters/<backend>.sh) on Instinct (default sglang); R9700 is vllm or sglang only; R9600D, gfx115x and W7900 are vllm-only (default vllm)
+    backend: "sglang",                               // optional: sglang|vllm|atom (selects scripts/adapters/<backend>.sh) on Instinct (default sglang); R9700 and R9600D are vllm or sglang only (default vllm); gfx115x and W7900 are vllm-only (default vllm)
     launch_script: "<...>/launch.sh",                // optional; else the stack's default config
     kernel_workflow_dir: "<...>/workflows",          // optional; default = sibling kernel_workflow/
     budget: 4,            // max kernel-optimization tasks (kernel-layer tasks; config sweep is free)
