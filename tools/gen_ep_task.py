@@ -22,6 +22,7 @@ Usage:
   python3 tools/gen_ep_task.py --op layernorm_selfcheck --arch gfx950 \
       --out /tmp/hip_ep_layernorm_selfcheck
 """
+
 import argparse
 import json
 import os
@@ -40,16 +41,47 @@ RUNNER_SRC = os.path.join(TOOLS_DIR, "ep_task_runner.py")
 # with and without zero points.
 SHAPE_PRESETS = {
     "matmul_nbits_default": [
-        {"M": 128, "K": 2880, "N": 2880, "gs": 128, "no_zeros": False},   # prefill WMMA + zp
-        {"M": 128, "K": 2880, "N": 5120, "gs": 128, "no_zeros": True},    # prefill WMMA no-zp
-        {"M": 1,   "K": 2880, "N": 2880, "gs": 128, "no_zeros": False},   # decode GEMV + zp
-        {"M": 1,   "K": 2880, "N": 5120, "gs": 128, "no_zeros": True},    # decode GEMV no-zp
+        {
+            "M": 128,
+            "K": 2880,
+            "N": 2880,
+            "gs": 128,
+            "no_zeros": False,
+        },  # prefill WMMA + zp
+        {
+            "M": 128,
+            "K": 2880,
+            "N": 5120,
+            "gs": 128,
+            "no_zeros": True,
+        },  # prefill WMMA no-zp
+        {
+            "M": 1,
+            "K": 2880,
+            "N": 2880,
+            "gs": 128,
+            "no_zeros": False,
+        },  # decode GEMV + zp
+        {
+            "M": 1,
+            "K": 2880,
+            "N": 5120,
+            "gs": 128,
+            "no_zeros": True,
+        },  # decode GEMV no-zp
     ],
     "numeric_default": [],  # numeric oracle drives its own shapes from the pytest file
     "layernorm_default": [
-        {"M": 4096, "N": 2880, "iters": 50},   # prefill-ish batch
-        {"M": 8192, "N": 4096, "iters": 50},   # larger batch
-        {"M": 2048, "N": 8192, "iters": 50},   # wide rows
+        {"M": 4096, "N": 2880, "iters": 50},  # prefill-ish batch
+        {"M": 8192, "N": 4096, "iters": 50},  # larger batch
+        {"M": 2048, "N": 8192, "iters": 50},  # wide rows
+    ],
+    # Qwen3-Next shapes (hidden=5120, head_size=256, eps=1e-6). Block RMSNorm
+    # normalizes over hidden; the narrow N=256 row is the per-head QK-norm regime.
+    "rmsnorm_default": [
+        {"M": 4096, "N": 5120, "iters": 50},  # block RMSNorm, prefill-ish batch
+        {"M": 8192, "N": 5120, "iters": 50},  # block RMSNorm, larger batch
+        {"M": 8192, "N": 256, "iters": 50},  # QK-norm regime (per-head, narrow rows)
     ],
 }
 
@@ -73,17 +105,23 @@ def find_op(reg, op):
     for row in reg["ops"]:
         if row["op"] == op:
             return row
-    sys.exit(f"op '{op}' not found in {REGISTRY}. Known: {[r['op'] for r in reg['ops']]}")
+    sys.exit(
+        f"op '{op}' not found in {REGISTRY}. Known: {[r['op'] for r in reg['ops']]}"
+    )
 
 
 def validate_row(row):
     oracle = row.get("oracle")
     if oracle not in ORACLE_FIELDS:
-        sys.exit(f"op '{row.get('op')}': unknown oracle '{oracle}' in {REGISTRY}; "
-                 f"expected one of {sorted(ORACLE_FIELDS)}")
+        sys.exit(
+            f"op '{row.get('op')}': unknown oracle '{oracle}' in {REGISTRY}; "
+            f"expected one of {sorted(ORACLE_FIELDS)}"
+        )
     missing = [k for k in COMMON_FIELDS + ORACLE_FIELDS[oracle] if k not in row]
     if missing:
-        sys.exit(f"op '{row['op']}' ({oracle} oracle) is missing registry fields: {missing}")
+        sys.exit(
+            f"op '{row['op']}' ({oracle} oracle) is missing registry fields: {missing}"
+        )
     if "shapes_preset" in row and row["shapes_preset"] not in SHAPE_PRESETS:
         sys.exit(f"op '{row['op']}': unknown shapes_preset '{row['shapes_preset']}'")
 
@@ -110,7 +148,9 @@ def resolve_ep_root(ep_repo):
     for root in (ep_repo, os.path.join(ep_repo, "hip-ep")):
         if os.path.isdir(ep_kernels_dir(root)):
             return os.path.abspath(root)
-    sys.exit(f"--ep-repo {ep_repo} has no lib/Runtime/Kernels (nor hip-ep/lib/Runtime/Kernels)")
+    sys.exit(
+        f"--ep-repo {ep_repo} has no lib/Runtime/Kernels (nor hip-ep/lib/Runtime/Kernels)"
+    )
 
 
 def _vendor_ep_kernel(row, ep_repo, out):
@@ -142,11 +182,19 @@ def _find_one(hdir, pred, what):
 def gen_fast(row, arch, ep_repo, out):
     hdir = os.path.join(ep_kernels_dir(ep_repo), "test", "example", row["fast_harness"])
     _require_dir(hdir, "fast harness dir")
-    test_cpp = _find_one(hdir, lambda f: f.startswith("test_") and f.endswith(".cpp"),
-                         "test_*.cpp driver")
-    gen_data = _find_one(hdir, lambda f: f.startswith("gen_") and "data" in f
-                         and f.endswith(".py") and "model" not in f,
-                         "gen_*data*.py generator")
+    test_cpp = _find_one(
+        hdir,
+        lambda f: f.startswith("test_") and f.endswith(".cpp"),
+        "test_*.cpp driver",
+    )
+    gen_data = _find_one(
+        hdir,
+        lambda f: f.startswith("gen_")
+        and "data" in f
+        and f.endswith(".py")
+        and "model" not in f,
+        "gen_*data*.py generator",
+    )
 
     _vendor_ep_kernel(row, ep_repo, out)
     hout = os.path.join(out, "harness")
@@ -155,23 +203,29 @@ def gen_fast(row, arch, ep_repo, out):
         shutil.copy2(os.path.join(hdir, f), os.path.join(hout, f))
 
     meta = {
-        "op": row["op"], "oracle": "fast", "arch": arch,
+        "op": row["op"],
+        "oracle": "fast",
+        "arch": arch,
         "kernel_file": row["kernel_hip"],
         "target_functions": row["entry_points"],
         "frozen_symbols": row["frozen_symbols"],
-        "test_cpp": test_cpp, "gen_data_py": gen_data,
+        "test_cpp": test_cpp,
+        "gen_data_py": gen_data,
         "bits": row.get("bits", []),
         "shapes": SHAPE_PRESETS[row["shapes_preset"]],
     }
     return meta, os.path.join("kernel_src", row["kernel_hip"])
 
 
-def gen_numeric(row, arch, ep_repo, out, ep_dll, ep_build_cmd, ep_options,
-                ep_kernel_lib=None):
+def gen_numeric(
+    row, arch, ep_repo, out, ep_dll, ep_build_cmd, ep_options, ep_kernel_lib=None
+):
     kernel_dst = _vendor_ep_kernel(row, ep_repo, out)
 
     meta = {
-        "op": row["op"], "oracle": "numeric", "arch": arch,
+        "op": row["op"],
+        "oracle": "numeric",
+        "arch": arch,
         "kernel_file": row["kernel_hip"],
         "target_functions": row["entry_points"],
         "frozen_symbols": row["frozen_symbols"],
@@ -206,7 +260,9 @@ def gen_selfcheck(row, arch, out):
             shutil.copy2(os.path.join(src, f), os.path.join(dst, f))
 
     meta = {
-        "op": row["op"], "oracle": "selfcheck", "arch": arch,
+        "op": row["op"],
+        "oracle": "selfcheck",
+        "arch": arch,
         "kernel_file": row["kernel_hip"],
         "target_functions": row["entry_points"],
         "frozen_symbols": row["frozen_symbols"],
@@ -222,10 +278,12 @@ def _readme(row, meta, source_rel):
     targets = "\n".join(f"  - `{s}`" for s in row["entry_points"])
     if oracle == "selfcheck":
         title = f"# GEAK task: {row['op']} (standalone HIP microbenchmark, {meta['arch']})\n\n"
-        intro = (f"Standalone HIP microbenchmark: GEAK edits ONLY `{source_rel}`, which is "
-                 f"built with a frozen harness that checks it against an in-harness CPU "
-                 f"reference. No ONNX Runtime or EP is involved, so a PASS here does NOT "
-                 f"validate EP integration.\n\n")
+        intro = (
+            f"Standalone HIP microbenchmark: GEAK edits ONLY `{source_rel}`, which is "
+            f"built with a frozen harness that checks it against an in-harness CPU "
+            f"reference. No ONNX Runtime or EP is involved, so a PASS here does NOT "
+            f"validate EP integration.\n\n"
+        )
         caller = "the frozen harness"
     else:
         title = f"# GEAK task: {row['op']} ({oracle} oracle, {meta['arch']})\n\n"
@@ -244,14 +302,13 @@ def _readme(row, meta, source_rel):
             "setup + graph execution), NOT kernel latency. Treat it as a coarse signal.\n\n"
         )
     return (
-        title + intro +
-        f"## Optimization targets (editable)\n{targets}\n\n"
+        title + intro + f"## Optimization targets (editable)\n{targets}\n\n"
         f"## FROZEN contract\n"
         f"These signatures (declared in `include/`) are what {caller} calls; they must "
         f"NOT change. Their implementations in `kernel_src/` remain editable.\n"
         f"{frozen}\n\n"
-        + notes +
-        "## Run\n```\npython3 scripts/task_runner.py compile\n"
+        + notes
+        + "## Run\n```\npython3 scripts/task_runner.py compile\n"
         "python3 scripts/task_runner.py correctness\n"
         "python3 scripts/task_runner.py performance\n```\n"
     )
@@ -283,41 +340,63 @@ def main():
     ap = argparse.ArgumentParser(description="Generate a GEAK EP-kernel task dir")
     ap.add_argument("--op", required=True)
     ap.add_argument("--arch", default="gfx1151")
-    ap.add_argument("--ep-repo", help="hip-ep source root (a ROCm/hip-ep checkout, or a "
-                    "repo nesting it under hip-ep/); required for fast/numeric oracles, "
-                    "unused for selfcheck")
+    ap.add_argument(
+        "--ep-repo",
+        help="hip-ep source root (a ROCm/hip-ep checkout, or a "
+        "repo nesting it under hip-ep/); required for fast/numeric oracles, "
+        "unused for selfcheck",
+    )
     ap.add_argument("--out", required=True, help="task dir to create")
-    ap.add_argument("--ep-dll", help="(numeric) EP shared lib registered with ORT; the "
-                    "shared libs in its directory are snapshotted alongside it")
-    ap.add_argument("--ep-build-cmd", help="(numeric) shell command, run in the hip-ep "
-                    "source root, "
-                    "that rebuilds the EP from the EP tree")
-    ap.add_argument("--ep-kernel-lib", help="(numeric) link output of the library holding "
-                    "the compiled kernel, which the EP loads from its own directory (HIP "
-                    "EP: <build>/lib/Runtime/Kernels/libcustom_kernels_<arch>.so). Use the "
-                    "link output, not a post-build copy: copies are skipped when the bytes "
-                    "are unchanged. Defaults to --ep-dll")
-    ap.add_argument("--ep-option", action="append", default=[],
-                    help="(numeric) repeatable KEY=VALUE for the EP")
+    ap.add_argument(
+        "--ep-dll",
+        help="(numeric) EP shared lib registered with ORT; the "
+        "shared libs in its directory are snapshotted alongside it",
+    )
+    ap.add_argument(
+        "--ep-build-cmd",
+        help="(numeric) shell command, run in the hip-ep "
+        "source root, "
+        "that rebuilds the EP from the EP tree",
+    )
+    ap.add_argument(
+        "--ep-kernel-lib",
+        help="(numeric) link output of the library holding "
+        "the compiled kernel, which the EP loads from its own directory (HIP "
+        "EP: <build>/lib/Runtime/Kernels/libcustom_kernels_<arch>.so). Use the "
+        "link output, not a post-build copy: copies are skipped when the bytes "
+        "are unchanged. Defaults to --ep-dll",
+    )
+    ap.add_argument(
+        "--ep-option",
+        action="append",
+        default=[],
+        help="(numeric) repeatable KEY=VALUE for the EP",
+    )
     args = ap.parse_args()
 
     row = find_op(load_registry(), args.op)
     validate_row(row)
     oracle = row["oracle"]
     if args.arch not in row["arches"]:
-        sys.exit(f"--arch {args.arch} is not supported by '{args.op}'; "
-                 f"registry arches: {row['arches']}")
+        sys.exit(
+            f"--arch {args.arch} is not supported by '{args.op}'; "
+            f"registry arches: {row['arches']}"
+        )
     if oracle != "selfcheck":
         if not args.ep_repo:
             sys.exit(f"--ep-repo is required for the {oracle} oracle")
         args.ep_repo = resolve_ep_root(args.ep_repo)
     if oracle == "numeric":
         if not args.ep_build_cmd:
-            sys.exit("--ep-build-cmd is required for the numeric oracle: without it the "
-                     "candidate in kernel_src/ is never compiled into the EP")
+            sys.exit(
+                "--ep-build-cmd is required for the numeric oracle: without it the "
+                "candidate in kernel_src/ is never compiled into the EP"
+            )
         if not args.ep_dll:
-            sys.exit("--ep-dll is required for the numeric oracle (the library "
-                     "--ep-build-cmd produces)")
+            sys.exit(
+                "--ep-dll is required for the numeric oracle (the library "
+                "--ep-build-cmd produces)"
+            )
 
     out = os.path.abspath(args.out)
     os.makedirs(out, exist_ok=True)
@@ -326,9 +405,16 @@ def main():
     elif oracle == "fast":
         meta, source_rel = gen_fast(row, args.arch, args.ep_repo, out)
     else:
-        meta, source_rel = gen_numeric(row, args.arch, args.ep_repo, out,
-                                       args.ep_dll, args.ep_build_cmd, args.ep_option,
-                                       args.ep_kernel_lib)
+        meta, source_rel = gen_numeric(
+            row,
+            args.arch,
+            args.ep_repo,
+            out,
+            args.ep_dll,
+            args.ep_build_cmd,
+            args.ep_option,
+            args.ep_kernel_lib,
+        )
     write_task(out, row, meta, source_rel)
     print(f"Generated {oracle} task for '{args.op}' at {out}")
     print(f"  source_file_path: {source_rel}")
