@@ -36,8 +36,14 @@ function allowedPositiveInfinity(kind, parts, document) {
       ['sqnr_db', 'baseline_sqnr_db'].includes(parts.at(-1))) {
     const gate = document?.gates?.[parts[1]];
     let rows, index, output;
+    let leg = row => row;
     if (parts.length === 6 && parts[1] === 'correctness' && parts[2] === 'cases') {
       rows = gate?.cases; index = parts[3]; output = parts[4];
+    } else if (parts.length === 8 && parts[1] === 'correctness' && parts[2] === 'cases' &&
+               /^vs_/.test(parts[4]) && ['cand', 'base'].includes(parts[5])) {
+      // oracle legs: cases/<i>/vs_<oracle>/<cand|base>/<output>/<field>
+      rows = gate?.cases; index = parts[3]; output = parts[6];
+      leg = row => row?.[parts[4]]?.[parts[5]];
     } else if (parts.length === 8 && parts[1] === 'replay' &&
                parts[2] === 'phases' && parts[4] === 'cases') {
       const phase = gate?.phases?.[parts[3]];
@@ -45,7 +51,7 @@ function allowedPositiveInfinity(kind, parts, document) {
       rows = phase.cases; index = parts[5]; output = parts[6];
     } else return false;
     const row = Array.isArray(rows) && /^(0|[1-9][0-9]*)$/.test(index) ? rows[Number(index)] : null;
-    const comparison = row?.[output];
+    const comparison = leg(row)?.[output];
     return gate?.status === 'pass' && row?.ok === true && comparison?.kind === 'sqnr' &&
       comparison.ok === true && comparison.nonfinite_mismatches === 0 &&
       Number.isFinite(comparison.min_db) && ['baseline', 'reference'].includes(comparison.against) &&

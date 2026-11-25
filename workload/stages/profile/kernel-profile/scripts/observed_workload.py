@@ -193,6 +193,25 @@ def parse_log(paths, rank=0, window=None):
     return pre, dec
 
 
+GRAPH_BS_RE = re.compile(r"Capture (?P<what>[\w ]*?)CUDA graph (?:begin.*?\bbs=|bs )\[(?P<bs>[\d, ]+)\]",
+                         re.I)
+
+
+def graph_capture_bs(paths):
+    """The decode capture sizes the server logged at startup (sglang does not report them in
+    /get_server_info when it picks them itself). Under speculation the target-verify graph is
+    the one decode replays."""
+    found = {}
+    for path in paths:
+        with open(path, errors="replace") as f:
+            for line in f:
+                m = GRAPH_BS_RE.search(line)
+                if m:
+                    found.setdefault(m.group("what").strip().lower(),
+                                     sorted(int(x) for x in m.group("bs").split(",") if x.strip()))
+    return found.get("target verify") or next(iter(found.values()), [])
+
+
 def parse_vllm_iterations(paths, rank=0, window=None, accept_len=1.0):
     """Read one structural observation per worker step; mixed steps are owned once."""
     if not math.isfinite(accept_len) or accept_len <= 0:
@@ -468,6 +487,7 @@ def main():
                       else ("explicit" if window else "whole log"),
         },
         "decode_log_interval": interval,
+        "graph_bs": graph_capture_bs(args.log) if args.log_format != "vllm-iterations" else [],
         "counts": {
             "prefill_batches": len(pre),
             "decode_rows_logged": len(dec),

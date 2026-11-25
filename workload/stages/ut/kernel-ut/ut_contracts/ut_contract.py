@@ -58,8 +58,6 @@ UNIT_ROUNDOFF = {"float64": 2.0 ** -53, "float32": 2.0 ** -24, "bfloat16": 2.0 *
                  "float16": 2.0 ** -11, "float8_e4m3fn": 2.0 ** -4, "float8_e4m3fnuz": 2.0 ** -4,
                  "float8_e5m2": 2.0 ** -3, "float8_e5m2fnuz": 2.0 ** -3}
 INTEGER_DTYPES = ("int8", "int16", "int32", "int64", "uint8", "bool")
-# Packed or exponent-only dtypes: a tensor of these is compared byte for byte or decoded first.
-PACKED_DTYPES = ("float4_e2m1fn_x2", "float8_e8m0fnu", "uint8")
 
 # Elementwise bound multiples, as in SIKL semantics/_compare.py.
 _SQRT_LENGTH_MULTIPLE = 6.0
@@ -220,7 +218,14 @@ def _validate_delta(doc, name, bound, where="output"):
         raise ContractError("%s %s: delta applies to tolerance or sqnr bounds" % (where, name))
     if "along" in d:
         shape = doc["outputs"][name].get("shape")
-        if not isinstance(shape, list) or d["along"] not in shape:
+        if isinstance(shape, dict):
+            cases = shape.get("cases")
+            if not isinstance(shape.get("by"), str) or not isinstance(cases, dict) or not cases:
+                raise ContractError("%s %s: conditional shape needs a selector and cases" % (where, name))
+            layouts = cases.values()
+        else:
+            layouts = (shape,)
+        if any(not isinstance(dims, list) or d["along"] not in dims for dims in layouts):
             raise ContractError("%s %s: delta.along %r is not an axis of the output's shape"
                                 % (where, name, d["along"]))
     if f64_reference(doc):
@@ -432,9 +437,8 @@ def present(spec, sym):
     return True if when is None else bool(evaluate(when, sym))
 
 
-def shape_of(spec, sym):
-    """`shape` is a list of axis expressions, or `{"by": <attr>, "cases": {<value>: [...]}}`
-    when an attribute changes the layout (`trans_b`: (n, k) or (k, n))."""
+def _shape_dims(spec, sym):
+    """The axis expressions of the layout selected for this case."""
     shape = spec["shape"]
     if isinstance(shape, dict):
         key = sym[shape["by"]]
@@ -442,7 +446,12 @@ def shape_of(spec, sym):
         if key not in shape["cases"]:
             raise ContractError("shape has no case %s=%s" % (shape["by"], key))
         shape = shape["cases"][key]
-    return tuple(int(evaluate(d, sym)) for d in shape)
+    return shape
+
+
+def shape_of(spec, sym):
+    """Evaluate the dimensions of the selected layout."""
+    return tuple(int(evaluate(d, sym)) for d in _shape_dims(spec, sym))
 
 
 def dtype_of(spec, sym):
@@ -1280,18 +1289,12 @@ def check_input_values(doc, args, sym):
     return not bad, bad
 
 
-def writable_inputs(doc):
-    """Inputs the live entry writes in place (an in-place rotary, a KV cache it fills). `call()`
-    must clone them before invoking the entry, so `inputs_unmodified` still covers them: a
-    call() that forgot the clone corrupts the operands of every later draw and replay."""
-    return tuple(n for n, s in doc["inputs"].items() if s.get("writable"))
-
-
-def inputs_unmodified(call, args, writable=()):
-    """Run `call(args)` once and confirm no input other than `writable` changed. An extracted
-    kernel that writes an operand in place (a residual `add_`, a cache it should only read) makes
-    every later draw of the same buffers wrong, and a graph replay doubly so."""
-    before = input_snapshot({k: v for k, v in args.items() if k not in writable})
+def inputs_unmodified(call, args):
+    """Run `call(args)` once and confirm no input changed. An extracted kernel that writes an
+    operand in place (a residual `add_`, a cache it should only read) makes every later draw of
+    the same buffers wrong, and a graph replay doubly so. `call()` clones what the live entry
+    legitimately writes (a contract input marked `writable`)."""
+    before = input_snapshot(args)
     out = call(args)
     changed = sorted(k for k in before if k not in args or not inputs_equal(before[k], args[k]))
     return not changed, changed, out
@@ -1568,9 +1571,11 @@ def compare_outputs(doc, cand_out, base_out, *, sym, refs=None, magnitudes=None,
         if produced is None and spec.get("require_finite"):
             produced = _finite(c, b, ref)
         stored = None
-        if produced is None and bound.get("delta"):
+        delta = bound.get("delta")
+        if produced is None and delta:
             stored = b if ref is None else ref
-            c, b, ref, produced = _delta(spec, bound["delta"], c, b, ref, cand, base, refs, rows)
+            axis = _shape_dims(spec, sym).index(delta["along"]) if "along" in delta else None
+            c, b, ref, produced = _delta(delta["minus"], axis, c, b, ref, cand, base, refs, rows)
         if produced is not None:
             results[name] = produced
             ok = ok and bool(produced["ok"])
@@ -1605,14 +1610,12 @@ def _finite(cand, base, ref):
     return None
 
 
-def _delta(spec, d, c, b, ref, cand, base, refs, rows):
+def _delta(minus, axis, c, b, ref, cand, base, refs, rows):
     """The step's change (`bound.delta`) of cand / base / ref: `x - minus`, or with `along` the
     consecutive differences over that axis, the first against `minus`. Returns (c, b, ref,
     failure-or-None); a compared-against change that is identically zero fails (the step did
     nothing, or the harness returned the input as the output)."""
     torch = _torch()
-    minus = d["minus"]
-    axis = spec["shape"].index(d["along"]) if "along" in d else None
 
     def diff(x, m):
         x, m = x.detach().cpu().to(torch.float64), m.detach().cpu().to(torch.float64)

@@ -59,10 +59,24 @@ def try_lease(pool, count, lock_dir, idle):
             release(fds)
 
 
+DEV_DRI, SYS_DRM = Path('/dev/dri'), Path('/sys/class/drm')
+
+
+def visible_render_nodes():
+    """Render nodes of whole GPUs this process can open, in ROCr's index order (minor number).
+    Partition (XCP) nodes have no gpu_busy_percent. In a container that mounts a subset of a
+    shared node's GPUs, renderD(128+8i) is another user's GPU, not local GPU i."""
+    nodes = sorted(DEV_DRI.glob('renderD*'), key=lambda p: int(p.name[len('renderD'):]))
+    return [p.name for p in nodes if (SYS_DRM / p.name / 'device' / 'gpu_busy_percent').exists()]
+
+
 def gpu_idle(gpu, cfg):
     if os.environ.get('GEAK_GPU_REQUIRE_IDLE', '1') != '1':
         return True
-    dev = Path('/sys/class/drm/renderD%d/device' % (cfg['render_base'] + cfg['render_step'] * gpu))
+    nodes = visible_render_nodes() if cfg.get('backend') == 'local' else []
+    name = (nodes[gpu] if gpu < len(nodes)
+            else 'renderD%d' % (cfg['render_base'] + cfg['render_step'] * gpu))
+    dev = SYS_DRM / name / 'device'
     if not (dev / 'gpu_busy_percent').exists():
         return True  # same unknown-device policy as gpu_lock.sh; allocation is still required
     try:

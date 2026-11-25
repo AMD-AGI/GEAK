@@ -283,22 +283,6 @@ def build(shapes_files, roots, packages):
                                          for f in k["frames"] if not f["resolved"]})}
 
 
-def common_seam(source_map, names):
-    """Innermost frame every kernel in `names` passes through, or None."""
-    if any((source_map["kernels"].get(n) or {}).get("graph_replayed_only") for n in names):
-        return None
-    stacks = [[(f["module"], f["target_callable"]) for f in
-               source_map["kernels"].get(n, {}).get("frames", [])] for n in names]
-    if not stacks or not all(stacks):
-        return None
-    others = [set(s) for s in stacks[1:]]
-    for key in stacks[0]:
-        if all(key in o for o in others):
-            return next(f for f in source_map["kernels"][names[0]]["frames"]
-                        if (f["module"], f["target_callable"]) == key)
-    return None
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--shapes-dir", required=True, help="kernel_shapes.py outputs")

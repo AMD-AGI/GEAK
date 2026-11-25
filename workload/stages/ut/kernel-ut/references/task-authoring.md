@@ -20,6 +20,45 @@ The scaffold copies and freezes the helpers. Existing tasks use their own review
 snapshots; refreshing the skill does not rewrite those tasks. During optimization,
 only the declared candidate computation may change.
 
+## Reuse an upstream test
+
+Start with the implementation selected by the deployed caller. Look for tests of its
+entry or device kernel in the installed revision of the owning project (for example
+vLLM, SGLang, sgl-amd-mono or AITER). If the image omits tests, use the matching
+source checkout. Compare the test's actual launch with the requested shapes, dtypes,
+dispatch, graph mode and TP/EP group. Check which outputs it validates, including
+state read by the next call.
+
+| Upstream coverage | How to author the task |
+| --- | --- |
+| The test exercises the selected implementation and checks the requested behavior. | Reuse the test unchanged for that check. Keep its fixtures, reference and native assertions. Connect its existing input and call helpers to the scaffold where the driver needs them. |
+| The entry matches and some cases or state checks are missing. | Reuse the matching pieces. Add only the missing cases, state observations or rank setup in the generated task. Take shapes, weights and per-case launch modes from the request. |
+| The test dispatches elsewhere, covers only a different operation, or no matching test is available. | Fill the existing family scaffold from the deployed caller and its reference. An upstream test for a related operation can still supply a layout or a fixture. |
+
+Record the revision, test path and case name beside the call site in the generated
+`cases.py` docstring. Say what was reused and what the task adds. Keep model-specific
+adaptations in that task. If a helper is absent from the runtime, carry the needed
+source and its license with the task. Include added oracle or fixture files in
+`meta.kernel_extraction.source_delivery_files` so the snapshot covers it.
+
+When running an upstream test directly, use its native entry in the pinned runtime.
+Keep the command, case IDs and outcomes with the lane's evidence. Some launchers put
+the upstream checkout first on the import path. Verify candidate binding and the
+selected device launch in the processes that execute it. A skipped case or fallback dispatch
+leaves that case uncovered. Freeze the oracle outside the candidate overlay. The
+task's existing numerical negative control should expose an error in the selected
+leaf. Run full [qualification](#qualification) for the GEAK receipt.
+
+For a collective, reuse an upstream launcher at the requested world size when it
+exercises the full boundary. Use the [multi-rank harness](collective-ut.md) to fill
+missing distributed coverage. For example, vLLM's DeepSeek whole-layer test already
+launches at TP2, TP4 and TP8. In sgl-amd-mono, Muse Spark's whole-layer test checks
+fusion on one GPU and its eight-GPU test checks K3. A whole-layer TP8 request still
+needs the fused launch and its peer exchanges on eight GPUs.
+[vLLM whole layer](https://github.com/vllm-project/vllm/blob/4fab5a07/tests/models/test_dsv41_mono_numerics.py#L620-L626)
+· [Muse whole layer](https://github.com/sgl-project/sgl-amd-mono/blob/4cba5b25/test/kernels/test_muse_spark_layer.py#L1-L8)
+· [Muse K3](https://github.com/sgl-project/sgl-amd-mono/blob/4cba5b25/test/kernels/test_muse_spark_k3_tp8.py#L1-L7)
+
 ## Metadata and hooks
 
 `meta.target_callable` is the inspected `module:attribute` entry. Module replacement

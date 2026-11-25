@@ -349,17 +349,6 @@ def cmd_merge(a):
         raise SystemExit(str(error))
 
 
-def pkg_root(package):
-    mod = importlib.import_module(package)
-    f = getattr(mod, "__file__", None)
-    if f:
-        return os.path.dirname(f)
-    p = list(getattr(mod, "__path__", []))
-    if not p:
-        raise SystemExit(f"cannot locate package root for {package}")
-    return p[0]
-
-
 def module_file(dotted):
     """Absolute path of the installed file backing a dotted module name."""
     spec = importlib.util.find_spec(dotted)

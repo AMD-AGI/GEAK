@@ -43,7 +43,9 @@ scaffolded task directory into a UT whose every gate passes on the installed bas
 2. **Extract the source** (`kernel_src/`, `meta.ut_contract.editable_leaves`,
    `meta.candidate_bind`): the installed files the entry's kernels compile from, resolved
    inside this container (the serving image), with their hashes.
-3. **Fill the scaffold.** `cases.py` `call()` exactly as the deployed caller calls the
+3. **Choose the test and fill the scaffold.** Start with the
+   [upstream test at the deployed revision](task-authoring.md#reuse-an-upstream-test).
+   Implement `cases.py` `call()` exactly as the deployed caller calls the
    entry -- optional arguments, dtypes and None-ness as `run/server_calls.json` shows them,
    not as defaults suggest -- the family's hooks, `replay_bundle()` for graph phases; the
    case axes in `run/ut_cases.json` if the plan left any open; one numerical negative
@@ -114,10 +116,10 @@ is an `--override` with a stated reason, recorded by the lint.
 A task with `required_gpu_count` > 1 in `run/requested_kernel.json` is a collective on the
 deployment's world size; each validation request leases that many GPUs together.
 For a multi-rank harness pass `--gpus 0` to the UT driver so it starts only one rank
-pool at a time; that pool still sees every leased device. The generic driver runs
-one process, so build the multi-rank harness of `references/collective-ut.md` inside the
-task (every rank's output checked, the deployed graph mode, a numerical negative control)
-and keep `unittest.py` as its entry. If it cannot be built here, that is a blocker naming
+pool at a time; that pool still sees every leased device. Reuse a matching upstream rank
+launcher or build the [multi-rank harness](collective-ut.md) inside the task. Check every
+rank's output, the deployed graph mode and a numerical negative control through the task's
+`unittest.py` entry. If the harness cannot run here, that is a blocker naming
 what is missing -- the kernel stays a selected target.
 
 ## Blockers
@@ -132,3 +134,6 @@ python3 $SKILL_ROOT/scripts/ut_wave.py block --task-dir $TASK_DIR \
 ```
 
 A vague reason ("doesn't work") is the one unacceptable outcome; nobody can act on it.
+An estimate that the work will not fit the deadline is not a blocker: build what you can and
+leave the rest for the next attempt. A block before the last attempt is read by that attempt,
+which continues; only the last attempt's block ends the task.

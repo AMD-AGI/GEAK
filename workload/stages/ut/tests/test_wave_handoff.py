@@ -121,6 +121,25 @@ class WaveHandoffTest(unittest.TestCase):
         self.assertEqual(state['attempt_limit'], 6)
         self.assertIsNone(state['started'])
 
+    def test_local_gpu_index_follows_the_mounted_render_nodes(self):
+        # A container with physical GPUs 4-7 of a shared node: local GPU 0 is renderD160, and
+        # renderD128 (another user's GPU, busy) must not decide its lease.
+        dri, drm = self.root / 'dev_dri', self.root / 'sys_drm'
+        dri.mkdir()
+        for n, busy in ((128, 100), (160, 0), (161, None), (168, 0)):
+            (dri / ('renderD%d' % n)).touch()
+            dev = drm / ('renderD%d' % n) / 'device'
+            dev.mkdir(parents=True)
+            if busy is not None:            # an XCP partition node has no busy counter
+                (dev / 'gpu_busy_percent').write_text(str(busy))
+                (dev / 'mem_info_vram_used').write_text('0')
+        (dri / 'renderD128').unlink()       # not mounted here
+        cfg = {'backend': 'local', 'render_base': 128, 'render_step': 8}
+        with patch.object(Q, 'DEV_DRI', dri), patch.object(Q, 'SYS_DRM', drm):
+            self.assertEqual(Q.visible_render_nodes(), ['renderD160', 'renderD168'])
+            self.assertTrue(Q.gpu_idle(0, cfg))
+            self.assertFalse(Q.gpu_idle(0, dict(cfg, backend='docker')))   # physical numbering
+
     def test_resume_reconciles_valid_delivery_interrupted_before_terminal_state(self):
         wave = str(self.root / 'ut_wave')
         W.set_status(wave, 'op', status='running', attempts=2, started=1)

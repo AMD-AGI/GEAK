@@ -62,6 +62,22 @@ def sha256(path):
     return h.hexdigest()
 
 
+def important_gaps(label, phases, cases, waivers, important):
+    """The profile's important cells of the task's phases that no case names (`important_cell`)
+    and no waiver explains."""
+    if important is None:
+        return []
+    named = {c.get("important_cell") for c in cases}
+    phases = {str(p).upper() for p in phases}
+    missing = [c["id"] for c in important.get("cells") or []
+               if c["phase"].upper() in phases and c["id"] not in named
+               and not str(waivers.get(c["id"]) or "").strip()]
+    if not missing:
+        return []
+    return ["%s: %d important cell(s) of its phases have no case and no waiver: %s"
+            % (label, len(missing), ", ".join(missing[:8]) + (" ..." if len(missing) > 8 else ""))]
+
+
 def check_request(path):
     """(request, its directory, problems)."""
     req = load(path)
@@ -76,6 +92,12 @@ def check_request(path):
         elif not os.path.isfile(full) or sha256(full) != ref.get("sha256"):
             problems.append("request file changed or is missing: %s" % rel)
     known = {f[:-5] for f in os.listdir(FAMILIES) if f.endswith(".json")}
+    important = None
+    if req.get("important_shapes"):
+        important = load(os.path.join(root, req["important_shapes"]))
+        if not isinstance(important, dict):
+            problems.append("important_shapes %r is missing or not JSON" % req["important_shapes"])
+            important = None
     labels = set()
     for t in req.get("tasks") or []:
         lab = t.get("label") or ""
@@ -88,12 +110,17 @@ def check_request(path):
         rk = t.get("requested_kernel") or {}
         if rk.get("entity_kind") != "gpu_kernel" or not rk.get("selected_identities"):
             problems.append("%s: requested_kernel needs entity_kind gpu_kernel and its kernels" % lab)
-        for c in (t.get("manifest") or {}).get("cases") or []:
+        cases = (t.get("manifest") or {}).get("cases") or []
+        for c in cases:
             calls = c.get("effective_calls")
             if (not c.get("sig") or isinstance(calls, bool) or not isinstance(calls, (int, float))
                     or not math.isfinite(calls) or calls < 0):
                 problems.append("%s: every case needs a sig and a finite nonnegative effective_calls" % lab)
                 break
+            if (c.get("launch") or {}).get("mode", "graph") not in ("graph", "eager"):
+                problems.append("%s: case %s launch.mode must be graph or eager" % (lab, c["sig"]))
+        problems += important_gaps(lab, rk.get("phases") or [], cases, t.get("important_waivers") or {},
+                                   important)
     if not req.get("tasks") and not req.get("blocked_identities"):
         problems.append("the request names no task and no blocked identity")
     return req, root, problems

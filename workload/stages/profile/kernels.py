@@ -40,7 +40,7 @@ REQUIRED = ("kernel_ranking.json", "selection_targets.json", "sampling_points_fi
             "evidence/source_map.json", "evidence/adjacency.json")
 OPTIONAL = ("kernel_workload.json", "coverage.json", "serving.json", "environment.json",
             "runtime_identity.json", "sampling_plan.json", "evidence/compile_variants.json",
-            "evidence/observed_workload.json")
+            "evidence/observed_workload.json", "evidence/important_shapes.json")
 MAX_FRAMES = 12          # serving-stack frames kept per kernel (innermost first)
 MAX_OPERAND_SAMPLES = 4  # distinct host-op operand signatures kept per point
 

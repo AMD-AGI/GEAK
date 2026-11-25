@@ -93,6 +93,59 @@ class SweepTest(unittest.TestCase):
             H._measure_bucket('/fixture', 'base', 'cand', 'a', 5, 1, (.95, 1.1), {})
 
 
+dspec = importlib.util.spec_from_file_location('timing_driver', SKILL / 'ut_contracts/ut_driver.py')
+D = importlib.util.module_from_spec(dspec)
+dspec.loader.exec_module(D)
+
+
+def receipt(primed=True, timers=('cuda_event_graph',)):
+    return {'primed': primed, 'timers': list(timers)}
+
+
+class DriverTimingTest(unittest.TestCase):
+    def task(self, cases, regimes):
+        return SimpleNamespace(h=H, manifest={'cases': cases}, phase_regimes=lambda: regimes,
+                               dir='/fixture', meta={}, gpus=None)
+
+    def test_case_launch_overrides_the_phase_graph_mode(self):
+        T = self.task([{'sig': 'big', 'launch': {'mode': 'eager'}}, {'sig': 'small'}],
+                      {'DECODE': {'cuda_graph': True}})
+        eager = {'baseline_timing': receipt(timers=('cuda_event',)),
+                 'optimized_timing': receipt(timers=('cuda_event',))}
+        self.assertEqual(D.timing_basis_defects(T, [dict(eager, sig='big', regime='DECODE')]), [])
+        (bad, _) = D.timing_basis_defects(T, [dict(eager, sig='small', regime='DECODE')])
+        self.assertIn('deploys under a CUDA graph', bad)
+
+    def test_important_cases_skip_the_reference_unless_a_bound_reads_it(self):
+        specs = [{'sig': 'pt', 'axes': {}}, {'sig': 'imp', 'kind': 'important', 'axes': {}}]
+        U = SimpleNamespace(BOUNDS_NEEDING_REFERENCE=('dot_product',))
+        T = SimpleNamespace(random_specs=lambda: specs, U=U,
+                            doc={'outputs': {'out': {'bound': {'kind': 'sqnr'}}}})
+        self.assertEqual(D.oracle_case_sigs(T, {'cases': 'all'}), ['pt'])
+        T.doc = {'outputs': {'out': {'bound': {'kind': 'dot_product'}}}}
+        self.assertFalse(D._important(T, specs[1]))
+
+    def test_host_bound_buckets_are_measured_again_before_refusal(self):
+        T = self.task([{'sig': 'a'}, {'sig': 'b'}], {'DECODE': {'cuda_graph': True}})
+        calls = []
+
+        def measure(task, meta, done=None, **kw):
+            calls.append(sorted(done or {}))
+            primed = len(calls) > 1
+            row = lambda s, p: {'sig': s, 'regime': 'decode', 'm': 1, 'reps': 1, 'baseline_ms': 2.0,
+                                'optimized_ms': 1.0, 'process_mode': 'batched',
+                                'baseline_timing': receipt(p), 'optimized_timing': receipt()}
+            rows = dict(done or {})
+            rows.update({s: row(s, primed or s == 'a') for s in 'ab' if s not in rows})
+            return [rows[s] for s in 'ab']
+        a = SimpleNamespace(max_reps=1, reuse=False, quick=False, out=None)
+        with patch.object(H, 'measure_legs', side_effect=measure):
+            out = D.gate_timing(T, a, {})
+        self.assertEqual(calls, [[], ['a']])          # only the host-bound bucket again
+        self.assertEqual((out['status'], out['host_bound_retried']), ('pass', ['b']))
+        self.assertEqual(out['per_phase']['decode']['weighted'], 2.0)
+
+
 class NativeLegTest(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()

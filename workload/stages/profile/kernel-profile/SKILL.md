@@ -57,10 +57,13 @@ with, and spent most of the hour doing it.
 2. **Observe and plan.** `observed_workload.py`, then `plan_points.py`
    ([sampling](references/sampling.md)) with the scenario's sampling budget. To reuse the
    captures of another profile of the identical deployment, pass `--reuse-capture`.
+   Shapes come from the baseline's serving log; nothing is added to the baseline run.
 3. **Capture and freeze profile evidence.** Under the allocated GPU-set lease,
-   `probe_server.py run ... -- run_points.py` captures the planned points: prefill on the graph
-   server, decode normally on the eager server, per-point census, achieved-shape
-   relabeling, ranking and dispatch/source evidence. Resume reuses signed censuses;
+   `probe_server.py run ... -- run_points.py` captures the planned points on one graph
+   server (decode timed as deployed; an eager restart only if decode is graph-hidden, and
+   for source frames), per-point census, achieved-shape relabeling, ranking,
+   `evidence/important_shapes.json` (observed cells ranked by estimated device time, with
+   their launch mode) and dispatch/source evidence. Resume reuses signed censuses;
    `--redo` requests recapture. Failed or hidden windows stay explicit gaps.
    `compile_watch.py` records startup, warmup and graph-capture compile variants and
    call descriptors as well as timed-window evidence. Profile stops at that evidence.

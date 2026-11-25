@@ -21,7 +21,7 @@ design a bounded probe per [capture](capture.md) rather than a new full replay.
 `params.max_targets` narrows the default selection after it is computed (keep the
 first N by overall share); it never widens it or backfills rank 6.
 
-Pass `params.sampling` (`num_points`, `context_tolerance`, `target_pct`) to
+Pass `params.sampling` (`num_points`, `prefill_points`, `important_cells`, `context_tolerance`, `target_pct`) to
 `plan_points.py` ([sampling](sampling.md)), and `params.reuse_capture` (another profile's
 `EVAL_DIR` of the identical deployment) as `--reuse-capture`.
 
@@ -33,7 +33,7 @@ The slot's `finalize.py` checks `$OUT`, exports `kernels.json` and writes `resul
 |---|---|
 | `kernel_workload.json`, `kernel_ranking.json` | §2 census; the denominator for every share, with `selection_scope`, `candidate_inventory`, `coverage_summary` |
 | `selection_targets.json` | §2, `scripts/select_targets.py`, with the policy it applied |
-| `sampling_points_final.json`, `evidence/` | §2: points, censuses, shapes, source map, adjacency, compile variants |
+| `sampling_points_final.json`, `evidence/` | §2: points, censuses, shapes, source map, adjacency, compile variants, important shapes |
 | `kernels.json` | §3, exported by the finalizer: path, shapes and weight of every selected kernel |
 | `REPORT.md` | §3 |
 

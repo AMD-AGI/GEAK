@@ -551,6 +551,15 @@ def _needs_noise(T):
     return any(o["bound"]["kind"] == "noise_relative" for o in T.doc["outputs"].values())
 
 
+def _important(T, spec):
+    """A correctness-only case built from the profile's important_shapes.json: it widens the shapes
+    checked, so it is judged against the baseline leg only -- a float64 reference or oracle leg on
+    every long-context prefill cell made the correctness gate outlast the lane (PR #643 GPU test).
+    Not when a bound reads the reference itself (dot_product, ...): those keep it."""
+    return spec.get("kind") == "important" and not any(
+        o["bound"]["kind"] in T.U.BOUNDS_NEEDING_REFERENCE for o in T.doc["outputs"].values())
+
+
 def compare_blobs(T, cand_blob, base_blob, seed, draws, noise_blob=None, only_draw=None):
     """Contract compare of every random case/draw; returns (ok, rows)."""
     torch = T.U._torch()
@@ -566,8 +575,9 @@ def compare_blobs(T, cand_blob, base_blob, seed, draws, noise_blob=None, only_dr
                     "candidate" if key not in cand_blob else "baseline")})
                 ok = False
                 continue
-            args = T.cases.make_args(spec, gen=_gen(torch, device, seed + i), with_logical=bool(T.U.f64_reference(T.doc)))
-            refs, mags, sel = _references(T, args)
+            f64 = bool(T.U.f64_reference(T.doc)) and not _important(T, spec)
+            args = T.cases.make_args(spec, gen=_gen(torch, device, seed + i), with_logical=f64)
+            refs, mags, sel = _references(T, args) if f64 else (None, None, None)
             score_inputs = {o["bound"].get("scores") for o in T.doc["outputs"].values()
                             if o["bound"]["kind"] == "topk_equivalent"}
             inputs = {k: _cpu(args[k]) for k in score_inputs if k in args}
@@ -593,8 +603,8 @@ def oracle_legs(T):
 
 
 def oracle_case_sigs(T, o):
-    """The random cases (manifest order) an oracle leg runs on."""
-    specs = T.random_specs()
+    """The random cases (manifest order) an oracle leg runs on; never an important case."""
+    specs = [s for s in T.random_specs() if not _important(T, s)]
     if o.get("cases", "all") == "all":
         return [s["sig"] for s in specs]
     best = {}
@@ -686,6 +696,12 @@ def _correctness_vs_oracles(T, a, state, base, cand, oracles):
                             ok = False
                             continue
                         names = [n for n in oracles if spec["sig"] in covered[n]]
+                        if _important(T, spec):
+                            sym = T.cases.make_args(spec, gen=_gen(torch, device, seed + i), with_logical=False)["_sym"]
+                            rc = T.U.compare_outputs(T.doc, blobs["cand"][key], blobs["base"][key], sym=sym)
+                            row.update(_summarize(rc))      # the direct path's row shape
+                            ok = ok and rc["ok"]
+                            continue
                         if not names:
                             row.update(ok=False, why="no oracle leg covers this case")
                             uncovered.append(key)
@@ -1201,13 +1217,17 @@ def timing_basis_defects(T, per):
         say; an older leg_runner dropped it -- that is how a ~100 ms host-bound UT of a ~0.15 ms
         monokernel passed this gate). Exception: a leg timed only by the "wall" timer (no CUDA:
         the CPU suite's toy kernels) has no host/device split, so ABSENT is its only answer."""
-    graph = {p for p, r in T.phase_regimes().items() if T.h.deployment_graph_mode(r or {})}
+    regimes = T.phase_regimes()
+    launch = {s["sig"]: (s.get("launch") or {}).get("mode") for s in T.manifest["cases"]}
     out = []
     for c in per:
+        mode = launch.get(c["sig"])
+        graph = (mode == "graph" if mode in ("graph", "eager")
+                 else T.h.deployment_graph_mode(regimes.get(c.get("regime")) or {}))
         for leg in ("baseline_timing", "optimized_timing"):
             rec = c.get(leg) or {}
             timers = rec.get("timers") or []
-            if c.get("regime") in graph and any(t not in GRAPH_TIMERS for t in timers):
+            if graph and any(t not in GRAPH_TIMERS for t in timers):
                 out.append("%s %s: phase %s deploys under a CUDA graph but was timed by %s (capture "
                            "failed or was never attempted)" % (c["sig"], leg, c.get("regime"), timers))
             if rec.get("primed") is False:
@@ -1256,10 +1276,24 @@ def _timing_resume(T, a, state):
     return done, on_bucket
 
 
+HOST_BOUND_RETRIES = 2
+
+
 def gate_timing(T, a, state):
     done, on_bucket = _timing_resume(T, a, state)
-    per = T.h.measure_legs(T.dir, T.meta, max_reps=a.max_reps, gpus=getattr(T, "rank_group", None) or T.gpus,
-                           done=done, on_bucket=on_bucket)
+    gpus = getattr(T, "rank_group", None) or T.gpus
+    per = T.h.measure_legs(T.dir, T.meta, max_reps=a.max_reps, gpus=gpus, done=done, on_bucket=on_bucket)
+    retried = []
+    for _ in range(HOST_BOUND_RETRIES):
+        # A host-bound reading is usually a busy CPU (other lanes), not the kernel: measure
+        # those buckets again before refusing them.
+        bound = {c["sig"] for c in per if any((c.get(leg) or {}).get("primed") is False
+                                              for leg in ("baseline_timing", "optimized_timing"))}
+        if not bound:
+            break
+        retried += sorted(bound)
+        keep = {c["sig"]: c for c in per if c["sig"] not in bound}
+        per = T.h.measure_legs(T.dir, T.meta, max_reps=a.max_reps, gpus=gpus, done=keep)
     w = T.h.serving_weighted_speedup(per, T.meta)
     early = [c["sig"] for c in per if c.get("reps", 0) < a.max_reps]
     defects = timing_basis_defects(T, per)
@@ -1269,11 +1303,14 @@ def gate_timing(T, a, state):
                 "cache_condition": T.h.cache_policy()}
     if w.get("primary") is not None:
         print("GEAK_WEIGHTED_SPEEDUP=%s" % w["primary"], flush=True)
+    for phase, v in sorted((w.get("per_phase") or {}).items()):
+        print("GEAK_PHASE_SPEEDUP_%s=%s" % (phase.upper(), v["weighted"]), flush=True)
     return {"status": "pass" if w.get("primary") is not None else "fail",
             "process_mode": 'batched',
             "weighted_speedup": w.get("primary"), "geomean": w.get("geomean"),
+            "per_phase": w.get("per_phase"),
             "aggregate": w, "per_case": per, "stopped_before_max_reps": early,
-            "resumed_buckets": sorted(done),
+            "resumed_buckets": sorted(done), "host_bound_retried": retried,
             "note": ("stopped_before_max_reps buckets were decided by measure_legs' early exit "
                      "(ratio outside its undecided band after fewer pairs); their spread is from "
                      "fewer samples"),

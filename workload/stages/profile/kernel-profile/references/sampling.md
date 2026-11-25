@@ -28,8 +28,15 @@ environment receipt, not placeholders from this example.
 
 ```bash
 python3 "$SKILL_ROOT/scripts/plan_points.py" --eval-dir "$EVAL_DIR" \
-  --num-points 24 --context-tolerance 1.5 --target-pct 90
+  --num-points 24 --prefill-points 6 --context-tolerance 1.5 --target-pct 90
 ```
+
+Budget by time: on a TP4 MXFP4 deployment (2026-11-23) a decode point took 12-35 s on the
+graph server and a prefill point 12-33 s, after a 5-27 min server start (warm/cold page
+cache), so ~20 decode and ~6 prefill points fit a 30-minute profile. A phase that misses
+the target is reported `budget_limited`. `--prefill-points` spreads prefill over its range
+(new tokens say little about prefill time once the context is cached); `--important-cells`
+caps the cells per phase that become UT correctness cases (see `important_shapes.py`).
 
 Planning is CPU-only. Observed rows are grouped by phase, exact shape, sequence count,
 observed graph mode and a context band; adjacent M values are never assumed to share a
