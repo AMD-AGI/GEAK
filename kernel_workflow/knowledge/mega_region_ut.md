@@ -41,7 +41,8 @@ what the UT fixes; everything else in your role and its mode=mega fragment holds
   `GRAPH_REPLAYS: <n>` line is the liveness evidence: every rank replayed each case's captured graph n
   times with refreshed inputs and every replay matched the baseline, without a hang. Report
   `liveness:"pass"` and `replay_count:<n>` when CORRECTNESS is PASS; never re-derive a replay count of your
-  own.
+  own. The UT captures the seam itself, so `graph_safe` is never "n/a" here, not even for a config-only
+  change: `graph_safe:"pass"` when CORRECTNESS is PASS, else `"fail"`.
 - **director / tech_lead**: the final patch is the `kernel_src/` diff (plus `kernel_src/_handback/`). That is
   the whole result: the caller applies it to the UT's `kernel_src/`, re-runs the same `unittest.py`, and
   binds `kernel_src/` into the server by replaying `candidate_bind` (e2e integrate).
