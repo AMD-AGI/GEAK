@@ -37,7 +37,32 @@
 # Structurally-universal env names to forward into the locus. NOT kernel/repo-specific: the GPU
 # selector(s), Triton's cache + recompile controls, and the import path. Callers append their own
 # names to LOCUS_ENV; they are only forwarded if set in the host env.
-: "${LOCUS_ENV:=HIP_VISIBLE_DEVICES ROCR_VISIBLE_DEVICES TRITON_CACHE_DIR TRITON_ALWAYS_COMPILE PYTHONPATH}"
+: "${LOCUS_ENV:=HIP_VISIBLE_DEVICES ROCR_VISIBLE_DEVICES TRITON_CACHE_DIR TRITON_ALWAYS_COMPILE PYTHONPATH GEAK_HARDWARE_CONTEXT}"
+
+_locus_path() {
+  # Translate an absolute host work path to its container mount path. This is
+  # needed when `/apps/...` on the host is mounted beneath `/work/...`.
+  local host="${1:?host path required}" host_root="${TILE_KERNEL_HOST_WORKDIR:-}"
+  local container_root="${TILE_KERNEL_CONTAINER_WORKDIR:-}" relative
+  if [ -z "$host_root" ] || [ -z "$container_root" ]; then
+    printf '%s' "$host"
+    return 0
+  fi
+  host_root="$(cd "$host_root" 2>/dev/null && pwd -P)" || {
+    printf '%s' "$host"; return 0;
+  }
+  case "$host" in
+    "$host_root"|"$host_root"/*)
+      relative="${host#"$host_root"}"
+      printf '%s%s' "${container_root%/}" "$relative"
+      ;;
+    *) printf '%s' "$host" ;;
+  esac
+}
+
+locus_path() {
+  _locus_path "$@"
+}
 
 _locus_env_args() {
   # Print `-e NAME=value` tokens (one pair per arg) for every name in LOCUS_ENV that is set in the
@@ -48,6 +73,9 @@ _locus_env_args() {
   for name in $names; do
     if [ -n "${!name+x}" ]; then
       val="${!name}"
+      if [ "$name" = GEAK_HARDWARE_CONTEXT ] && [ -n "$val" ]; then
+        val="$(locus_path "$val")"
+      fi
       printf '%s\0%s\0' "-e" "$name=$val"
     fi
   done
