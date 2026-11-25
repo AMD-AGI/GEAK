@@ -196,7 +196,9 @@ unchanged; you just also persist the diagnostics the deep feedback/harness-refin
    > seeded `--from "$CURRENT_OVERLAY"` into `CAND="$EVAL_DIR/overlay/cand_<short_name>"`, after
    > `rm -rf "$CAND/_patched" "$CAND/_overlay_manifest.json"`.
    > If `CURRENT_OVERLAY` already patches that module, `add-module` merges onto its copy and exits
-   > non-zero on a clash (do not force it). The branches below are for tasks that carry no `candidate_bind`.
+   > non-zero on a clash (do not force it). A LIST `candidate_bind` (a multi-module region, e.g. a multi-rank
+   > MegaKernel) is replayed entry by entry into the same `$CAND`. The branches below are for tasks that carry
+   > no `candidate_bind`.
    - **env** (TunableOp CSV, `HIPBLASLT_TUNING_FILE`, …): candidate env = `CURRENT_ENV +
      KERNEL_RESULT.apply_env`. Keep the tuning artifact under `$EVAL_DIR/config/` so it's reproducible.
      **Backend-engagement prerequisite:** a tuning artifact only binds if the backend that consumes it is

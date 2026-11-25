@@ -1997,7 +1997,8 @@ function multiGpuBlock(role) {
 // same-named sections of the role file.
 const megaRoleFiles = (file) => `${WORKFLOW_DIR}/roles/${file}, then ` +
   `${WORKFLOW_DIR}/roles/_fragments/${file.replace(/\.md$/, '')}_mega.md (mode=mega: each section of the ` +
-  `second file replaces the section with the same heading in the first)`;
+  `second file replaces the section with the same heading in the first)` + (A.region_ut ? `; KERNEL_PATH is a ` +
+  `region UT: then also ${WORKFLOW_DIR}/knowledge/mega_region_ut.md` : '');
 function roleAgent(role, phase, intro, inputs) {
   const base = `You are the ${role}. PHASE=${phase}.
 First Read ${MEGA ? megaRoleFiles(`${role}.md`) : `${WORKFLOW_DIR}/roles/${role}.md`} and follow its instructions for PHASE=${phase}.
@@ -2027,6 +2028,14 @@ const ANYOBJS = { type: 'array', items: ANYOBJ };
 // ---------------------------------------------------------------------------
 // mode=mega args (parsed for every mode; checked only under MEGA)
 // ---------------------------------------------------------------------------
+// A region UT (args.region_ut, e.g. from KernelFusion) supplies every mega arg the caller left unset.
+if (MEGA && A.region_ut) {
+  const u = (await agent(`Run exactly: python3 ${WORKFLOW_DIR}/tools/region_ut_args.py ${A.region_ut}\n` +
+    'It prints one JSON object. Return it verbatim. Do nothing else.',
+    { phase: 'Setup', label: 'region_ut', schema: ANYOBJ })) || {};
+  if (u.error || !u.benchmark_harness) throw new Error(`region_ut ${A.region_ut}: ${u.error || 'no output'}`);
+  for (const [k, v] of Object.entries(u)) if (A[k] == null) A[k] = v;
+}
 // Modeled time (allocated phase slices, not wall time) so a replay follows the same budget path.
 const WORKFLOW_STARTED_MS = 0;
 let MEGA_CLOCK_MS = 0;
@@ -2294,8 +2303,7 @@ if (MEGA && PINNED_MEGA_SKILL &&
   }
 }
 
-// Optional profile-analysis skill (knowledge/analysis_skills/INDEX.md): profile_engineer PHASE=analyze_profile
-// adds operator-specific structure after Profile; analysis only. Default none.
+// Optional profile-analysis skill (knowledge/analysis_skills/INDEX.md), run after Profile. Default none.
 const ANALYSIS_SKILL = String(A.analysis_skill != null ? A.analysis_skill : 'none').trim();
 const ANALYSIS_SKILL_ON = !!ANALYSIS_SKILL && ANALYSIS_SKILL !== 'none' && ANALYSIS_SKILL !== 'false';
 if (MEGA && ANALYSIS_SKILL_ON && !/^[a-z0-9][a-z0-9_-]*$/.test(ANALYSIS_SKILL)) {
@@ -2603,8 +2611,7 @@ const MEGA_ANALYZE_BASE_SCHEMA = obj({
       interkernel_gap_us: obj({
         median: NUM, max: NUM, n_boundaries: NUM,
       }, ['median']),
-      // The gate DERIVES the class from the numbers and compares it against this one; a mismatch is
-      // itself reportable, so the stated value must be present to be contradicted.
+      // The gate derives the class from the numbers and reports a mismatch with this one.
       class: { type: 'string', enum: ['throughput_bound', 'latency_bound', 'launch_bound', 'mixed'] },
       // id, the size fields and rides_on are read by the gate, so they are declared; rides_on records that
       // another rung absorbs this hole.
@@ -2951,8 +2958,7 @@ const MEGA_VERIFY_SCHEMA = obj({
     status: STR, graph_safe: STR,
   }, ['guard', 'count', 'status']) },
   arms_run: STRS,
-  // Accuracy as a number (metric, value, threshold, guard/route) so functionalAcceptance can check
-  // value < threshold. Missing fields fall back to the `correctness` string check.
+  // Accuracy as a number (metric, value, threshold); missing fields fall back to `correctness`.
   accuracy: obj({
     metric: STR, value: { type: 'number', minimum: 0 },
     threshold: { type: 'number', exclusiveMinimum: 0 },
@@ -3708,8 +3714,7 @@ function taskGraphGate(tg) {
       'either a node duration is wrong or an edge is spurious. Do not use this graph\'s headroom ' +
       'number to size any proposal.' };
   }
-  // Every edge a launch boundary and none narrower means the scope column was not filled in; the graph
-  // cannot then tell a required barrier from an incidental one. Advisory.
+  // Every edge a launch boundary means the scope column was not filled in. Advisory.
   const narrow = eArr.filter((e) => e && e.scope && e.scope !== 'cross_rank' && e.scope !== 'hbm').length;
   if (edges && launchEdges === edges && narrow === 0) {
     return { verdict: 'KERNEL_GRANULARITY', summary, caveat:
@@ -5474,9 +5479,8 @@ function megaPlanRound(currentRound, remaining, plan) {
   return { directions, refusal };
 }
 
-// mode=mega engineer step: the prompt and options of the lane's engineer call for one candidate lane, and
-// `after`, which checks the reply and returns `verifyStep` (the inputs of the lane's verify call). Lanes of
-// a round run concurrently, each on its own modeled clock (`clock.ms`); the round charges the longest.
+// mode=mega engineer step for one candidate lane: the engineer call's prompt/options and `after` (-> verifyStep).
+// Lanes run concurrently, each on its own modeled clock (`clock.ms`); the round charges the longest.
 let megaRoundStartMs = 0;
 function megaEngineerTurn(currentRound, d) {
   const clock = { ms: megaRoundStartMs };
@@ -5980,8 +5984,7 @@ function megaEngineerTurn(currentRound, d) {
                     ver = retry;
                     verifierTimedOut = false;
                   } else if (retry && !retry.__agent_timed_out) {
-                    // Quiescence was confirmed twice and the bounded retry returned: nothing is left running, so the
-                    // round ends unscored and the wave continues.
+                    // Quiescent and the bounded retry returned: the round ends unscored, the wave continues.
                     verifierTimedOut = false;
                     meta.next_blocker = `independent Verify of HEAD ${expectedHead} timed out before ` +
                       `sealing (retry: ${retry.status || 'unscored'}); route a fresh full Verify of this ` +
@@ -6505,8 +6508,7 @@ async function megaCalibrate() {
     const nullArm = Number(pc.null_arm_pct);
     // An overshoot is only benign if the null arm is quiet.
     const nullQuiet = Number.isFinite(nullArm) && Math.abs(nullArm) <= mLo / 2;
-    // Pre-flight: switch_present=false means both arms ran the same code, so the control did not run
-    // whatever it reported. Undefined keeps the old behaviour (historical replays unchanged).
+    // switch_present=false: both arms ran the same code, so the control did not run.
     const switchAbsent = pc.switch_present === false;
     const ran = pc.ran !== false && !switchAbsent &&
       Number.isFinite(got) && Number.isFinite(lo) && Number.isFinite(hi);
