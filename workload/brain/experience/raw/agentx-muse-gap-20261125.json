@@ -1,0 +1,34 @@
+{
+  "collection_id": "agentx-muse-gap-20261125",
+  "directory": "collections/agentx-muse-gap-20261125",
+  "origin": "November 25 public AgentX MI355X releases and same-node Muse Spark interventions",
+  "checksum_file": "agentx-muse-gap-20261125.sha256",
+  "checksum_scope": "Hashes of acquisition, study-input and native-run inventories. Each inventory lists individual retained artifacts. Startup rejections are catalogued separately from measured windows.",
+  "public_points": [
+    445331,
+    446946,
+    448037,
+    448536,
+    448532,
+    448528
+  ],
+  "producer_commit": "8f6fa87689efb9ffca493738d422e2e84d376ae7",
+  "local_protocol": "Eight MI355X, C8, 393 native traces, seed 42, 1200-second sending windows, agentx-harness 1.0.13.",
+  "measurement_receipts": [
+    "runs/sgl1027-off",
+    "runs/sgl1027-on",
+    "runs/sgl1027-target-only",
+    "runs/six-kernel-admission2",
+    "runs/six-kernel",
+    "runs/tokenspeed-on-c8",
+    "runs/tokenspeed-off-c8",
+    "runs/tokenspeed-interval192"
+  ],
+  "evidence_limits": "Eight single-window screens. The dated releases bundle changes. Native exports retain unsuccessful responses and separate warmup. Synthetic acceptance measures serving performance. The published one-hour client is 1.0.14; the local C8 screens did not run a real-generation quality suite.",
+  "startup_rejections": [
+    {
+      "path": "runs/tokenspeed-conditional-prefill",
+      "reason": "Native argument validation requires a positive consecutive-prefill cap to set the active-decode threshold. Client never started."
+    }
+  ]
+}

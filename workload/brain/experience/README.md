@@ -6,20 +6,26 @@ The index exposes origins and search tags, not scores or recommendations. Filter
 before opening cases/routes and their linked raw evidence. Keep information exclusions
 separate from permitted changes.
 
-Retrieve by the current cause of cost and mechanism; match hardware, topology, runtime,
-phase, shapes and semantics before transferring an action. An unavailable historical
-implementation can still suggest an adaptation within the authorized scope. Read details
-only when they could change a decision; reuse consulted evidence until applicability changes.
+For a moving performance target, refresh the permitted source and select a point with the
+same external workload, resources and metric definitions. Pin its date and reuse it until
+the target or operating conditions change. Differences in engine, parallel layout or
+scheduling are hypotheses for the observed gap.
+
+Retrieve by the cause of cost. Match the hardware, layout and operator semantics.
+Use actual shapes and phases to estimate how often the mechanism can run. Where
+outcomes differ, use a losing case to identify a transfer condition. An unavailable
+implementation can still suggest a compatible probe or a scoped port.
 
 Combine current Profile hotspots with relevant mechanisms, retaining hotspots without a
 historical match. Rank plausible serving impact and remaining headroom against the full
 incremental delivery cost and usable parallel resources. A high-impact unknown can justify
 a bounded discriminator. History retrieval is not a gate for ready independent work.
 
-In the existing `PLAN.md`, connect the triggering observation to the chosen case/mechanism,
-current match or mismatch, next module/question and decisive evidence. Explain why the
-call advances the objective compared with other open opportunities. Send only relevant
-permitted excerpts/references through the implementation's actual inputs.
+In `PLAN.md`, connect the observation and case to the next module call. For a bundle,
+choose the smallest comparison the runtime supports and name the dependencies that
+change with it. An intermediate can distinguish which phase merits development.
+State the outcome that changes priority. If a promising route must wait, identify
+which report or observation will reopen it. Pass the relevant evidence by reference.
 
 On a new Report, update the opportunity and cost basis, then choose the next action;
 repeat retrieval when the bottleneck, applicability or important uncertainty changes.

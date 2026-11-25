@@ -44,9 +44,10 @@ preserve the inputs and evidence of in-flight calls.
    or resolve an uncertainty that changes the plan; consult
    [experience](experience/README.md). Compare expected serving benefit or decision value
    with the full remaining cost, including delay to a useful serving comparison.
-   Compare the requested gains across objectives with bottleneck coverage and remaining
-   headroom. If the current scope cannot plausibly reach them, consider broader operator
-   boundaries or serving strategies; keep unknown bounds and existing commitments explicit.
+   If the ranked hotspots leave a gap to the serving objectives, compare the best broader
+   operator or system route suggested by experience with the next local improvement.
+   Use current coverage, prerequisites and cost to choose a measurement that could change
+   the ranking. Keep unknown bounds and existing commitments explicit.
    Missing evidence can justify a bounded probe, not a claim that the opportunity is absent.
    Keep user/native requirements and their owners distinct from optional investigations;
    a generated plan does not make diagnostic completeness an acceptance requirement.

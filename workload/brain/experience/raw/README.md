@@ -24,3 +24,6 @@ and its checksum anchors, not the payload. A fresh clone needs
 the archive supplied at the declared location or an archive root recorded in the task brief.
 Native Git/OCI/acquisition inventories remain in each collection; the anchor checksum list
 does not claim a full recursive content audit. Preserve old paths when relocating a collection.
+
+[Muse Spark gap study](agentx-muse-gap-20261125.json) adds the November 25 public release,
+in-window serving logs and native 20-minute MI355X comparisons.
