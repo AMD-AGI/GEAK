@@ -160,7 +160,11 @@ const DEEP_COST = (() => {
   const v = parseInt(A.deep_cost != null ? A.deep_cost : 2, 10);
   return Number.isFinite(v) && v >= 1 ? v : 2;
 })();
-const GPU_IDS = String(A.gpu_ids != null ? A.gpu_ids : '0');
+// PD gpu_ids `decode:3`: every GPU_ID passed on names the engine again.
+const GPU_IDS_ARG = String(A.gpu_ids != null ? A.gpu_ids : '0').trim();
+const GPU_ENGINE = (/^([\w.-]+):(?=\d)/.exec(GPU_IDS_ARG) || [])[1] || '';
+const onEngine = spec => (GPU_ENGINE && spec ? `${GPU_ENGINE}:${spec}` : spec);
+const GPU_IDS = GPU_ENGINE ? GPU_IDS_ARG.slice(GPU_ENGINE.length + 1) : GPU_IDS_ARG;
 const GPU_LIST = GPU_IDS.split(',').map(s => s.trim()).filter(Boolean);
 // Every GPU consumer gets the WHOLE pool rather than a pinned lane. gpu_lock.sh
 // resolves a comma spec by flocking whichever lane is free AND idle at acquire
@@ -238,11 +242,17 @@ let GPU_POOL = '';
 let GPU_SINGLE = '';
 function applyGpuResource(r) {
   GPU_RESOURCE = r;
-  GPU_JOB = r.jobSpec;
-  GPU_POOL = GPU_JOB || (GPU_MODE === 'pin' ? GPU_LIST[0] : GPU_LIST.join(','));
-  GPU_SINGLE = GPU_JOB || GPU_LIST[0];
+  GPU_JOB = onEngine(r.jobSpec);
+  GPU_POOL = GPU_JOB || onEngine(GPU_MODE === 'pin' ? GPU_LIST[0] : GPU_LIST.join(','));
+  GPU_SINGLE = GPU_JOB || onEngine(GPU_LIST[0]);
 }
 applyGpuResource(resolveGpuRequest(A, GPU_LIST));
+// A multi-GPU task delivered by the UT module (A22): set after Setup, once the GPU count is final,
+// when that count is above 1 AND the task's own declaration (Setup's task_declaration) says more than
+// one GPU. Only such a job gets the multi-rank prompts, receipts, lease and agent time limits; every
+// other job, single- or multi-GPU, runs exactly as before. UT_TOTAL_S is its whole-UT time limit (s).
+let UT_MR = false;
+let UT_TOTAL_S = 0;
 const TASK = A.task || '';
 const EVAL_DIR_OVERRIDE = A.eval_dir || '';
 const APPLY_TO_ORIGINAL = String(A.apply_to_original != null ? A.apply_to_original : 'false');
@@ -538,6 +548,12 @@ const SETUP_SCHEMA = obj({
     kind: { type: 'string', enum: ['single', 'fixed', 'scalable', 'unknown'] },
     gpus_per_job: { type: 'number' }, evidence: { type: 'string' },
   }, ['kind']),
+  // What the task itself declares, verbatim from `detect_gpu_requirement.py --declaration <task dir>`
+  // (always run, also when the GPU count is explicit): its GPU count (null = none) and whole-UT limit.
+  task_declaration: obj({
+    required_gpu_count: { type: ['number', 'null'] }, ut_total_s: { type: 'number' },
+    evidence: { type: 'array', items: { type: 'string' } },
+  }, ['required_gpu_count', 'ut_total_s', 'evidence']),
   // DEEP-MODE resume only: populated by the director ONLY when STATE_DIR was provided AND a prior best
   // exists there. Lets a continued wave restore its cumulative speedup + insight/ledger history so it
   // does not re-explore dead directions. Absent (undefined) on a fresh run -> no behavior change.
@@ -547,7 +563,7 @@ const SETUP_SCHEMA = obj({
     ledger: { type: 'array', items: { type: 'object', additionalProperties: true } },
     bottleneck_now: { type: 'string' }, best_per_case: perCase,
   }, []),
-}, ['eval_dir', 'workspace', 'kernel_name', 'device_gfx', 'device_target', 'physical_cu_count']);
+}, ['eval_dir', 'workspace', 'kernel_name', 'device_gfx', 'device_target', 'physical_cu_count', 'task_declaration']);
 
 const AUTHOR_SCHEMA = obj({
   authored: { type: 'boolean' }, target_language: { type: 'string' }, correctness: { type: 'string' },
@@ -753,6 +769,119 @@ const VALIDATE_SCHEMA = obj({
   arbitration_note: { type: 'string' }, final_patch: { type: 'string' },
 }, ['director_verified_speedup_geomean', 'validation_status']);
 
+// ---------------------------------------------------------------------------
+// Multi-rank receipts (A01). In a UT-module multi-GPU task (UT_MR) every rank of the UT times the
+// case, and one merged number hides how the ranks were aligned and which rank set the pace. These
+// variants replace BENCH/REPORT/VALIDATE_SCHEMA only in such a job; any other call still passes
+// the objects above, unchanged. The receipt has the shape of the UT's own GEAK_TIMING_RECEIPT
+// (geak_timing_receipt/v2): {world_size, alignment, cases: {<sig>: {baseline: {ms, rank_ms},
+// current: {ms, rank_ms}}}}; an older multi-rank UT's per_rank_us/step_us/alignment map onto it.
+// ---------------------------------------------------------------------------
+const rankArr = { type: 'array', items: { type: 'number' } };
+// One leg of one case: the merged time (per sample the slowest rank, then the median) + each rank's
+// when the UT reports them (null when it reports only the merged time).
+const rankLeg = obj({ ms: { type: 'number' }, rank_ms: { type: ['array', 'null'], items: { type: 'number' } } }, ['ms']);
+const timingReceipt = {
+  type: ['object', 'null'],
+  properties: {
+    version: { type: 'string' }, world_size: { type: 'number' }, source: { type: 'string' },
+    alignment: { type: ['object', 'null'], additionalProperties: true },
+    cases: { type: 'object', additionalProperties: obj({ baseline: rankLeg, current: rankLeg }, ['baseline']) },
+  },
+  required: ['world_size', 'cases'],
+  additionalProperties: true,
+};
+const perCaseMR = {
+  ...perCase,
+  items: {
+    ...perCase.items,
+    properties: {
+      ...perCase.items.properties,
+      // Each rank's time for this case (ms, rank order) and how the ranks were aligned before every
+      // sample and merged into baseline_ms / optimized_ms.
+      baseline_rank_ms: rankArr, optimized_rank_ms: rankArr,
+      alignment: { type: 'object', additionalProperties: true },
+    },
+  },
+};
+const BENCH_SCHEMA_MR = obj({
+  ...BENCH_SCHEMA.properties,
+  // rank_ms / alignment are REQUIRED but nullable: null says the UT gave no per-rank time or no
+  // alignment method for the case (then reliable=false), instead of one merged time copied per rank.
+  baseline_per_case: { type: 'array', items: obj({
+    name: { type: 'string' }, latency_ms: { type: 'number' },
+    rank_ms: { type: ['array', 'null'], items: { type: 'number' } },
+    alignment: { type: ['object', 'null'], additionalProperties: true },
+  }, ['name', 'latency_ms', 'rank_ms', 'alignment']) },
+  rank_timing_source: { type: 'string' },
+}, [...BENCH_SCHEMA.required, 'reliable']);
+const REPORT_SCHEMA_MR = obj({ ...REPORT_SCHEMA.properties, per_case: perCaseMR, timing_receipt: timingReceipt },
+  REPORT_SCHEMA.required);
+const VALIDATE_SCHEMA_MR = obj({ ...VALIDATE_SCHEMA.properties, per_case: perCaseMR, timing_receipt: timingReceipt },
+  [...VALIDATE_SCHEMA.required, 'timing_receipt']);
+// The consumer check for all three places (Benchmark record, director receipt, lane return). A merged
+// time on every timed case is required; each rank's time and the alignment method are recorded when
+// the UT reports them, and their absence is a note, not a failure (a hand-written UT may report only
+// the merged, slowest-rank time). benchRankGap / receiptGap return the hard gap ('' when none);
+// benchRankNote / receiptNote name what per-rank detail is missing ('' when complete).
+const timeOk = (x) => typeof x === 'number' && Number.isFinite(x) && x > 0;
+const rankTimesOk = (a, ranks) => Array.isArray(a) && a.length === ranks && a.every(timeOk);
+const alignmentOk = (a) => !!a && typeof a === 'object' && !Array.isArray(a) && Object.keys(a).length > 0;
+const legGap = (leg, ranks, what) => !leg || !rankTimesOk(leg.rank_ms, ranks) ? `no per-rank ${what} times`
+  : !timeOk(leg.ms) ? `no merged ${what} time (ms)` : '';
+function benchRankGap(cases) {
+  if (!Array.isArray(cases) || !cases.length) return 'no baseline case was recorded';
+  for (const c of cases) {
+    const name = c && c.name != null ? c.name : '?';
+    if (!c || !timeOk(c.latency_ms)) return `baseline case ${name} has no merged time (latency_ms)`;
+  }
+  return '';
+}
+function benchRankNote(cases, ranks) {
+  const noRanks = [], noAlign = [];
+  for (const c of Array.isArray(cases) ? cases : []) {
+    const name = c && c.name != null ? c.name : '?';
+    if (!c || !rankTimesOk(c.rank_ms, ranks)) noRanks.push(name);
+    if (!c || !alignmentOk(c.alignment)) noAlign.push(name);
+  }
+  return [noRanks.length ? `no per-rank times (rank_ms of ${ranks}) for case(s) ${noRanks.join(', ')}` : '',
+    noAlign.length ? `no alignment method for case(s) ${noAlign.join(', ')}` : ''].filter(Boolean).join('; ');
+}
+function receiptGap(receipt, ranks, needCurrent) {
+  if (!receipt || typeof receipt !== 'object') return 'no timing_receipt';
+  if (Number(receipt.world_size) !== ranks) return `timing_receipt world_size is ${receipt.world_size}, not ${ranks}`;
+  const cases = receipt.cases && typeof receipt.cases === 'object' ? Object.entries(receipt.cases) : [];
+  if (!cases.length) return 'timing_receipt has no timed case';
+  for (const [sig, c] of cases) {
+    if (!c || !c.baseline || !timeOk(c.baseline.ms)) return `case ${sig} has no merged baseline time (ms)`;
+    const cur = c.current || c.candidate;
+    if (needCurrent && (!cur || !timeOk(cur.ms))) return `case ${sig} has no merged candidate time (ms)`;
+  }
+  return '';
+}
+function receiptNote(receipt, ranks, needCurrent) {
+  if (!receipt || typeof receipt !== 'object') return '';
+  const notes = alignmentOk(receipt.alignment) ? [] : ['no alignment method'];
+  const cases = receipt.cases && typeof receipt.cases === 'object' ? Object.entries(receipt.cases) : [];
+  for (const [sig, c] of cases) {
+    if (legGap(c && c.baseline, ranks, 'baseline')) notes.push(`case ${sig}: no per-rank baseline times`);
+    if (needCurrent && legGap(c && (c.current || c.candidate), ranks, 'candidate'))
+      notes.push(`case ${sig}: no per-rank candidate times`);
+  }
+  return notes.join('; ');
+}
+// The Benchmark's complete baseline record in receipt shape: what the lane returns when the director's
+// own receipt is missing or incomplete, so the baseline receipt survives a failed validation.
+function benchReceipt(cases, ranks, source) {
+  return {
+    world_size: ranks,
+    source: `Benchmark baseline_per_case${source ? ` (${source})` : ''}`,
+    alignment: cases[0].alignment ?? null,
+    cases: Object.fromEntries(cases.map((c) => [String(c.name),
+      { baseline: { ms: c.latency_ms, rank_ms: c.rank_ms ?? null } }])),
+  };
+}
+
 // Warm-start resolver output = experience_store.py `resolve` JSON, verbatim.
 const WARMSTART_RESOLVE_SCHEMA = obj({
   read_reason: { type: 'string' }, slug: { type: 'string' },
@@ -836,6 +965,12 @@ const cfg = (o) => Object.entries(o).map(([k, v]) =>
 // degrades — re-run with Workflow({resumeFromRunId}) once the client/API is fixed; cached agent results
 // make resume cheap.
 const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : 10800000, 10);
+// The wait limit agentT applies: AGENT_TIMEOUT_MS, widened after Setup only for a UT-module multi-GPU
+// task (UT_MR) so that an agent's up to 3 full UT runs + 2 fit (Benchmark runs an unweighted UT 3
+// times, a weighted oracle once); 0 (off) stays off. For such a task the limit can exceed the
+// standalone runtime's 4h spawn backstop named above; the backstop then ends the agent first, so
+// start that runtime with --agent-timeout-ms at or above the wait limit the lane logs.
+let AGENT_WAIT_MS = AGENT_TIMEOUT_MS;
 const AGENT_RETRIES = Math.max(1, parseInt(A.agent_retries != null ? A.agent_retries : 4, 10));
 // Labels whose agent the guard gave up on. The agent is still running; stopAfterTimeout() reads this.
 const TIMED_OUT_LABELS = new Set();
@@ -2019,16 +2154,16 @@ async function agentTCore(p, o) {
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
     const ev = tlAgent(p, o, attempt, dispatchId);   // record AT DISPATCH; ok=false until it resolves (dispatch id threaded for receipt-by-id — Astra re-review #6)
     try {
-      if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) {
+      if (typeof setTimeout !== 'function' || !(AGENT_WAIT_MS > 0)) {
         const r0 = await agent(p, o); if (ev && r0) ev.ok = true; return r0;
       }
       let to;
       const guard = new Promise((resolve) => {
         to = setTimeout(() => {
-          log(`  [hung-agent guard] ${label} exceeded ${Math.round(AGENT_TIMEOUT_MS / 60000)}min with no return — resolving null so the round proceeds.`);
+          log(`  [hung-agent guard] ${label} exceeded ${Math.round(AGENT_WAIT_MS / 60000)}min with no return — resolving null so the round proceeds.`);
           TIMED_OUT_LABELS.add(label);
           resolve(null);
-        }, AGENT_TIMEOUT_MS);
+        }, AGENT_WAIT_MS);
       });
       // A timeout resolves null (returned as-is, no retry). An API/agent error rejects -> caught below.
       const r = await Promise.race([
@@ -2356,18 +2491,42 @@ function expertSkillsBlock(role) {
     `A/B vs the oracle, never reducing a result below the measured baseline.`;
 }
 
-// Appended to every role prompt only for multi-GPU jobs, so single-GPU prompts are unchanged.
+// Appended to every role prompt only for multi-GPU jobs, so single-GPU prompts are unchanged. A
+// UT-module multi-GPU task (UT_MR, known after Setup) gets the UT's own rules and its whole-UT limit
+// as the lease run timeout; every other multi-GPU job, and Setup itself, gets the original text.
+// The UT block does not repeat the original's "never background a lease": the roles start a long UT
+// run in the background and poll it (one Bash call is killed after 10 min), so it says where the
+// lease call goes in that recipe. A background command line that names a launcher (torchrun) matches
+// gpu_lease.py's leaked-worker signature once its shell is gone, hence the script file for that case.
 function multiGpuBlock(role) {
   if (!GPU_JOB) return '';
   const n = GPU_RESOURCE.gpusPerJob;
+  if (!UT_MR) {
+    return `\n\n## Multi-GPU job (GPUS_PER_JOB=${n})\n` +
+      `Every GPU command of this op needs ${n} GPUs. \`GPU_ID\` is the group spec \`${GPU_JOB}\`: one ` +
+      `\`gpu_lock.sh $GPU_ID <cmd>\` holds the whole group for the whole command and sets ` +
+      `HIP_VISIBLE_DEVICES to the leased ids, so start every rank inside that one call (e.g. ` +
+      `\`torchrun --nproc_per_node=${n} ...\`). Never call gpu_lock.sh from inside a leased command (it is ` +
+      `rejected) and never background a lease (\`&\`, nohup). A leased command is killed after ` +
+      `GEAK_GPU_RUN_TIMEOUT seconds (default 900); export a larger value for long runs such as a cold ` +
+      `JIT build. Leases on the same GPUs serialize, so put the arms you compare into one run.`;
+  }
   return `\n\n## Multi-GPU job (GPUS_PER_JOB=${n})\n` +
     `Every GPU command of this op needs ${n} GPUs. \`GPU_ID\` is the group spec \`${GPU_JOB}\`: one ` +
     `\`gpu_lock.sh $GPU_ID <cmd>\` holds the whole group for the whole command and sets ` +
-    `HIP_VISIBLE_DEVICES to the leased ids, so start every rank inside that one call (e.g. ` +
-    `\`torchrun --nproc_per_node=${n} ...\`). Never call gpu_lock.sh from inside a leased command (it is ` +
-    `rejected) and never background a lease (\`&\`, nohup). A leased command is killed after ` +
-    `GEAK_GPU_RUN_TIMEOUT seconds (default 900); export a larger value for long runs such as a cold ` +
-    `JIT build. Leases on the same GPUs serialize, so put the arms you compare into one run.`;
+    `HIP_VISIBLE_DEVICES to the leased ids, so start every rank inside that one call. This UT starts ` +
+    `its own rank processes: run python3 unittest.py directly; do not wrap it in torchrun or another ` +
+    `multi-process launcher. (Only a test whose own documented command is a launcher, e.g. ` +
+    `\`torchrun --nproc_per_node=${n} ...\` in its config, keeps that command.) Never call gpu_lock.sh ` +
+    `from inside a leased command (it is rejected) and never background anything inside one: the lease ends ` +
+    `with its command. When a role step tells you to start a long UT run in the background and poll, put the ` +
+    `whole \`gpu_lock.sh $GPU_ID <cmd>\` call inside that \`nohup bash -c '...'\` and wait for its \`UT_EXIT=\` ` +
+    `line before the next GPU command and before you return. (For a launcher command, write the call into a ` +
+    `script file and background that file: a background command line that names torchrun is reaped as a ` +
+    `leaked worker.) A leased command is killed after GEAK_GPU_RUN_TIMEOUT seconds, and this job's limit is the ` +
+    `UT's whole-run limit, ${UT_TOTAL_S} s: prefix every \`gpu_lock.sh\` and \`profile_kernel.sh\` ` +
+    `call with \`GEAK_GPU_RUN_TIMEOUT=${UT_TOTAL_S}\` (the COMMANDMENT's GPU commands carry the same ` +
+    `prefix). Leases on the same GPUs serialize, so put the arms you compare into one run.`;
 }
 
 function roleAgent(role, phase, intro, inputs) {
@@ -2489,6 +2648,32 @@ if (!GPU_RESOURCE.explicit && setup.gpu_requirement) {
       `${setup.gpu_requirement.evidence || 'no evidence'}) -> ${GPU_JOB}`);
   }
 }
+// The GPU count is final from here. A UT-module multi-GPU task (UT_MR: more than one GPU, and the task
+// itself declares more than one) owes each rank's time and the alignment method for every timed case
+// (A01): Benchmark, Report and Validate switch to the *_MR schemas and get GPUS_PER_JOB. After Setup
+// every GPU command carries the UT's whole-run limit as GEAK_GPU_RUN_TIMEOUT, and the agent wait limit
+// covers up to 3 full UT runs + 2 (A22; see AGENT_WAIT_MS). Any other job adds nothing: prompts, schemas, limits
+// and the return are unchanged.
+const RANKS = GPU_RESOURCE.gpusPerJob;
+const DECLARATION = setup.task_declaration && typeof setup.task_declaration === 'object' ? setup.task_declaration : {};
+const DECLARED_GPUS = Number.isInteger(DECLARATION.required_gpu_count) ? DECLARATION.required_gpu_count : 0;
+UT_MR = RANKS > 1 && DECLARED_GPUS > 1;
+if (UT_MR) {
+  const total = DECLARATION.ut_total_s;
+  const usable = typeof total === 'number' && Number.isFinite(total) && total > 0;
+  UT_TOTAL_S = usable ? total : 3600;
+  if (AGENT_TIMEOUT_MS > 0) AGENT_WAIT_MS = Math.max(AGENT_TIMEOUT_MS, (3 + 2) * UT_TOTAL_S * 1000);
+  const evidence = Array.isArray(DECLARATION.evidence) ? DECLARATION.evidence.join('; ') : '';
+  const limitNote = usable ? ''
+    : ` (task_declaration.ut_total_s ${JSON.stringify(total)} is not a positive number: multi-rank default)`;
+  const waitNote = AGENT_WAIT_MS > 0
+    ? `${AGENT_WAIT_MS} ms = max(agent_timeout_ms ${AGENT_TIMEOUT_MS}, (3 + 2) x ${UT_TOTAL_S} s)`
+    : `off (agent_timeout_ms ${AGENT_TIMEOUT_MS})`;
+  log(`UT-module multi-GPU task: ${RANKS} GPUs per job; the task declares ${DECLARED_GPUS} ` +
+    `(${evidence || 'no evidence'}). Whole-UT limit ${UT_TOTAL_S} s${limitNote} -> ` +
+    `GEAK_GPU_RUN_TIMEOUT=${UT_TOTAL_S} on every GPU command; agent wait limit ${waitNote}.`);
+}
+const MR_INPUTS = UT_MR ? { GPUS_PER_JOB: RANKS } : {};
 // `_task` is the e2e head's DIRECTORY suffix, and the director returns the basename verbatim, so it
 // would otherwise ride into the session id and the stored record. The canonical id is folded store-
 // side (experience_store.remote_identity); this keeps the rest of the run calling it one name.
@@ -2586,14 +2771,29 @@ const bench = await agentT(
     ...(HARNESS_ADDENDUM ? { HARNESS_ADDENDUM } : {}),
     ...(WORKLOAD_SPEC_PATH ? { WORKLOAD_SPEC_PATH } : {}),
     ...(WORKLOAD_SPEC ? { WORKLOAD_SPEC } : {}),
+    ...MR_INPUTS,
   }),
-  { phase: 'Benchmark', label: 'benchmark_engineer', schema: BENCH_SCHEMA });
+  { phase: 'Benchmark', label: 'benchmark_engineer', schema: UT_MR ? BENCH_SCHEMA_MR : BENCH_SCHEMA });
 if (!bench || !bench.baseline_per_case) {
   await stopLaneWork(EVAL_DIR, 'benchmark_engineer returned no baseline', 'Benchmark');
   throw new Error('Benchmark setup failed: no baseline recorded');
 }
 const BASELINE_PER_CASE = bench.baseline_per_case;
 const BASELINE_GEOMEAN_MS = bench.baseline_geomean_ms;
+// A multi-rank baseline needs a merged time per case; each rank's time and the alignment method are
+// kept when the UT reports them, and their absence is only noted (the merged time is the baseline).
+const BENCH_RANK_GAP = UT_MR ? benchRankGap(BASELINE_PER_CASE) : '';
+const BENCH_RANK_NOTE = UT_MR && !BENCH_RANK_GAP ? benchRankNote(BASELINE_PER_CASE, RANKS) : '';
+if (BENCH_RANK_GAP) {
+  bench.reliable = false;
+  bench.notes = `${bench.notes ? `${bench.notes} ` : ''}[lane] multi-GPU baseline without a merged time: ` +
+    `${BENCH_RANK_GAP}.`;
+  log(`Benchmark WARNING: ${RANKS}-GPU job but ${BENCH_RANK_GAP}; baseline marked unreliable.`);
+} else if (BENCH_RANK_NOTE) {
+  bench.notes = `${bench.notes ? `${bench.notes} ` : ''}[lane] multi-GPU baseline uses the merged time; ` +
+    `${BENCH_RANK_NOTE}.`;
+  log(`Benchmark note: ${RANKS}-GPU job, ${BENCH_RANK_NOTE}; merged times used.`);
+}
 log(`Benchmark done. ${bench.num_test_cases || BASELINE_PER_CASE.length} cases, baseline geomean ${BASELINE_GEOMEAN_MS} ms, reliable=${bench.reliable}`);
 
 // ===========================================================================
@@ -3122,7 +3322,7 @@ while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE && round <
     ...d,
     idx: i,
     id: d.id || `r${round}_d${i}`,
-    gpu_id: GPU_MODE === 'pin' && !GPU_JOB ? GPU_LIST[i % GPU_LIST.length] : GPU_POOL,
+    gpu_id: GPU_MODE === 'pin' && !GPU_JOB ? onEngine(GPU_LIST[i % GPU_LIST.length]) : GPU_POOL,
     out_dir: `${EVAL_DIR}/round_${round}/engineer_${i}`,
   }));
   // deep_explore is a DEDICATED-ROUND, heavyweight mandate: if the plan includes one, run ONLY it this
@@ -3208,8 +3408,10 @@ ${cfg({
       })}
 
 Return ONLY the worker_result.json structure as StructuredOutput.` +
-      // Built inline, not via roleAgent(), so the injection has to be appended here too.
+      // Built inline, not via roleAgent(), so the injection has to be appended here too (and, for a
+      // UT-module multi-GPU task only, the multi-GPU block).
       expertSkillsBlock(isDeep ? 'deep_engineer' : 'engineer') +
+      (UT_MR ? multiGpuBlock(isDeep ? 'deep_engineer' : 'engineer') : '') +
       (EVO ? `\n\nAlso Read ${WORKFLOW_DIR}/../evo/roles/engineer.md for the selected-parent and donor contract.` : '') +
       fastModeEngineerBlock(d.out_dir),
       { phase: 'Optimize', label: `${isDeep ? 'deep' : 'eng'} ${d.id}:${d.specialty}`, schema: ENG_SCHEMA }, route
@@ -3830,12 +4032,16 @@ re-check is not required.) Return JSON {committed, current_best_diff, note}.`;
 // ===========================================================================
 phase('Report');
 const report = await agentT(
-  roleAgent('tech_lead', 'report', 'Write the final report and the cumulative final patch.', {
+  roleAgent('tech_lead', 'report', 'Write the final report and the cumulative final patch.' +
+    (UT_MR ? ' Multi-GPU job: copy each case\'s per-rank baseline times and alignment from ' +
+      'BASELINE_PER_CASE (rank_ms, alignment) into its per_case row (baseline_rank_ms, alignment) when ' +
+      'they are there; a case with only the merged time keeps it.' : ''), {
     EVAL_DIR, WORKSPACE: CANONICAL, SKILL_DIR: WORKFLOW_DIR,
     HISTORY: history, FINAL_WINNER: finalWinner, BASELINE_PER_CASE,
     BASELINE_GEOMEAN_MS, CUMULATIVE_SPEEDUP: cumulative,
+    ...MR_INPUTS,
   }),
-  { phase: 'Report', label: 'tech_lead:report', schema: REPORT_SCHEMA });
+  { phase: 'Report', label: 'tech_lead:report', schema: UT_MR ? REPORT_SCHEMA_MR : REPORT_SCHEMA });
 
 // ===========================================================================
 // PHASE: Director validation + arbitration
@@ -3850,8 +4056,33 @@ const validation = await agentT(
     ...(HAS_WORKLOAD && report && report.final_speedup_weighted != null
         ? { TECH_LEAD_REPORTED_WEIGHTED: report.final_speedup_weighted } : {}),
     BASELINE_TIMING: BASELINE_PER_CASE,
+    ...MR_INPUTS,
   }),
-  { phase: 'Validate', label: 'director:validate', schema: VALIDATE_SCHEMA });
+  { phase: 'Validate', label: 'director:validate', schema: UT_MR ? VALIDATE_SCHEMA_MR : VALIDATE_SCHEMA });
+
+// Multi-rank receipt (A01). The director reports the merged time of every timed case (the baseline
+// leg always, the candidate leg once a candidate was produced), plus each rank's time and the
+// alignment method when the UT reports them. Neither an incomplete receipt nor missing per-rank detail
+// changes validation_status: what is missing goes into arbitration_note and timing_receipt_gap. The
+// lane returns the director's receipt when it has the merged times, else the Benchmark's baseline
+// record, else null.
+let TIMING_RECEIPT = null;
+let RECEIPT_GAP = '';
+if (UT_MR) {
+  RECEIPT_GAP = validation ? receiptGap(validation.timing_receipt, RANKS, !!finalWinner)
+    : 'the director returned no validation';
+  const note = validation && !RECEIPT_GAP ? receiptNote(validation.timing_receipt, RANKS, !!finalWinner) : '';
+  const missing = [RECEIPT_GAP, note].filter(Boolean).join('; ');
+  if (validation && missing) {
+    validation.arbitration_note = `${validation.arbitration_note ? `${validation.arbitration_note} ` : ''}` +
+      `[lane] ${RANKS}-GPU job, per-rank receipt incomplete: ${missing}; merged times used.`;
+    log(`Validate note: ${RANKS}-GPU job, ${missing}; validation_status unchanged.`);
+  }
+  if (!RECEIPT_GAP && note) RECEIPT_GAP = note;
+  TIMING_RECEIPT = validation && !receiptGap(validation.timing_receipt, RANKS, !!finalWinner)
+    ? validation.timing_receipt
+    : (!BENCH_RANK_GAP ? benchReceipt(BASELINE_PER_CASE, RANKS, bench.rank_timing_source) : null);
+}
 
 const finalGeomean = validation ? validation.director_verified_speedup_geomean : cumulative;
 // PRIMARY headline: the time-weighted speedup when workload-aligned, else the geomean (unchanged).
@@ -4063,6 +4294,9 @@ return {
   // host_bound/unprimed float as a clean device-time win. 'not_applicable' = this lane's own baseline
   // ratio, no frozen-oracle receipt behind it.
   timing_basis: validation ? validation.timing_basis || 'unknown' : 'unknown',
+  // UT-module multi-GPU tasks only (UT_MR; any other return has none of these keys): the per-rank
+  // timing receipt (A01) and, when the director's was missing or incomplete, why ('' when complete).
+  ...(UT_MR ? { gpus_per_job: RANKS, timing_receipt: TIMING_RECEIPT, timing_receipt_gap: RECEIPT_GAP } : {}),
   rounds: report ? report.rounds : round,
   budget_used: dispatched,
   budget_total: BUDGET,

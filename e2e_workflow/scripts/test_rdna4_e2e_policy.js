@@ -151,8 +151,17 @@ const R9700 = {
     }, { stopAtFirstPhase: true });
     let msg = '';
     try { await run(); } catch (error) { msg = error.message; }
-    ok(/R9600D E2E is vLLM-only \(got backend=sglang\)/.test(msg),
-      'R9600D explicit backend=sglang fails closed', msg || 'no throw');
+    ok(msg === PROBE_STOP, 'R9600D explicit backend=sglang is accepted', msg || 'no throw');
+  }
+  {
+    const { run } = build({
+      model_path: '/models/m', backend: 'atom', expected_gfx: 'gfx1201', expected_target: 'r9600d',
+      expected_device_name: 'AMD Radeon AI PRO R9600D', expected_physical_cu_count: 48,
+    }, { stopAtFirstPhase: true });
+    let msg = '';
+    try { await run(); } catch (error) { msg = error.message; }
+    ok(/R9600D E2E is vLLM or SGLang only \(got backend=atom\)/.test(msg),
+      'R9600D explicit backend=atom fails closed', msg || 'no throw');
   }
   {
     const { run } = build({ kernel_path: '/tmp/k', expected_gfx: 'gfx950', expected_target: 'r9600d' });

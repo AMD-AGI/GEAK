@@ -1,0 +1,26 @@
+source_file_path:
+- source/triton__gemm_a16_w16_kernel.py
+target_kernel_functions:
+- _gemm_a16_w16_kernel
+compile_command:
+- bash -lc 'source "${AVO_FLYDSL_ENV:?set AVO_FLYDSL_ENV to the FlyDSL environment script}" && export TORCH_EXTENSIONS_DIR=$PWD/.torch_ext && python3 scripts/task_runner.py compile'
+correctness_command:
+- bash -lc 'source "${AVO_FLYDSL_ENV:?set AVO_FLYDSL_ENV to the FlyDSL environment script}" && export TORCH_EXTENSIONS_DIR=$PWD/.torch_ext && python3 scripts/task_runner.py correctness'
+performance_command:
+- bash -lc 'source "${AVO_FLYDSL_ENV:?set AVO_FLYDSL_ENV to the FlyDSL environment script}" && export TORCH_EXTENSIONS_DIR=$PWD/.torch_ext && python3 scripts/task_runner.py performance'
+task_type: triton2triton
+task_result_template: null
+prompt:
+  source_code: null
+  instructions: >-
+    Optimize the FlyDSL-capable `_gemm_a16_w16_kernel` dispatch for MI300X.
+    Preserve correctness across c2, c32, and c64. The baseline already executes
+    FlyDSL when available; alternative source-level routing is allowed.
+  cheatsheet: null
+extracted_from:
+  engine: aiter
+  kernel_id: triton:aiter.ops.triton._triton_kernels.gemm.basic.gemm_a16w16._gemm_a16_w16_kernel
+  triton_fn: _gemm_a16_w16_kernel
+  origin_module: aiter.ops.triton._triton_kernels.gemm.basic.gemm_a16w16
+  source: triton_inspect
+  test_cases: 3

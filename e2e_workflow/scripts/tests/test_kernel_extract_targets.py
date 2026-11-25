@@ -6,7 +6,7 @@ import unittest
 
 
 SCRIPT = (Path(__file__).resolve().parents[2] / "knowledge/kernel_extraction_skills"
-          / "kernel-extract/scripts/select_targets.py")
+          / "kernel-profile/scripts/select_targets.py")
 spec = importlib.util.spec_from_file_location("extract_targets", SCRIPT)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)

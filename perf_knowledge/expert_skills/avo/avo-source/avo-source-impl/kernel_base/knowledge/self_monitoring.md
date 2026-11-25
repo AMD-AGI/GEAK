@@ -1,0 +1,1 @@
+../../../../../../../kernel_workflow/knowledge/self_monitoring.md
