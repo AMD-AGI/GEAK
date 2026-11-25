@@ -1,10 +1,12 @@
 # Setup and required inputs
 
-Use the tools from the same repository checkout as this skill:
+Shared by [kernel-profile](../../kernel-profile/SKILL.md) and [kernel-ut](../SKILL.md).
+Use the tools from the same repository checkout as these skills:
 
 ```bash
-export SKILL_ROOT=/absolute/path/to/e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract
-export SHARED_TOOLS="$(cd "$SKILL_ROOT/../../../scripts" && pwd)"
+SKILLS=/absolute/path/to/e2e_workflow/knowledge/kernel_extraction_skills
+export SKILL_ROOT="$SKILLS/kernel-profile"     # or "$SKILLS/kernel-ut" for the UT skill
+export SHARED_TOOLS="$(cd "$SKILLS/../../scripts" && pwd)"
 export EVAL_DIR=/absolute/path/to/extraction-evidence
 export PARSE_PROFILE_STRICT_PHASES=1 KERNEL_ENV_SKIP_ENUM_REAP=1
 ```
@@ -70,6 +72,6 @@ accepted overlay exists, stage its configuration while retaining its immutable
 external source references. Copying baseline source into the candidate task
 does not establish an independent baseline.
 
-Put model artifacts, captures and outputs under `EVAL_DIR`, not inside the skill.
+Put model artifacts, traces and outputs under `EVAL_DIR`, not inside the skills.
 Keep credential handling and remote/container access in the user's existing
 tools. Keep run-specific credentials and model data outside the repository.

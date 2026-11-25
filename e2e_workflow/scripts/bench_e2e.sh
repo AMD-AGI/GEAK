@@ -445,7 +445,7 @@ if [ -n "${PROFILE_PROBE_POINTS:-}" ]; then
          "(or PROFILE_PROBE_WITH_WINDOW=1)" >&2; exit 4
   fi
   if [ ! -f "$_PROBE" ] || [ ! -f "$PROFILE_PROBE_POINTS" ]; then
-    echo "!!! probe: need SKILL_ROOT (the kernel-extract skill) and the points file;" \
+    echo "!!! probe: need SKILL_ROOT (the kernel-profile skill) and the points file;" \
          "got '$_PROBE', '$PROFILE_PROBE_POINTS'" >&2; exit 3
   fi
   if ! declare -F adapter_probe_args >/dev/null; then
@@ -958,7 +958,7 @@ fi
 # decoding, interleaved by the scheduler. A cold burst profiled from step 0 captures only the prefill
 # ramp (TTFT) and misses decode entirely (see knowledge/profile_parse.md). So we instead drive a
 # sustained, saturated load and profile a WINDOW once it has reached the mixed steady state.
-# PROFILE_PROBE_POINTS instead hands each planned sampling point to the kernel-extract skill's own
+# PROFILE_PROBE_POINTS instead hands each planned sampling point to the kernel-profile skill's own
 # serving_probe.py on this server; the launcher/backend only says where (adapter_probe_args).
 run_probes() {
   for _pid in ${PROFILE_PROBE_IDS//,/ }; do

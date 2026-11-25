@@ -29,9 +29,9 @@ complete trace with collectives in it, and names the one to parse:
 ## pd-points: sampling points of a fixed-length PD run (sglang)
 
     mn_traces.py pd-points --engine-log prefill=LOG --engine-log decode=LOG \
-        --skill-root <kernel-extract> --out-dir DIR [--points-per-phase 3]
+        --skill-root <kernel-profile> --out-dir DIR [--points-per-phase 3]
 
-Plans the points from each engine's BASELINE server log with kernel-extract's
+Plans the points from each engine's BASELINE server log with kernel-profile's
 `observed_workload.py --mode multinode` and `plan_sampling_points.py`, then writes
 `DIR/sampling_points.json` and prints `PROFILE_PROBE_IDS=<ids>` for `bench_e2e.sh`.
 
