@@ -17,6 +17,15 @@ The manifest freezes:
                   definitions (comments and whitespace do not count).
   constants       namespace-scope constants: the listed ones, plus every one a
                   frozen function reads.
+  variables       the other namespace-scope variables a frozen function reads
+                  (tables, mutable state), by their normalized declarations.
+  mutable         those of them that only frozen functions touch; no other
+                  code may name them.
+  guarded/macros  every identifier a frozen definition uses, and the pristine
+                  `#define`/`#undef` lines for them: no macro may be added,
+                  changed or dropped on those names.
+  env_writes      how many calls set an environment variable; frozen functions
+                  read the environment, so there may be no more.
   exports         unmangled symbols the kernel library exports (optional).
 """
 import functools
@@ -59,6 +68,8 @@ def strip_comments(src):
             for k in range(open_paren + 1, j - len(delim) - 2):
                 mask[k] = " "
             i = j
+        elif c == "'" and _digit_separator(src, i):
+            i += 1
         elif c in "\"'":
             j = i + 1
             while j < n and src[j] != c and src[j] != "\n":
@@ -77,6 +88,17 @@ def strip_comments(src):
             directive = False
         start += len(line) + 1
     return "".join(code), "".join(mask)
+
+
+def _digit_separator(src, i):
+    """Whether the `'` at src[i] separates digits (`1'000`, `0x1'F`): it sits
+    inside a token that starts with a digit. `u8'a'` and `L'a'` are literals."""
+    if i + 1 >= len(src) or not src[i + 1].isalnum():
+        return False
+    j = i
+    while j > 0 and (src[j - 1].isalnum() or src[j - 1] in "_'"):
+        j -= 1
+    return j < i and src[j].isdigit()
 
 
 def normalize(text):
@@ -270,6 +292,59 @@ def constant_declaration(src, name):
     return namespace_constants(src).get(name)
 
 
+# A declarator: a name, any array bounds, then an initializer or the end of the
+# declaration. Each repetition starts at a `[` its body cannot hold, so the
+# match stays linear.
+_VAR_DECLARATOR = re.compile(r"\b([A-Za-z_]\w*)\s*(?:\[[^\[\];{}]*\]\s*)*(=(?!=)|\{|;)")
+_NOT_A_VARIABLE = re.compile(r"\s*(?:typedef|using|struct|class|union|enum|namespace|template|"
+                             r"friend|static_assert)\b")
+_KEYWORDS = {"const", "constexpr", "volatile", "noexcept", "override", "final", "mutable",
+             "public", "private", "protected", "default", "delete", "else", "do", "try",
+             "return", "break", "continue", "int", "bool", "char", "float", "double", "void"}
+
+
+@functools.lru_cache(maxsize=4)
+def _namespace_declarations(src):
+    """{name: [(start, end, mutable)]} of the variables declared at namespace
+    scope: scalars, arrays and objects, const or not. A head with parentheses
+    is a function head (or a parameter in one) and is skipped; so are heads
+    like `__attribute__((aligned(16))) int x;`."""
+    _, mask = strip_comments(src)
+    depth = _scope_depth(src)
+    out = {}
+    pos = 0
+    while (m := _VAR_DECLARATOR.search(mask, pos)) is not None:
+        pos = m.end()
+        name = m.group(1)
+        if depth[m.start()] != 0 or name in _KEYWORDS:
+            continue
+        start = _decl_start(mask, m.start())
+        head = mask[start:m.start()]
+        if (not head.strip() or "(" in head or ")" in head or head.rstrip().endswith(("::", ".", "->"))
+                or head.count("<") > head.count(">") or _NOT_A_VARIABLE.match(head)):
+            continue
+        end = m.end() - 1
+        if m.group(2) != ";":
+            end = m.end()
+            while end < len(mask) and not (mask[end] == ";" and depth[end] == 0):
+                end += 1
+            end = min(end, len(mask) - 1)
+        mutable = not re.search(r"\b(?:const|constexpr)\b", head)
+        out.setdefault(name, []).append((start, end, mutable))
+        pos = end + 1
+    return out
+
+
+def namespace_variables(src):
+    """{name: (normalized declarations, mutable)} of every variable declared at
+    namespace scope. All declarations of a name are kept (an `extern` one and
+    the definition), and it is mutable when any of them is."""
+    code, _ = strip_comments(src)
+    return {name: (" ".join(normalize(code[s:e + 1]) for s, e, _ in spans),
+                   any(mut for _, _, mut in spans))
+            for name, spans in _namespace_declarations(src).items()}
+
+
 def _reads(src, name):
     """Identifiers a definition of `name` uses outside its literals."""
     _, mask = strip_comments(src)
@@ -279,21 +354,69 @@ def _reads(src, name):
     return ids
 
 
+def _names_in(src, name):
+    """Every identifier in a definition of `name`, preprocessor lines included:
+    a macro that reaches an `#ifdef` inside a frozen body changes it as surely
+    as one that reaches a call."""
+    code, _ = strip_comments(src)
+    ids = set()
+    for s, e in function_definitions(src, name):
+        ids.update(_IDENT.findall(code[s:e + 1]))
+    return ids
+
+
 def quoted_includes(src):
     code, _ = strip_comments(src)
     return sorted(set(re.findall(r'^\s*#\s*include\s*"([^"]+)"', code, re.MULTILINE)))
 
 
-def _macro_targets(src):
+def macro_directives(src):
+    """{name: [normalized directive]} for every `#define`/`#undef`, in order,
+    continuation lines included."""
     code, _ = strip_comments(src)
-    return set(re.findall(r"^\s*#\s*(?:define|undef)\s+([A-Za-z_]\w*)", code, re.MULTILINE))
+    out = {}
+    lines = code.split("\n")
+    i = 0
+    while i < len(lines):
+        text = lines[i]
+        while text.rstrip().endswith("\\") and i + 1 < len(lines):
+            i += 1
+            text = text.rstrip()[:-1] + " " + lines[i]
+        m = re.match(r"\s*#\s*(?:define|undef)\s+([A-Za-z_]\w*)", text)
+        if m:
+            out.setdefault(m.group(1), []).append(normalize(text))
+        i += 1
+    return out
+
+
+_ENV_WRITE = re.compile(r"\b(?:setenv|putenv|unsetenv|_putenv_s|_putenv|_wputenv_s|_wputenv|"
+                        r"SetEnvironmentVariable[AW]?)\s*\(")
+
+
+def env_writes(src):
+    """How many calls in `src` set or clear an environment variable."""
+    _, mask = strip_comments(src)
+    return len(_ENV_WRITE.findall(mask))
+
+
+def _uses_outside(src, name, spans):
+    """Whether `name` appears in `src` (macro bodies included) outside `spans`
+    and outside its own namespace-scope declarations."""
+    code, _ = strip_comments(src)
+    allowed = list(spans) + [(s, e) for s, e, _ in _namespace_declarations(src).get(name, [])]
+    return any(not any(s <= m.start() <= e for s, e in allowed)
+               for m in re.finditer(rf"\b{re.escape(name)}\b", code))
 
 
 def manifest(src, functions=(), constants=(), required_includes=("hip_custom_kernels.h",)):
     """Snapshot the frozen contract of the pristine kernel source. Besides the
-    listed constants, every namespace-scope constant a frozen function reads is
-    frozen. Raises ValueError when a listed gate or constant is not in the
-    source."""
+    listed constants, every namespace-scope variable a frozen function reads is
+    frozen: scalar constants under `constants`, the rest (tables, mutable
+    state) under `variables`. A mutable one that only frozen functions touch is
+    also listed in `mutable` and must stay theirs. `guarded` is every
+    identifier a frozen definition uses; `macros` holds the pristine
+    `#define`/`#undef` lines for those names. Raises ValueError when a listed
+    gate or constant is not in the source."""
     missing_inc = [h for h in required_includes if h not in quoted_includes(src)]
     if missing_inc:
         raise ValueError(f"pristine kernel does not include {missing_inc}")
@@ -310,14 +433,29 @@ def manifest(src, functions=(), constants=(), required_includes=("hip_custom_ker
             raise ValueError(f"frozen constant '{name}' is not declared in the kernel")
         consts[name] = d
     namespace = namespace_constants(src)
-    for name in functions:
-        for ident in sorted(_reads(src, name) & set(namespace)):
-            consts.setdefault(ident, namespace[ident])
+    reads = set().union(*(_reads(src, name) for name in functions))
+    for ident in sorted(reads & set(namespace)):
+        consts.setdefault(ident, namespace[ident])
+    declared = namespace_variables(src)
+    variables = {n: declared[n][0] for n in sorted(reads & set(declared)) if n not in consts}
+    spans = [sp for name in functions for sp in function_definitions(src, name)]
+    # A mutable variable an editable function also touches cannot be held to
+    # the frozen functions; its declaration is still frozen.
+    mutable = [n for n in variables if declared[n][1] and not _uses_outside(src, n, spans)]
+    extern_c = extern_c_definitions(src)
+    guarded = set(extern_c) | set(fn) | set(consts) | set(variables)
+    guarded = guarded.union(*(_names_in(src, name) for name in functions))
+    macros = macro_directives(src)
     return {
-        "extern_c": extern_c_definitions(src),
+        "extern_c": extern_c,
         "extern_c_blocks": extern_c_blocks(src),
         "functions": fn,
         "constants": consts,
+        "variables": variables,
+        "mutable": mutable,
+        "guarded": sorted(guarded),
+        "macros": {n: macros[n] for n in sorted(guarded & set(macros))},
+        "env_writes": env_writes(src),
         "required_includes": list(required_includes),
         "exports": None,
     }
@@ -349,9 +487,26 @@ def check_source(src, man):
     for name, decl in sorted(man.get("constants", {}).items()):
         if constant_declaration(src, name) != decl:
             errs.append(f"frozen constant {name} changed")
-    frozen_names = set(want) | set(man.get("functions", {})) | set(man.get("constants", {}))
-    for name in sorted(_macro_targets(src) & frozen_names):
-        errs.append(f"#define/#undef of frozen name {name}")
+    declared = namespace_variables(src) if man.get("variables") else {}
+    for name, decl in sorted(man.get("variables", {}).items()):
+        if declared.get(name, (None,))[0] != decl:
+            errs.append(f"frozen variable {name} changed")
+    if man.get("mutable"):
+        spans = [sp for name in man.get("functions", {}) for sp in function_definitions(src, name)]
+        for name in man["mutable"]:
+            if _uses_outside(src, name, spans):
+                errs.append(f"frozen variable {name} is used outside the frozen functions; "
+                            "only they may read or write it")
+    guarded = (set(man.get("guarded", ())) | set(want) | set(man.get("functions", {}))
+               | set(man.get("constants", {})))
+    want_macros = man.get("macros", {})
+    got_macros = macro_directives(src)
+    for name in sorted(guarded & (set(got_macros) | set(want_macros))):
+        if got_macros.get(name, []) != want_macros.get(name, []):
+            errs.append(f"#define/#undef of {name} changed; a frozen function uses that name")
+    if env_writes(src) > man.get("env_writes", 0):
+        errs.append("the kernel sets an environment variable; frozen functions read the "
+                    "environment, so it may not change")
     return errs
 
 
