@@ -165,6 +165,37 @@ if [ -n "${GEAK_GPU_ALLOWED:-}" ]; then
     fi
 fi
 
+# ---- Re-entrancy --------------------------------------------------------------------------------
+# A command that already runs under this wrapper's single-GPU or pool lock may call the wrapper
+# again: profile_kernel.sh locks internally, and the roles tell agents to run GPU work through
+# gpu_lock.sh, so `gpu_lock.sh 0 bash profile_kernel.sh ...` is the normal way to profile. flock is
+# not re-entrant across processes, so the inner call used to block on the outer one until something
+# killed the caller (in practice the agent's 600 s tool timeout -- ten lost minutes per profile).
+# If the GPU we already hold is the one asked for (or one of the pool), run on it directly: the
+# holder already set HIP_VISIBLE_DEVICES and pinned the compile arch, and the command inherits both.
+# GEAK_GPU_LOCK_HELD is "<gpu>:<holder pid>:<lock fd>". The bypass applies only while that holder
+# still has this GPU's lock file open, so a descendant that outlived its wrapper (the lock fd is
+# not inherited, see `200>&-` below) queues like any other caller. The EXIT trap above still runs,
+# so the source-provenance check is unchanged for nested calls.
+if [ -n "${GEAK_GPU_LOCK_HELD:-}" ]; then
+    IFS=: read -r _held_id _held_pid _held_fd <<<"$GEAK_GPU_LOCK_HELD"
+    case "$GPU_SPEC" in
+        group:*|pool:*:*) ;;   # multi-GPU leases keep their own nesting guard (GEAK_GPU_LEASE_ACTIVE)
+        *)
+            case ",${_SPEC_IDS}," in
+                *",${_held_id},"*)
+                    if [ -n "$_held_pid" ] && [ -n "$_held_fd" ] \
+                       && [ "$(readlink "/proc/$_held_pid/fd/$_held_fd" 2>/dev/null)" \
+                            = "$(readlink -f "${LOCK_DIR}/gpu_${_held_id}.lock")" ]; then
+                        "$@"
+                        exit $?
+                    fi
+                    ;;
+            esac
+            ;;
+    esac
+fi
+
 # ---- GPU selection ------------------------------------------------------------------------------
 # <gpu_spec> is either a single id ("2", the historical contract, unchanged) or a POOL ("0,1,2,3").
 # With a pool we do not pre-assign a GPU: we take the first one that is BOTH unlocked AND idle,
@@ -373,6 +404,7 @@ elif [ -n "${POOL_FD:-}" ]; then
     # Re-locking the same file from the same process would be a no-op at best, so just run --
     # the lane stays held until we exit, which is what guarantees no two evaluations share a GPU.
     export HIP_VISIBLE_DEVICES="$GPU_ID"
+    export GEAK_GPU_LOCK_HELD="$GPU_ID:$BASHPID:$POOL_FD"   # see Re-entrancy
     _pin_compile_arch || exit 1   # (3) after the selected GPU is visible
     "$@" {POOL_FD}>&-   # this shell's copy holds the lane; see `200>&-` below
 else
@@ -409,6 +441,7 @@ else
             echo "{\"t\":$(date +%s),\"gpu\":$GPU_ID,\"pool\":\"$GPU_SPEC\",\"pid\":$$,\"mode\":\"pin\",\"wait_s\":$(( SECONDS - _wait_t0 ))${_ID_FIELDS}}" \
                 >> "$GEAK_GPU_USE_LOG" 2>/dev/null
         export HIP_VISIBLE_DEVICES="$GPU_ID"
+        export GEAK_GPU_LOCK_HELD="$GPU_ID:$BASHPID:200"   # see Re-entrancy
         _pin_compile_arch || exit 1   # (3) after the selected GPU is visible
         # Not inherited by the command: bash sets no close-on-exec here, so any descendant that
         # outlived it would keep the lock held. This subshell's fd 200 holds it while "$@" runs.
