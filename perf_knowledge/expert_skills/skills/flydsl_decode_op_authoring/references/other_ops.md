@@ -25,7 +25,8 @@ mixing weight, more than 8 streams, tensor parallelism above 1.
 
 ### Task decomposition and ownership
 
-Three kinds of task; a task waits only for lower indices.
+The column, owner and norm tasks use the [polling owner pattern](flydsl_idioms_and_resources.md#cross-workgroup-patterns)
+and require its launch progress guarantee.
 
 - **Column tasks** `0 .. hidden / 16 - 1`: task `t` owns 16 columns of every stream of every row. It
   forms and stores the new streams, and reduces its **partial** mix dot products and its share of the
@@ -83,7 +84,7 @@ column tasks' partials so that the norm tasks need no second pass over the row.
   read the stored streams. Both are parity facts: take them from `native_decode_numerics` if it lists
   this operator, otherwise from the backend source.
 - The Sinkhorn iteration count: off by one is visible unless the iteration has already converged.
-- Any workgroup count gives bit-identical small outputs (the fixed reduction order).
+- Check for bit-identical small outputs across supported grids (the reduction order is fixed).
 
 ---
 

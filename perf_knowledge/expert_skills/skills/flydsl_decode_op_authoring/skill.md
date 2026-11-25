@@ -61,14 +61,14 @@ native op. Three choices decide the outcome, and they must be made before the fi
 
 - **The task axis.** Split one row into tasks that each own their outputs exclusively (16 output columns, a
   head, 4 experts, a slice of an expert's intermediate, a run of KV segments, a block of state rows) and map
-  task `t` to workgroup `t mod n_blocks`. That is correct for any grid and uses the CUs.
+  task `t` to workgroup `t mod n_blocks` to distribute these outputs across the grid.
 - **The lane axis.** Put the 64 lanes along the axis that is *read* (K of a weight row, the dims of a key),
   so that every byte is read once with 8- or 16-byte loads issued before the arithmetic. Use matrix cores
   only where a wave has 16 positions x up to 16 heads to contract (attention, MLA, indexer); a GEMV at 1 to
   4 rows is bound by the weight stream and FMAs are enough.
-- **How partial results meet.** Either nothing crosses workgroups (recompute redundantly), or the last task
-  to arrive finishes from a zeroed workspace in a fixed order, or an owner with the highest task index waits
-  for lower ones. All three are deadlock-free at any workgroup count.
+- **How partial results meet.** For an arbitrary grid, give each task independent outputs or let the last
+  arrival merge partials in a fixed order. Use a polling owner only when the launch guarantees its
+  producers can run. See [cross-workgroup patterns](references/flydsl_idioms_and_resources.md#cross-workgroup-patterns).
 
 The register file sets the thread count: a 512-thread workgroup has two waves per SIMD, so 256 registers per
 wave; attention-class designs need more and run at 256 threads.
@@ -119,7 +119,7 @@ Speed is the deployed kernel's time over this design's (above 1 = this design is
 ## Knobs & pitfalls
 | symptom | what to do | already done if | detail |
 |---|---|---|---|
-| time proportional to one row's bytes, flat in the width | split the row into tasks with exclusive outputs | 64 or more tasks per row, or about the CU count | the op's reference |
+| time proportional to one row's bytes, flat in the width | use step 5(a) to size the split for this row | additional workgroups no longer reduce measured time | the op's reference |
 | time proportional to context or window, unchanged by the thread count | lane = position, all waves take tiles, matrix cores for position x head | matrix-core instructions in the hot loop; K loaded once per tile | [`decode_attention.md`](references/decode_attention.md), [`mla_decode.md`](references/mla_decode.md) |
 | 1- or 2-byte loads in the hot loop of a weight-streaming op | a thread owns a contiguous run; 8- or 16-byte loads | wide loads in the ISA | [`gemv_linear.md`](references/gemv_linear.md); not for RoPE / KV write, see [`rope_kv_write.md`](references/rope_kv_write.md) |
 | scratch above 0, or registers at the cap | keep less in flight per round; rows as runtime loops; 256 threads | scratch 0 | [`flydsl_idioms_and_resources.md`](references/flydsl_idioms_and_resources.md) |

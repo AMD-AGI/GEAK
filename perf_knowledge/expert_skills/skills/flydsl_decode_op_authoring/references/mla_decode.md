@@ -25,9 +25,9 @@ sit below the test tolerance when wrong, so they have to come from the backend s
 
 ## Task decomposition and ownership
 
-Three kinds of task in one grid-stride loop, `heads + rows x groups x chunks + heads` tasks in total. A
-task only ever waits for tasks of a **lower index**, so any workgroup count is correct: one workgroup
-runs them in order, and with more the lowest unfinished task is always running.
+The grid-stride loop has `heads + rows x groups x chunks + heads` tasks. Absorb, attention and finish
+depend on one another in that order. Their polling waits require the
+[launch progress guarantee](flydsl_idioms_and_resources.md#cross-workgroup-patterns).
 
 1. **Absorb** (one task per head). Computes the absorbed query of every row for its head and stores it
    in fp32, already rounded as the backend rounds it, into a device workspace; then posts the head's
@@ -151,5 +151,5 @@ Speed relative to deployed paths, 16 heads, fp8 cache (above 1 = this design is 
 - A cache scale other than 1 on an fp8 cache.
 - An index list with padding inside the walk and a split made only of padding (the NaN-free rules).
 - The split count for a sparse row is taken on `min(L, list length)`, not on `L`.
-- Workgroup counts 1 and 7: every wait is on a lower task index, so both must pass.
+- Test with 1 and 7 workgroups under the supported launch configuration.
 - The first call per width runs eagerly (it allocates and zeroes the workspace).

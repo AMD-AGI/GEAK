@@ -28,8 +28,8 @@ candidates than `k` lists all of them and pads. An exact tie at the k-th score g
 
 ## Task decomposition and ownership
 
-One grid-stride loop over three kinds of task. A task waits only on **lower** task indices, so any
-workgroup count is correct. There is no grid-wide barrier.
+One grid-stride loop over score, filter and select tasks. Polling between these phases requires the
+[launch progress guarantee](flydsl_idioms_and_resources.md#cross-workgroup-patterns).
 
 1. **Score tasks** `(row, chunk)`: a chunk is 256 positions. Each candidate's score is turned into an
    **order-preserving 32-bit key** (a forced candidate gets the largest key, a candidate past the row's

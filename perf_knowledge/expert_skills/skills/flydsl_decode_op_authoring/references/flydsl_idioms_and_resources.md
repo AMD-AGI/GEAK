@@ -113,8 +113,7 @@ Measured register counts, for orientation (256-thread workgroups unless noted):
 
 ## Cross-workgroup patterns
 
-Three patterns covered every case in the ten operators. All of them are correct for any workgroup
-count and need no grid-wide barrier.
+The ten operators use three patterns to collect partial results.
 
 1. **Exclusive ownership, no communication.** Each task owns its outputs and derives everything else
    itself, even redundantly (the RMSNorm statistic per wave, the delta rule's `q` / `k` normalisation
@@ -125,9 +124,14 @@ count and need no grid-wide barrier.
    them **in a fixed index order** (so the result does not depend on who arrived last), writes the
    output, and re-zeroes counter and accumulators. Nobody waits. Used by the router, the MoE experts,
    the K-split GEMV and the delta rule.
-3. **Owner waits on lower indices.** Non-owner tasks store a record and post an epoch-tagged flag; the
-   owner is the **highest** task index of its set, so with a grid-stride loop every task it waits for
-   has already been scheduled. Used by split-K attention, MLA decode, the indexer and the stream mix.
+3. **Owner waits on lower indices.** Producers store a record and post an epoch-tagged flag. The owner
+   polls those flags and merges in a fixed order. Split-K attention, MLA decode, the indexer and the
+   stream mix use variants of this pattern. Decreasing task indices make the dependencies acyclic.
+   A grid-stride loop orders tasks only within each workgroup. If waiting workgroups fill the device,
+   a producer in a queued workgroup cannot publish its flag. Use this pattern only when the launch
+   guarantees progress for all dependencies (for example, a cooperative launch with the whole grid
+   resident and each workgroup visiting tasks in increasing order). For arbitrary grids, use last
+   arrival for a reduction or schedule dependent phases in separate launches when the task allows it.
 
 Rules that go with patterns 2 and 3:
 

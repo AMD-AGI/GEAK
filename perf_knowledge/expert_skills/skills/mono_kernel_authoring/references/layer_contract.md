@@ -131,38 +131,20 @@ then has no all-reduce). Decide both from the framework source, not from the mod
   not widen the safety factor. Where a chain of re-rounding points gives a loose bound, keep it and write that the
   check is weak there.
 
-**The layer tolerance is calibrated**, because the derived envelope is a worst case and usually too loose to
-catch a real bug. *(Measured: a missing all-reduce produced an error only about 1.1× the derived envelope; an
-MLP's derived bound was about 16× its measured error.)*
+Apply the [tolerance calibration](../../native_decode_numerics/references/parity_method.md#calibrating-a-tolerance)
+to the composed reference and the native layer on every captured step and rank. Use the oracle's metric
+for both the reference error and the run-to-run native noise. Check the task's controls at the
+[negative-control margin](../../native_decode_numerics/references/parity_method.md#negative-controls).
 
-- `measured`: the worst error of the composed layer reference against the native layer output over every
-  captured step and rank, in the oracle's own metric.
-- `noise`: the error between two runs of the native layer.
-- **`layer_tol = min(derived, max(4 × measured, 4 × noise))`**.
-- **Every negative control of the task must still fail at least one check at `3 × layer_tol`**, judged by the oracle's own
-  pass test. A control the oracle cannot see fails the contract outright. A control caught only by the multi-step
-  sequence check counts, but name it in your notes: that risk must stay visible.
-- If `3 × layer_tol` is not above the tolerance the controls were recorded at, the margin is already proven (a
-  case that fails at a tolerance also fails at any lower one). Otherwise re-run the controls at `3 × layer_tol`.
-- Do not compare a recorded "smallest failing error" with the tolerance yourself when the oracle's reported error
-  has the tolerance in its denominator: that figure depends on the tolerance it was recorded at.
-- A control no check catches at the margin is strengthened: the same bug at a larger magnitude (a larger scale
-  factor, more corrupted entries). Never swap it for another bug, delete it, or edit the checks it names. If no
-  larger magnitude is meaningful, the contract fails; return the numbers.
-- The multipliers 4 and 3 are fixed. Never change them to make a layer pass.
-- **Inside a kernel lane the oracle is frozen**: its tolerance and its controls are immutable files. Compute
-  `layer_tol` there as a self-check only. If it differs from the oracle's tolerance, or a control would not fail
-  at `3 × layer_tol`, report it. Re-running or strengthening controls belongs to whoever freezes the oracle.
+Inside a kernel lane, the tolerance and controls are frozen. Use the calculation as a self-check and report
+any discrepancy. The oracle owner can reuse a control that already failed at an equal or looser tolerance.
+Otherwise the owner reruns it at the margin using the oracle's pass test. A recorded error normalized by the
+old tolerance needs reevaluation under the new tolerance.
 
-*(Measured on three layer kinds in one run: about 6×, 7× and 16× the oracle's first-guess tolerance, the last
-capped by the derived envelope; reruns under the revised metric gave about 4× to 6×. A reference that differed
-from native by one bf16 ulp after a norm reached 1.5× the first-guess tolerance, because a per-group dynamic fp8
-quantization can step on one ulp; a correct kernel with another accumulation order meets the same amplification.)*
-
-Known limits: `measured` covers only the captured decode steps, not random inputs (the factor 4 and the control
-margin stand in for them). A tolerance taken from steps that start on a filled cache does not cover the path that
-builds the cache from empty, step by step. *(Measured: a kernel within every stage bound reached about 1.2× the
-layer tolerance on that path.)* Make sure the oracle has a multi-step case from an empty cache.
+Include a multi-step case starting from an empty cache. In one run, a kernel within every stage bound
+reached about 1.2× the layer tolerance on that path. On three layer kinds, calibration gave about 6×, 7×
+and 16× the oracle's initial tolerance, with the last capped by the derived envelope. Repeating the
+calibration under the revised metric gave about 4× to 6×.
 
 ## 7. Negative controls
 
@@ -182,16 +164,9 @@ For a layer that takes the hidden state and the residual stream and returns `(br
   `stream_in = hidden + residual`: `|d| ≤ tol·(|Δa_ref| + RMS(Δa_ref)) + ulp(res_ref)`.
 - Compare the branch as `|d| ≤ tol·(|b_ref| + RMS(b_ref)) + ulp(b_ref + res_ref)`: the next layer adds the two,
   so a difference below one ulp of the sum is invisible.
-- Why: the attention branch is only 1–3% of the residual stream, so a whole-output metric dilutes a single-step
-  attention bug below any calibrated tolerance and only the multi-step check catches it. *(Measured with the
-  whole-output metric: two of eight controls on a dense layer, a scaled input-norm weight and a wrong rotary
-  table, were caught only by the sequence check.)*
-- The floor is one full ulp of the output format at the value, not half. Both sides round separately, so two
-  close exact values can land one ulp apart. *(Measured: a half-ulp floor made rounding flips read as errors
-  about 5× to 7× larger.)*
 - **Router near-ties.** A token whose native top-k boundary gap is below a tie threshold may be routed either
   way. Compare its branch with the nearer of the native output and an alternative native output re-run with the
-  k-th and (k+1)-th choices swapped. Measure the threshold from one-ulp input noise. Where no alternative exists
+  k-th and (k+1)-th choices swapped. Use the tie band from the calibration table. Where no alternative exists
   (graph replay), the token's branch is not compared; count those tokens. The composed reference has no
   alternative output: the original flow skipped the branch of every near-tie token there and counted them, and
   for layers that carry several streams skipped only tokens whose own top-k ids differ from the captured ones.
@@ -225,8 +200,7 @@ For a layer that takes the hidden state and the residual stream and returns `(br
 
 - [ ] Every stage is covered by a passing reference check on every captured step and rank; every edge is checked.
 - [ ] Every bound has its derivation next to it; KV writes are `exact`.
-- [ ] `layer_tol` follows the rule; every negative control of the task fails at `3 × layer_tol`; controls only
-      the sequence check catches are named.
+- [ ] Record the calibrated tolerance, the margin check for each control and which controls only the sequence check catches.
 - [ ] If stages will be authored separately: in each stage test the native op passes against float64 at the
       stage's own bound at about 1.0× (for very short stages the timing is noise), and a wrong candidate (float
       outputs scaled by `1 + 4·tol`) fails.

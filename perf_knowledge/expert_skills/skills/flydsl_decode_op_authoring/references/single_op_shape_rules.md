@@ -54,21 +54,20 @@ skipped this step.
   outputs (allocation only), launches, and returns the outputs in the order the test expects. An
   in-place output (a fused add that updates the residual) is written back into the input tensor.
 
-Keeping the device function free of launch details is what lets the same code run under any grid and
-later be inlined next to other operators.
+Keeping launch details in the launcher lets the same device function be inlined next to other operators.
 
 ## 3. Grid-agnostic work split
 
-*Rule.* The device function must be correct for any workgroup count `n_blocks >= 1`. Number the tasks
-`0 .. T-1` and let workgroup `b` run tasks `b, b + n_blocks, ...` (a grid-stride loop). Consequences:
+Number the tasks `0 .. T-1` and let workgroup `b` run tasks `b, b + n_blocks, ...` (a grid-stride loop).
+The mapping covers every task once at any positive grid size. The synchronization protocol determines
+which grids the launcher can support.
 
 - a task **owns** the output tiles it writes; no two tasks write the same element (or they write
   identical bytes, as the repeated KV write in [`rope_kv_write.md`](rope_kv_write.md));
-- a task may wait only for tasks of a **lower index**, or not wait at all and use a last-arrival
-  protocol (see [`flydsl_idioms_and_resources.md`](flydsl_idioms_and_resources.md#cross-workgroup-patterns));
-- test it: give the launcher a workgroup-count override, and run the correctness command at 1, at 7 and
-  at the full grid. With fewer workgroups than tasks the tasks of one row run one after another, which
-  exercises every arrival order.
+- choose a [cross-workgroup pattern](flydsl_idioms_and_resources.md#cross-workgroup-patterns)
+  compatible with the launch. A last-arrival reduction supports arbitrary workgroup counts.
+- give the launcher a workgroup-count override and check at 1, 7 and the full supported grid. These
+  runs exercise different assignments. Verify progress for every dependency separately.
 
 A kernel that is right only at the full grid has an ownership or ordering bug that will show up later
 as a rare wrong answer.

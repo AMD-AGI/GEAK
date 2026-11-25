@@ -38,10 +38,10 @@ few hundred generated tokens each, temperature 0.
 
 | Check | Pass condition | Required |
 |---|---|---|
-| Off is stock | Switch-off tokens are identical to the unpatched server's, prompt by prompt, and `launches` is 0 on every rank | yes |
+| Off is stock | With a deterministic baseline, switch-off tokens match the unpatched server's on every prompt. For a nondeterministic backend, use the baseline comparison below. Every rank has zero launches. | yes |
 | Greedy match | Switch-on tokens against switch-off tokens, prompt by prompt; a divergence passes only as a tie (section 4) | yes |
 | Effect | Section 3 | yes |
-| Accuracy | Section 5 | optional for the smoke (reported, not in its pass rule); required by the e2e gate once any prompt diverged |
+| Accuracy | Section 5 | separate e2e gate |
 | Speed | Section 6 | recorded only, not a pass condition of the smoke |
 
 The smoke passes only when the three required checks hold. If no serving smoke was run, report `skipped`,
@@ -79,27 +79,19 @@ failed effect proof, and no speed number from that run may be reported.
 
 ## 4. Greedy match and logit ties
 - Compare per prompt. At the first divergence record the step and the top-5 logits on both sides.
-- A divergence whose top-2 logits are within the bound the kernel's oracle derived is a **tie**: report it as
-  a tie, not as a failure. Any other divergence fails.
+- Classify the first divergence as a **tie** only when the two competing tokens are the top two and their
+  logit gap is within a bound established for those logits. Without an applicable bound, record a mismatch.
 - Scope of the tie rule: only this check (switch on against switch off), only at the first divergence of a
   prompt, only within the derived bound. "Off is stock" has no tie rule.
 - Why ties are legitimate: a fused layer and an in-kernel all-reduce change accumulation order, so results
   differ in the last place now and then. The native path itself forks at near-ties between batch sizes and
   between eager and graph mode. Compare the kernel's agreement with native against native's agreement with
   itself, and never widen the bound to turn a divergence into a tie.
-- **A tie is a smoke classification, not an acceptance.** The e2e gate judges parity against the unpatched
-  server ([e2e_integrator.md](../../../../../e2e_workflow/roles/e2e_integrator.md), gate 4) and treats a
-  candidate that diverges on any prompt from a deterministic baseline as a real output change: it rejects a
-  non-quantized change outright and accepts a quantized kernel only after a task-accuracy gate. So once any
-  prompt diverged, tie or not, the paired accuracy run of section 5 is required before acceptance, and the
-  accept is reported with `parity_kind` `accuracy`, never `byte_exact`.
 
-## 5. Accuracy check: a correctness gate, not speed evidence
-Optional for the smoke and not part of its pass rule; required by the e2e gate as soon as any prompt diverged
-from the unpatched baseline (section 4). Run the full accuracy benchmark with the switch on and with it off,
-paired on the same items, and report both scores and the paired difference. It answers one question only: did
-near-tie forks change task quality? The e2e gate decides what difference it accepts.
-Its wall-clock is not a speed result: it runs at its own concurrency, which need not be the one you serve at.
+## 5. Final acceptance
+Carry the smoke observations into the [e2e integrator's parity gate](../../../../../e2e_workflow/roles/e2e_integrator.md#the-gate-a-change-enters-e2e-only-if-all-hold).
+It defines when to reject a divergence against the fresh unpatched baseline, when to run task accuracy,
+and how to report the verdict. A smoke tie is recorded only for the on/off comparison.
 
 ## 6. Speed, and reconciling it with the layer speedup
 Record single-concurrency decode at width 1, time per output token and throughput, on versus off, then run

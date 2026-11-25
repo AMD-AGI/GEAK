@@ -65,37 +65,24 @@ across ranks, gfx950, experimental). Also applies: `native_decode_numerics`. Del
    Under a stated memory limit an additional or re-laid-out copy of weights or scales is out, unless it replaces the original or the task statement allows it.
 2. **Classify the structure.** Layer class: full one-launch · dual launch (front + tail) · partial from the attention output · multi-launch layer · multi-layer per
    launch (outside this lever set). Schedule: every workgroup runs every stage · per-stage task tables · two wave groups. Rows. Shape. → [kernel_structures.md](references/kernel_structures.md)
-3. **Inventory before ranking — mandatory.** For every lever you are about to propose, write down the marker you looked for in the source ("not applied if" below,
-   "already applied if" in the lever table) and what you found. A lever whose marker says "applied" is not a candidate. Judge sub-levers one by one.
+3. **Inventory before ranking — mandatory.** For every lever you are about to propose, write down the marker you looked for in the source (planner step 5 and the lever table) and what you found. A lever whose marker says "applied" is not a candidate. Judge sub-levers one by one.
 4. **Look for an existing trace / timeline switch** before planning instrumentation (HIP: a trace pointer in the argument struct plus a stamp helper; FlyDSL: a timeline build); measurement gets a quarter of the round.
 5. **Rank by expected verified gain per engineer-hour, not by stage size.** Effects measured on an already tuned kernel outrank a stage's share of the layer.
-   A stage the timeline shows compute-bound (instructions per byte, not bytes or waits) is a first-class candidate for an arithmetic or operand-role change,
-   whatever its size: transposing the MFMA operand roles of compute-bound expert GEMVs gave 1.10× of the layer in two lane runs.
-   **On a deployed kernel with no timeline yet, propose in this order.** "Lanes" = *measured in kernel lanes (two deployed kernels)*, incremental on the layer;
-   "built" = measured on kernels while they were being built ([measured_rounds.md](references/measured_rounds.md)). None is a prediction for another kernel.
-   1. **Everything that does not depend on the awaited hand-off goes in front of the wait** — not only the loads: also the conversion and staging
-      of the operands (format conversion into the MFMA operands, transposed slabs staged in LDS, tables, masks, address math); after the wait only
-      the current token is patched. Then wait only for the tiles this workgroup consumes. Lanes: +3.2% to +7.0% in three runs, the largest single step, kept in
-      4 of 4 runs. Built: sliding-window attention stage −52%, long-context attention stage −16% (bundles). Not applied if a stage polls its
-      input tags before its first load or operand preparation, or its wait covers every task of the previous stage.
-   2. **Less work after the wait**: one softmax pass per wave, back-to-back MFMA chains, a single accumulation, fewer barriers, one LDS exchange instead of a
-      multi-round merge, stores deferred until the output is published, a small trailing stage fused into its producer's epilogue. Lanes: +2.5% to +3.7%, 4 of 4.
-      Built: down + final sum stages −36%; batched combine −5.7% of the layer. Not applied if a merge loop holds a barrier per round or a stage only sums.
-   3. **A stage's units off workgroups that own another stage's tiles** (or that finish the previous stage last); few readers, one per XCD, for a small hot
-      read. Lanes: attention units moved off two shared o_proj tiles +2.0% to +3.4%, 4 of 4. Built: top-k stage −45% with 8 readers per token, a reader in every
-      workgroup 2.2× slower. Not applied if a workgroup runs critical-path tiles of two stages, or every workgroup reads the same few KB.
-   4. **LDS: small inputs staged once, arrays 16-byte aligned, hot gathers free of bank conflicts** (padded rows, skewed slabs). Lanes: +1.1% to +2.0%,
-      3 of 4. Built: gate/up stage −19% (activation in LDS, same stage's next task prefetched); one misaligned array cost a tenth of a layer.
-      Not applied if the activation is loaded per row or tile, or an LDS offset is not a multiple of 16 bytes.
+   If the timeline shows a compute-bound stage, inspect its arithmetic and MFMA operand roles.
+   On a deployed kernel without a timeline, inspect these opportunities in order. The
+   [measured rounds](references/measured_rounds.md) give the per-step gains, bundles and repeat counts.
 
-   **Rarely pays on an already tuned kernel** (*measured*: built kernels and lanes; every dead end: measured_rounds.md):
-   - Issuing **weights earlier still while memory is busy** (a deeper prefetch of the stage's own, the second expert GEMM's, the next round's): noise or a loss in two
-     built kernels and in every lane run that tried it (0.97× to 1.00×) — memory was saturated. Only a prefetch into an idle tail was ever part of a paying bundle.
-   - **Micro-tuning an inner loop** (software-pipelined or reordered loads, register double buffers, more tiles per round, wider stores, more
-     instruction-level parallelism) and **spreading a stage over more workgroups** (a chunk per CU, a combine split 4×, helper workgroups):
-     slower, neutral, spills or hot spots — those loops were memory- or dependency-bound, not compute-bound.
-   - **An XCD map on its own** (noise in a lane; otherwise only inside bundles), **placement variants of a stage bound by its own chain**, **pipelined polls** and **a different epoch read at launch entry** (0.99× to 1.00× in lanes).
-     Restructuring a stage's arithmetic is NOT in this list: where measured it paid (move 2, the operand-role change above) or was flat; pipelining gate/up + down per expert was never tried.
+   1. **Move independent work before the wait.** Check whether a stage polls before loading weights,
+      converting operands, staging slabs in LDS or preparing masks and addresses. Limit its wait to the tiles it consumes.
+   2. **Shorten the path after the wait.** Look for a barrier in each merge round, repeated softmax passes,
+      or a trailing stage that only sums. Try one LDS exchange, deferred stores or a fused producer epilogue.
+   3. **Separate competing work.** Look for workgroups that own critical tiles of two stages, and for a
+      small table every workgroup reads. Move the contending units or try one reader per XCD.
+   4. **Check LDS layout.** Look for activations reloaded per tile, misaligned arrays and bank conflicts in
+      hot gathers. Stage small inputs once, align arrays to 16 bytes or pad the affected rows.
+
+   The measured rounds also identify low-yield directions on tuned kernels, including deeper prefetch
+   while memory is busy, inner-loop tuning of memory-bound stages, isolated XCD remapping and pipelined polls.
 6. One direction = one critical-path segment (a stage with the hand-offs into and out of it); shared tables go to one direction.
 7. **Stack; do not stop at the first gain.** Inside its direction the engineer adds separately verified steps on the same
    segment until the round ends (steps on different stages multiplied; on one segment re-measure the whole stack after each step).

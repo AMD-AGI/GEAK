@@ -53,8 +53,9 @@ facts; take them from `native_decode_numerics`. What matters structurally:
 Defaults that were measured to be right: split = segment count for a full-context op that has fewer than
 64 tasks otherwise, capped at 256 tasks; **no split for a windowed op** (its tiles sit in the last one
 or two segments, so a split only adds a merge). With fold, only the task holding position `L - 1` writes
-the cache; the others clamp their addresses into their own tiles. Task `t` belongs to workgroup
-`t mod n_blocks`, and an owner waits only for lower indices, so any workgroup count is deadlock-free.
+the cache; the others clamp their addresses into their own tiles. For an arbitrary grid, let the last
+split to arrive merge the records in split order. The measured polling owner requires the
+[launch progress guarantee](flydsl_idioms_and_resources.md#cross-workgroup-patterns).
 
 ## Lane and wave layout, and why
 

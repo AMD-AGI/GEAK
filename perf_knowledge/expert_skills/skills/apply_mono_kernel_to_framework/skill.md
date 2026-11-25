@@ -104,22 +104,13 @@ main on 2026-11-23, an `sgl-amd-mono`-style plugin behind `--enable-amd-monokern
 7. **Count and log.** Per rank: launches (read from the control region at log intervals, never per step) and
    skips by reason, in one fixed log line.
 8. **Wire fail-stop.** On a decoded error the engine aborts with the cause; the failed step emits no token.
-9. **CPU checks, then the three-server smoke** on one full TP group, installed through the workflow's overlay,
-   never by editing site-packages: unpatched, patched switch-off, patched switch-on. One fixed prompt set: at
-   least 32 prompts, several context lengths, a few hundred generated tokens each, temperature 0. **Pass = all
-   three.** (a) *Off is stock*: switch-off tokens identical to the unpatched server's, launches 0 on every rank.
-   (b) *Greedy match*, on against off, per prompt: at the first divergence record the step and the top-5 logits
-   of both sides; it is a **tie**, reported as a tie and not a failure, only when the top-2 logits are within the
-   bound the kernel's oracle derived. The tie rule applies to (b) only and the bound is never widened. A tie is
-   a smoke classification only: the e2e gate counts any divergence from the unpatched baseline as a real output
-   change, so once any prompt diverged the paired accuracy run is required before acceptance.
-   (c) *Effect*: launches grow on every rank by eligible steps × replaced instances × the kernel's launches per
-   layer; skips occur only for routed-away steps (prefill, mixed batch, a verify step or width the kernel does
-   not cover, piecewise-graph step); 0 launches with the switch on fails even if outputs match.
-   **Not pass conditions of the smoke:** the accuracy run (full benchmark, on and off, paired; report both scores
-   and the paired difference; optional for the smoke) and speed (single-concurrency width-1 time per output token
-   and throughput, recorded only). Detail: [smoke_and_acceptance.md](references/smoke_and_acceptance.md).
-10. **Timed A/B** under the e2e workflow's own protocol, on versus off. Report what was replaced, refused or routed away, the counters, and how to reproduce.
+9. **Run the CPU checks and three-server smoke** on one full TP group. Use the same fixed prompts on the
+   unpatched server and on the patched server with the switch off and on. Check switch-off parity, inspect
+   the first greedy divergence per prompt, and verify the expected launch count on every rank.
+   The [smoke procedure](references/smoke_and_acceptance.md) defines the prompt set and pass conditions.
+10. **Time switch-on against switch-off.** For final acceptance, compare the candidate with a fresh unpatched
+    server under the [e2e integrator's parity and throughput gates](../../../../e2e_workflow/roles/e2e_integrator.md#the-gate-a-change-enters-e2e-only-if-all-hold).
+    Report coverage, counters and commands for reproducing the result.
 11. **Partial delivery.** One patch per model; only kinds that pass enter its table. If the smoke fails, bisect
     by kind, drop the offending kind and rerun the whole smoke; if nothing passes, deliver nothing and say so.
 
@@ -152,7 +143,7 @@ main on 2026-11-23, an `sgl-amd-mono`-style plugin behind `--enable-amd-monokern
 - Time to first token can look worse only because the faster run reaches later, longer trace turns: compare on the same completed requests.
 
 ## Do-no-harm notes
-- **Switch off must be inert:** token-identical to the unpatched server, launch counter 0 on every rank.
+- **Switch off must be inert.** Compare against the unpatched server's reproducibility and check for zero launches on every rank.
 - **Refuse explicitly, never fall back silently:** every reason at once, the same verdict on every rank,
   expressed as the framework does at your commit (current vLLM and SGLang: one startup error for an opt-in flag).
 - **Only the steps the kernel's oracle covers:** pure decode at its widths, verify steps only if covered. Every other step stays native.
