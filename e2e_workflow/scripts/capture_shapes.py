@@ -34,7 +34,7 @@ histogram that covers its eager calls only, and meta.json says so in ``capture_s
 Anti-cheating: the oracle is captured from the UNMODIFIED baseline kernel. The optimizer later must
 match it. The unittest + this file's outputs must not be edited during optimization.
 """
-import atexit, functools, importlib, json, os, re, shutil, sys, threading
+import atexit, functools, importlib, json, os, re, shutil, socket, sys, threading
 
 CAPTURE_SCOPE = "eager_calls_only: calls inside a torch.compile region are traced, not run, so they are not recorded"
 
@@ -102,10 +102,36 @@ _STATE = {
 }
 
 
+def _multinode():
+    """A rank of a multinode serving leg: mn.py exports GEAK_MN_ENGINE to every rank it launches."""
+    return bool(os.environ.get("GEAK_MN_ENGINE"))
+
+
 def _rank():
-    return next((str(os.environ[key]) for key in
-                 ("RANK", "LOCAL_RANK", "TP_RANK", "SLURM_PROCID")
-                 if key in os.environ), "unknown")
+    """The env's rank; on a multinode leg, else torch.distributed's once initialised (sglang sets
+    no rank env). Not cached: a worker installs the hook before it joins its process group."""
+    for key in ("RANK", "LOCAL_RANK", "TP_RANK", "SLURM_PROCID"):
+        if key in os.environ:
+            return str(os.environ[key])
+    if _multinode():
+        try:
+            import torch.distributed as dist
+            if dist.is_available() and dist.is_initialized():
+                return str(dist.get_rank())
+        except Exception:
+            pass
+    return "unknown"
+
+
+def _records_oracle():
+    """On a multinode leg only rank 0 (or a process with no rank) saves the heavy I/O: per-rank
+    copies on the shared mount multiply the oracle by the world size. Assumes every rank of the
+    engine runs the same shapes, which holds for pure TP, not for DP-attention / EP."""
+    return not _multinode() or _rank() in ("0", "unknown")
+
+
+def _host_meta():
+    return {"host": _host()} if _multinode() else {}
 
 
 def _process_out_dir(out_dir):
@@ -114,8 +140,14 @@ def _process_out_dir(out_dir):
               or bool(os.environ.get("GEAK_SELECTION_TRACE")))
     if not unique:
         return out_dir
+    # Multinode: host after pid, as ranks on two machines can share a pid on the shared mount.
+    host = f".host-{_host()}" if _multinode() else ""
     return os.path.join(
-        out_dir, f"capture.pid-{os.getpid()}.rank-{_rank()}")
+        out_dir, f"capture.pid-{os.getpid()}{host}.rank-{_rank()}")
+
+
+def _host():
+    return socket.gethostname().split(".")[0]
 
 
 def parse_byte_budget(value):
@@ -408,6 +440,7 @@ def _write_capture_manifest(out_dir, extra=None):
     payload = {
         "target": s.get("target"),
         "process_id": os.getpid(),
+        **_host_meta(),
         "rank": _rank(),
         "byte_budget": s.get("byte_budget", 0),
         "oracle_bytes_est": s.get("oracle_bytes_est", 0),
@@ -748,7 +781,8 @@ def _wrapper(*args, **kwargs):
             # oracle never freezes on a single regime (the "single-case oracle" bug).
             regime = _lead_regime(args, kwargs)
             need_regime = regime not in s["regime_seen"]
-            if sig not in s["seen"] and not in_graph and (len(s["records"]) < s["max_cases"] or need_regime):
+            if (sig not in s["seen"] and not in_graph and (len(s["records"]) < s["max_cases"] or need_regime)
+                    and _records_oracle()):
                 call_bytes = _estimate_call_bytes(args, kwargs, out)
                 budget = int(s.get("byte_budget") or 0)
                 case_limit = int(s.get("case_byte_limit") or 0)
@@ -813,10 +847,10 @@ def _wrapper(*args, **kwargs):
                     s["regime_seen"].add(regime)
                     # The recorded output is computed from the REAL operands, so it is not
                     # an oracle for the reduced ones. Keep it as a descriptor and leave the
-                    # record explicitly unresolved: `regen_reference.py` materializes the
-                    # operands, runs the installed unmodified kernel and fills in the value.
-                    # Shipping the stale output would be a silent mismatch; refusing to ship
-                    # one is the whole point of the policy.
+                    # record explicitly unresolved: the file is a structural fixture, and a
+                    # UT takes its reference from the frozen baseline on its own seeded
+                    # inputs (harness_lib.baseline_random_outputs). Shipping the stale output
+                    # would be a silent mismatch; refusing to ship one is the whole point.
                     s["records"].append({
                         "sig": sig,
                         "regime": regime,
@@ -958,6 +992,7 @@ def _flush(write_oracle=True):
     meta = {
         "target": s["target"],
         "process_id": os.getpid(),
+        **_host_meta(),
         "rank": _rank(),
         "module": s["mod"].__name__ if s["mod"] else None,
         "attr": s["attr"],
