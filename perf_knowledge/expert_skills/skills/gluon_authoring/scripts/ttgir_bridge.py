@@ -95,6 +95,11 @@ _RELAY_OPS = ("tt.trans", "tt.reshape", "tt.join", "tt.split", "tt.cat",
               "ttg.memdesc_trans", "ttg.memdesc_reinterpret")
 
 
+def _amd_wave_size(a: str) -> int:
+    """Wave size for a lowercased AMD arch string: 32 on gfx1*, 64 on gfx9."""
+    return 32 if a.startswith("gfx1") else 64
+
+
 def _backend_key(arch: str) -> tuple:
     """(backend_key, driver_name, target_value, default_warp_size) from an arch string.
 
@@ -103,7 +108,7 @@ def _backend_key(arch: str) -> tuple:
     """
     a = arch.strip().lower()
     if a.startswith("gfx"):
-        return "amd", "hip", a, 64
+        return "amd", "hip", a, _amd_wave_size(a)
     cap = a[2:] if a.startswith("sm") else a
     if not cap.isdigit():
         raise SystemExit(f"[ttgir_bridge] unrecognised --arch {arch!r}; "
@@ -2200,8 +2205,15 @@ def _selftest() -> int:
        "INCONCLUSIVE" in v_none, v_none)
 
     ck("_backend_key amd", _backend_key("gfx942") == ("amd", "hip", "gfx942", 64))
+    ck("_backend_key cdna is wave64",
+       all(_backend_key(a)[3] == 64 for a in ("gfx908", "gfx90a", "gfx942", "gfx950")))
+    # The regression this guards: every gfx used to return 64, so an RDNA recovery built its
+    # layouts against a 64-lane wave.
+    ck("_backend_key rdna is wave32",
+       all(_backend_key(a)[3] == 32 for a in ("gfx1100", "gfx1151")))
     ck("_backend_key nvidia via sm90", _backend_key("sm90") == ("nvidia", "cuda", 90, 32))
     ck("_backend_key nvidia via bare capability", _backend_key("100")[0] == "nvidia")
+
     try:
         _backend_key("hopper")
         ck("_backend_key refuses an unrecognised arch", False)
