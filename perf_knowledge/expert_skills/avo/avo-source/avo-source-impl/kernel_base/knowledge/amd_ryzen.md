@@ -1,0 +1,1 @@
+../../../../../../../kernel_workflow/knowledge/amd_ryzen.md

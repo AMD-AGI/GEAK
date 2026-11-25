@@ -161,6 +161,13 @@ See [`e2e_workflow/README.md` → *Standalone AgentX*](e2e_workflow/README.md#st
 for the full arg spelling, what the declaration changes, and the two things that surprise people
 (`isl`/`osl` are not a benchmark; search legs are non-canonical by design).
 
+### Example — one server across machines
+
+A TP group spanning machines, or a prefill/decode pair, is served as one GEAK server with the
+single-host adapter, bench client and metric. Set `MULTI_NODE_STATE` for `run_e2e.py`, or start
+Claude Code with `GEAK_MN_STATE=<shared_fs>/pins/<run>/mn_state.json` and name the machines in the
+prompt; see [`e2e_workflow/docs/multi_node.md`](e2e_workflow/docs/multi_node.md).
+
 ---
 
 ## kernel_workflow — single kernel

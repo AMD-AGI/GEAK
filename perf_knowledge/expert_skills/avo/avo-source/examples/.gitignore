@@ -1,0 +1,4 @@
+**/.avo/
+**/runs/
+**/__pycache__/
+**/*.pyc

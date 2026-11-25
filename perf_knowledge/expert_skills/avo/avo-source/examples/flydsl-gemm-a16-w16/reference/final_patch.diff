@@ -1,0 +1,86 @@
+diff --git a/source/triton__gemm_a16_w16_kernel.py b/source/triton__gemm_a16_w16_kernel.py
+index 07df9dc..1a8b098 100644
+--- a/source/triton__gemm_a16_w16_kernel.py
++++ b/source/triton__gemm_a16_w16_kernel.py
+@@ -142,8 +142,9 @@ _FLY_CFG_SMALL_M = dict(
+     tile_m=64,
+-    tile_n=256,
++    tile_n=128,
+     tile_k=64,
+     block_m_warps=1,
+     block_n_warps=4,
++    waves_per_eu=0,
+     b_preshuffle=True,
+     auto_shuffle_b=False,
+ )
+@@ -153,6 +154,7 @@ _FLY_CFG_BIG_M = dict(
+     tile_k=64,
+     block_m_warps=1,
+     block_n_warps=4,
++    waves_per_eu=0,
+     b_preshuffle=True,
+     auto_shuffle_b=False,
+ )
+@@ -159,8 +161,50 @@ _FLY_BIG_M_THRESHOLD = 4096
+ _FLY_BIG_M_THRESHOLD = 4096
+ 
+ 
+ def _fly_cfg_for_m(m):
+     return _FLY_CFG_BIG_M if m >= _FLY_BIG_M_THRESHOLD else _FLY_CFG_SMALL_M
+ 
+ 
++_TRITON_BIG_M_META = dict(
++    BLOCK_SIZE_M=256,
++    BLOCK_SIZE_N=256,
++    BLOCK_SIZE_K=64,
++    GROUP_SIZE_M=8,
++    NUM_KSPLIT=1,
++    num_warps=8,
++    num_stages=2,
++    waves_per_eu=2,
++    cache_modifier="",
++)
++
++
++def _run_triton_big_m(a, b, bias, c, M, N, K):
++    m = _TRITON_BIG_M_META
++    grid = (
++        triton.cdiv(M, m["BLOCK_SIZE_M"]) * triton.cdiv(N, m["BLOCK_SIZE_N"]),
++    )
++    _gemm_a16_w16_kernel_triton[grid](
++        a, b, bias, c, M, N, K,
++        a.stride(0), a.stride(1),
++        b.stride(0), b.stride(1),
++        0,
++        c.stride(0), c.stride(1),
++        BLOCK_SIZE_M=m["BLOCK_SIZE_M"],
++        BLOCK_SIZE_N=m["BLOCK_SIZE_N"],
++        BLOCK_SIZE_K=m["BLOCK_SIZE_K"],
++        GROUP_SIZE_M=m["GROUP_SIZE_M"],
++        NUM_KSPLIT=m["NUM_KSPLIT"],
++        SPLITK_BLOCK_SIZE=K,
++        cache_modifier=m["cache_modifier"],
++        activation="",
++        use_activation=False,
++        ADD_BIAS=True,
++        SKIP_REDUCE=False,
++        num_warps=m["num_warps"],
++        num_stages=m["num_stages"],
++        waves_per_eu=m["waves_per_eu"],
++        matrix_instr_nonkdim=16,
++    )
++    return c
++
+ _SHUF_CACHE = {}
+@@ -181,6 +225,11 @@ class _FlyDSLGemmEntry:
+ 
+     def __getitem__(self, grid):
+         def _run(a, b, bias, c, M, N, K, *args, **kwargs):
++            if M >= _FLY_BIG_M_THRESHOLD:
++                try:
++                    return _run_triton_big_m(a, b, bias, c, M, N, K)
++                except Exception:
++                    pass
+             if _FLYDSL_OK:
+                 try:
+                     wsh = _get_shuffled_b(b)

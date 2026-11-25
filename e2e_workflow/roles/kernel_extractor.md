@@ -22,7 +22,8 @@ You are invoked once per kernel candidate. Read first:
   baseline_ref/*.orig   # read-only TEXT copy of the baseline file(s): the optimizer diffs against it, and
                         #   the e2e Integrator merges an accepted file onto its overlay with it as the base.
                         #   The .orig suffix makes it UNIMPORTABLE, so it can never become a timing leg.
-  cases.py              # task-specific: call(args) / timing_cases / random_shapes / eager_cases.
+  cases.py              # task-specific: call(args) / timing_specs + make_timing_case / random_shapes /
+                        #   eager_cases.
                         #   Run VERBATIM by both legs — this is why the two legs cannot diverge; IMMUTABLE
   reference_io.pt       # recorded inputs + golden outputs (oracle) — READ-ONLY for optimizers
   harness_lib.py        # VENDORED scripts/harness_lib.py — the SHARED timing/correctness lib; IMMUTABLE
@@ -67,8 +68,10 @@ directly (that would make the baseline leg run the candidate):
 def call(args):                       # args -> FRESH out tensor. THE seam both legs go through.
     fn = _resolve(META["target_callable"])   # importlib on the dotted name; the overlay decides which
     return fn(**args)                        #   code that name lands on
-def timing_cases(h, meta):            # [{sig, regime, m, args}] — sig is the bucket key, stable across
-    ...                               #   processes; one entry per meta.workload.cases[]
+def timing_specs(h, meta):            # [{sig, regime, m}] — METADATA ONLY; sig is the bucket key, stable
+    ...                               #   across processes; one entry per meta.workload.cases[]
+def make_timing_case(spec):           # ONE {sig, regime, m, args}, operands built on demand
+    ...
 def random_shapes(h, meta):           # [{sig, make_inputs(rng)}] — FRESH in-regime draws at FIXED dims
 def eager_cases(h, meta):             # [{args, ref}] from reference_io.pt (the golden oracle)
 ```
@@ -371,19 +374,24 @@ freeze an out-of-regime oracle nobody should trust.
      never false-fails offline — the e2e gate still catches it there.)
    - **Timing — ONE call: `per_case = h.measure_legs(TASK, meta)`.** You do NOT write a timing loop, do
      NOT bind two callables, and do NOT choose which leg is which. `measure_legs` rebuilds
-     `_cand_overlay` from `meta.candidate_bind`, runs `h.assert_legs_differ`, then for EACH bucket runs
-     INTERLEAVED baseline/candidate PAIRS of fresh `leg_runner.py --mode time --bucket <sig>`
-     subprocesses — same file, same `cases.py`, differing only in `PYTHONPATH` (`baseline_overlay` vs
-     `_cand_overlay`) — and returns
-     `[{sig, regime, m, baseline_ms, optimized_ms, speedup, reps, speedup_spread}]` with
+     `_cand_overlay` from `meta.candidate_bind`, runs `h.assert_legs_differ`, then runs INTERLEAVED
+     baseline/candidate rounds: ONE `leg_runner.py --mode time --sigs <pending sigs>` subprocess per
+     leg per round, streaming every pending bucket — same file, same `cases.py`, differing only in
+     `PYTHONPATH` (`baseline_overlay` vs `_cand_overlay`) — and returns
+     `[{sig, regime, m, baseline_ms, optimized_ms, speedup, reps, speedup_spread, ...}]` with
      `speedup = baseline_ms/optimized_ms` over the MEDIAN pair.
      Both legs get the SAME `graph=h.deployment_graph_mode(regime)` and the SAME `h.compiled_op` wrap
-     (applied inside `leg_runner`, so graph/compile parity is not yours to forget), and each bucket is a
-     cold interpreter so warm-JIT/autotune state cannot leak between legs.
+     (applied inside `leg_runner`, so graph/compile parity is not yours to forget), and the two legs are
+     always separate interpreters, so warm-JIT/autotune state cannot leak between legs. The cold
+     import is paid once per leg per round instead of once per (bucket, leg, pair); round 2+ reverses
+     the leg order and the bucket order so sweep drift is not one-sided. `process_mode="fresh"` (one cold process per
+     bucket per leg) remains for A/A checks of state carried between buckets in one process.
      > A decisive bucket costs ONE pair; only a bucket whose running median lands in the undecided band
-     > (default 0.95–1.10x, where fresh-process noise can flip the verdict) spends up to `max_reps=3`.
-     > Do NOT pass a flat `max_reps` to "be safe" — it triples the cold-import cost of every bucket to
-     > buy resolution the decisive ones do not need. Report `speedup_spread` when a bucket looks noisy.
+     > (default 0.95–1.10x, where cross-process noise can flip the verdict) spends up to `max_reps=3`.
+     > Do NOT pass a flat `max_reps` to "be safe" — it buys resolution the decisive buckets do not need.
+     > Report `speedup_spread` when a bucket looks noisy. Each row carries `diagnostics` per leg
+     > (process wall/import/init, per-bucket input build, warmup, graph capture, cleanup) — setup cost
+     > that sits OUTSIDE the device-event window, for when a UT is slow rather than its kernel.
      > `h.time_op` is the CUDA-EVENT DEVICE-time timer (`inner=1`; device time already EXCLUDES host
      > dispatch, so no amortization is needed — raise `inner` only for sub-microsecond kernels).
      > `deployment_graph_mode` is True whenever the live server replays this op under a CUDA/HIP graph
@@ -397,7 +405,8 @@ freeze an out-of-regime oracle nobody should trust.
      > reject (isolated bare-op fullgraph compile ≠ the server's whole-model compile, where an opaque op is
      > not traced into) — and it is NOT a regenerate signal (nothing op-specific to author, so it differs
      > from the graph-replay bundle). The e2e gate remains authoritative for compile behavior.
-     What you DO author is `cases.py::timing_cases(h, meta)` — one `{sig, regime, m, args}` per
+     What you DO author is `cases.py::timing_specs(h, meta)` + `make_timing_case(spec)` — one
+     `{sig, regime, m}` spec, and on demand one `{sig, regime, m, args}` case, per
      `meta.workload.cases[]` entry (own `dims`+`dtype` + the case's `quant` operands, in-regime — NOT
      bf16, random values; perf is value-independent). `sig` is the bucket key both legs are selected by,
      so it must be stable across processes. If `meta.workload` is absent, fall back to the

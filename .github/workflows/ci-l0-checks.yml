@@ -101,6 +101,8 @@ jobs:
             interface/test_run_e2e_margin.py \
             interface/test_run_e2e_measurement_basis.py \
             interface/test_run_e2e_kb_write_tuned.py \
+            interface/test_run_e2e_multinode.py \
+            e2e_workflow/scripts/tests/test_mn.py \
             e2e_workflow/scripts/tests/test_atom_adapter_lifecycle.py \
             e2e_workflow/scripts/tests/test_atom_server_argv.py \
             interface/test_run_e2e_trace_mirror.py \
@@ -134,8 +136,9 @@ jobs:
             e2e_workflow/scripts/tests/test_seam_trace_compiled.py \
             e2e_workflow/scripts/tests/test_kernel_selection.py \
             e2e_workflow/scripts/tests/test_kernel_extract_targets.py \
-            e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/tests/test_sampling_pipeline.py \
-            e2e_workflow/knowledge/kernel_extraction_skills/kernel-extract/tests/test_vllm_profile.py \
+            e2e_workflow/knowledge/kernel_extraction_skills/kernel-profile/tests/test_sampling_pipeline.py \
+            e2e_workflow/knowledge/kernel_extraction_skills/kernel-profile/tests/test_vllm_profile.py \
+            e2e_workflow/knowledge/kernel_extraction_skills/kernel-profile/tests/test_profile_handoff.py \
             e2e_workflow/scripts/tests/test_kernel_extract_gpu_isolation.py \
             e2e_workflow/scripts/tests/test_attribute_weights_edges.py \
             e2e_workflow/scripts/tests/test_op_bench.py \
@@ -342,6 +345,8 @@ jobs:
       # Pure node (fs/path only) — no npm install needed.
       - name: expert_skills OFF-identical regression
         run: node e2e_workflow/scripts/test_expert_skills_off_identical.js
+      - name: kernel_lane fast_mode / max_rounds OFF-identical regression
+        run: node kernel_workflow/scripts/test_fast_mode_off_identical.js
       # Claude Code's workflow tool refuses a script over its size limit before any phase runs.
       - name: workflow script size limit
         run: node e2e_workflow/scripts/test_workflow_script_size.js
@@ -364,6 +369,13 @@ jobs:
           node --test e2e_workflow/scripts/test_kernel_extraction_delivery.mjs
           node --test e2e_workflow/scripts/test_kernel_source_delivery.mjs
           node --test e2e_workflow/scripts/test_agentx_standalone_handoff.mjs
+      # Multi-node serving: the args.multinode mapping and the PD per-engine guards, each
+      # EXTRACTED from the shipped e2e_workflow.js.
+      - name: multinode args and PD guards
+        run: |
+          set -e
+          node e2e_workflow/scripts/test_multinode_args.js
+          node e2e_workflow/scripts/test_pd_guards.js
       - name: candidate floor and invalid measurement recovery
         run: node kernel_workflow/scripts/test_candidate_floor.js
       - name: gfx1151 knowledge doc contract
