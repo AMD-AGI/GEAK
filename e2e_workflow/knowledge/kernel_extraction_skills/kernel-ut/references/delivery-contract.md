@@ -62,14 +62,16 @@ or dispatch markers, not by discarding calls missing the desired kernel.
 
 If the saved declaration is wrong, revise the task plan using evidence before
 continuing. Do not infer a different request from a passing result. A changed
-entry requires signature/state adaptation and new binding, correctness, graph
-and timing checks; a selection probe cannot inherit an old entry's UT pass.
+entry requires signature/state adaptation and new binding, correctness and graph
+checks; a selection probe cannot inherit an old entry's UT pass.
 
 ## Required real tests
 
-- Complete executable UT: oracle/random-value correctness, full output semantics,
+- Complete executable UT qualified with `--validation-mode correctness`: seeded
+  random-value correctness against the frozen baseline, full output semantics,
   deployment modes and input refresh, actual leaf execution, numerical negative
-  controls, restored-source checks and both timing legs for all weighted cases.
+  controls and restored-source checks. Every weighted case keeps its timing spec;
+  both timing legs run later, in optimization (`--validation-mode performance`).
 - Actual native/JIT computation source for all requested leaves, build/import
   instructions and resources. An installed-library dispatcher is insufficient.
 - Frozen baseline identity and candidate isolation in separate processes.
@@ -95,7 +97,7 @@ accepts `attention` as an alias for `attn`; declaration and result must agree.
 Both forms also supply `target_callable`, applicable `candidate_bind` and
 `baseline_frozen`, exact `device_kernel`, `seam_candidates`, full selection
 verdict or hashed reference, and `source_delivery_ref`. Keep `notes`,
-`smoke_detail` and `reference_io_sha256` strings. Use `"fail"` for incomplete or
+`smoke_detail` strings. Use `"fail"` for incomplete or
 failed tests. The complete optional-field schemas are in `e2e_workflow.js`.
 
 Prefer `selection_validation_ref={"path":"run/selection.json","sha256":"..."}`

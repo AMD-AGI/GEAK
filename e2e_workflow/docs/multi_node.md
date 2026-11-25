@@ -170,8 +170,8 @@ leg's shell variables and functions and a warning; check imports it on rank0 and
 the client port from there, and the result records `bench_client_host: rank0`.
 A profile round never reaches a client's `--profile`: the launcher starts a fresh load
 and opens its own window, which spans every rank. Sampling points (`PROFILE=1 REPEATS=0
-PROFILE_PROBE_POINTS=<points> PROFILE_PROBE_IDS=<ids> SKILL_ROOT=<kernel-extract>`) are not
-such a round: one boot, then the kernel-extract skill's `serving_probe.py` per point, on the
+PROFILE_PROBE_POINTS=<points> PROFILE_PROBE_IDS=<ids> SKILL_ROOT=<kernel-profile>`) are not
+such a round: one boot, then the kernel-profile skill's `serving_probe.py` per point, on the
 driver like the client. `adapter_probe_args` says where: requests to the client port (the LB),
 the window on the engine of the point's phase, occupancy from that engine's `/metrics` (the
 probe leg starts sglang engines with `--enable-metrics`), one trace expected per rank of that engine;

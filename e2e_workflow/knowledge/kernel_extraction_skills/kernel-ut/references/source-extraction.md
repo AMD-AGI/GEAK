@@ -1,6 +1,6 @@
 # Source extraction and UT validation
 
-Use with the [core skill](../SKILL.md) and
+Use with the [UT skill](../SKILL.md) and
 [task authoring guide](task-authoring.md). Actual selected-kernel source is
 required; an op-only library benchmark is a different deliverable.
 
@@ -49,54 +49,15 @@ imports and initialization order. Repair package-relative resources before
 import-time constructors consume them. Run `compile()`, import and minimal-call
 smokes in the serving environment; parsing alone misses runtime errors.
 
-## Bounded live captures
+## Structural state
 
-These rules apply only when seeded cases and existing metadata are insufficient.
-Follow the [bounded capture procedure](capture.md) for launching the probe and choosing a
-persist policy; record expected/observed shapes and deviations from deployment. What
-follows is what the capture must contain to be replayable.
-
-Joint methods may need a task-local serializer for `self`, live metadata and
-internally read cache state. Capture only the fields needed to replay the
-deployed boundary. Compact referenced cache/page data when practical, with an
-explicit mapping. A full buffer that fits the case and total limits is a valid
-starting point for replay. Once required inputs are available, build and run
-one standalone case before further capture work. Reuse that capture when
-improving compaction or adding local dispatch markers; those changes alone do
-not require restarting the serving model. Keep a usable capture until its
-replacement has passed replay, retaining diagnostic evidence when reclaiming
-heavy redundant files. If serialization
-adds tensors hidden inside otherwise opaque objects, its pre-clone byte
-estimate must count those same tensors: changing `_snapshot` alone bypasses
-the stock case/total byte limits. Check the actual snapshot tensor bytes against
-the estimate and preserve skip reasons. Extra GPU work introduced by capture
-must be distinguished from the deployed member-launch sequence.
-Include a budget-skipped case followed by a new call in serializer checks.
-A pending payload cache keyed only by `id(args)` can reuse stale state after
-the skipped tuple is freed; retain the identity object or clear the plan at
-the call boundary.
-
-Shared storage must preserve captured values, not just argument names. Distinct
-layers can pass different `w1` tensors, and a reused activation buffer can change
-without a version-counter update. Reuse a stored payload only after exact
-snapshot-content equality; keep different values/shapes in separate slots.
-The shared capture helper conservatively includes each new value in the
-pre-clone budget check, then deduplicates equal CPU snapshots. This can leave
-unused space near the limit, which is preferable to silently reusing wrong
-inputs. Check different tensors, in-place value changes and a larger same-name
-argument against the byte limit before trusting a shared oracle.
-
-Resolve implicit-state getters from the selected callable's actual globals or
-imports, rather than a guessed package path. Validate required payload fields
-and replay one small real case before collecting a large case set. A capture
-file being written (`oracle_complete` in the stock writer) proves persistence,
-not replayability: missing required KV/scale/metadata must invalidate that
-record. Offline fakes cannot establish compatibility with live object APIs.
-
-Check multi-target installation rather than assuming it works: the stock
-capture module has singleton installation state. Separate module instances or
-a tested multi-target adapter must retain independent phase state, flushing
-and budget accounting. Verify one small replayable case before expanding.
+Cases are generated from seeds at handoff shapes; the UT never captures. Routing,
+page tables, cache objects and implicit state read by the callable are reconstructed
+from handoff metadata; what cannot be reconstructed is a reported gap (see
+[profile capture](../../kernel-profile/references/capture.md)).
+Resolve implicit-state getters from the selected callable's actual globals or imports,
+rather than a guessed package path, and replay one small real case before building the
+full case set. Offline fakes cannot establish compatibility with live object APIs.
 
 ## Baseline and candidate execution
 
@@ -111,22 +72,19 @@ can send calls back to the installed library while names, grids and outputs
 still match. Use untimed evidence from the actual invoked editable leaf, or a
 reversible marker in a diagnostic copy with predeclared cases that must engage.
 A locally resolving wrapper or an inspected but uncalled function is insufficient.
-Use equivalent entry/launch proof for native or JIT code. Restore instrumentation
-and rerun normal identity/correctness checks before freezing the task.
-
-Make this an untimed task check at extraction smoke and after candidate binding
-or source changes. For each editable branch, record actual invocation evidence
-linked to the candidate source through `_cand_overlay`; fail if that branch
-still executes baseline code. Installed dependencies and declared unchanged
-fallbacks remain allowed. An import-path difference or correct output alone
-must not pass this check. Keep proof artifacts in `meta.kernel_extraction`.
+Use equivalent entry/launch proof for native or JIT code. Rerun this check after
+candidate binding or source changes, record the invocation evidence linked to the
+candidate source through `_cand_overlay` in `meta.kernel_extraction`, and fail if a
+claimed branch still executes baseline code (installed dependencies and declared
+unchanged fallbacks are allowed). Restore instrumentation and rerun normal
+identity/correctness checks before freezing the task.
 
 ## Cases and dispatch fidelity
 
 Build cases from the observed joint distribution. For each `sig`, retain phase,
 operand/state signature, baseline kernels, full grids, calls per phase instance,
 branch identity and evidence source. Preserve quantization/scales, preshuffling,
-ragged metadata and captured routing where relevant. Target and draft models
+ragged metadata and observed routing where relevant. Target and draft models
 need their own evidence; a layer count alone does not establish call frequency.
 
 Use each shape's deployed reference. One anchor's kernel cannot validate a
@@ -139,30 +97,17 @@ actual signature and math; do not replace unresolved calls with `torch.mm`.
 
 The unmodified extraction should preserve baseline dispatch and output behavior
 on equivalent inputs through the shared harness's separate legs. Expect bitwise identity
-for deterministic unchanged code; where it does not hold, establish the real floor with
-`kernel_self_noise.py` rather than asserting a contract — on this deployment one MoE gemm
+for deterministic unchanged code; where it does not hold, measure the real floor (repeated
+baseline outputs on one fixed set of inputs) rather than asserting a contract — on this deployment one MoE gemm
 is byte-exact across repeats while its `epilog='atomic'` sibling carries a genuine 2-ULP
 accumulation-order noise floor, and only a measurement tells them apart. Optimized code may
 change names/grids/counts: validate its intended execution independently while preserving
-the math, oracle, random correctness and deployment graph/compile checks.
+the math, seeded random correctness and deployment graph/compile checks.
 
 Record every requested case and its missing/failure reason with the call/time mass
 attached. Diagnostic fallback timings and nonfinite sentinels cannot score.
 
-## Timing and table validation
-
-After identity matches, compare per-case UT baseline and deployment latency.
-Match graph/compile mode and cache residency; rotate weights/KV buffers only
-when deployment evidence calls for it and within the memory budget. Explain
-shape-dependent fidelity gaps before projecting gains.
-
-Keep the shared timing primitives, separate-process lifecycle and repetition
-budget. When noise calibration is needed, use identical controls on the same
-allocation with matching code hashes, inputs and lifecycle, outside scored
-cases. Report absolute and relative spread per family/case; distinguish
-systematic run shifts from random noise. Exclude nonfinite values from statistics
-while retaining missing-case records. Keep identity probes and verbose dispatch
-logging outside timed regions; isolate probes that can abort natively by process.
+## Table overrides
 
 For table overrides, inspect the effective runtime table and actual lookup keys,
 including padding and solution parameters. Cached logs can be silent, and
@@ -170,5 +115,3 @@ lookup results can be overridden downstream; verify final launches. If overrides
 replace a table, premerge with the effective table, preserve all untargeted keys
 and values, and probe changed and unchanged branches. Numerical checks remain
 required because choices such as split-K can alter reduction order.
-
-<!-- Standalone adaptation, 2026-10-12: local tools and agent-owned stages. -->

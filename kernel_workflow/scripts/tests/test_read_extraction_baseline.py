@@ -115,5 +115,93 @@ class ExtractionBaselineTests(unittest.TestCase):
         self.assertEqual(reader.read_baseline(self.workspace)["next_run"], "full")
 
 
+    def generated(self, rows=None, world=1, exit_code=0, **gates):
+        """run/ut_result.json as the generated unittest.py (ut_runner.py) writes it: every gate is a
+        string (a gate given as None is absent) and the timed rows are under the top-level "timing".
+        The workload gives every timed case call mass, as an observed case has."""
+        self.write("meta.json", {"workload": {"cases": [
+            {"sig": r["sig"], "regime": "decode", "effective_calls": 100} for r in self.rows]}})
+        gates = {"contract": "pass", "correctness": "pass", "timing": "pass", "receipt": "pass", **gates}
+        self.write("run/ut_result.json", {
+            "exit_code": exit_code, "ok": exit_code == 0, "generated_by": "ut_runner.py v1",
+            "world_size": world, "required_gpu_count": world,
+            "gates": {k: v for k, v in gates.items() if v is not None},
+            "timing": {"per_case": self.rows if rows is None else rows, "weighted": 1.01},
+        })
+
+    def test_generated_ut_result_is_usable(self):
+        self.generated()
+        out = reader.read_baseline(self.workspace)
+        self.assertTrue(out["usable"], out)
+        self.assertEqual(out["next_run"], "correctness")
+        self.assertEqual(out["source"], "run/ut_result.json:timing.per_case")
+        self.assertEqual(out["per_case"], self.rows)
+        self.assertNotIn("note", out)
+
+    def test_generated_multi_rank_result_asks_for_one_full_run(self):
+        # The saved rows are usable, but a multi-rank lane owes per-rank times of a run of its own.
+        self.generated(world=4)
+        out = reader.read_baseline(self.workspace)
+        self.assertTrue(out["usable"], out)
+        self.assertEqual(out["next_run"], "full")
+        self.assertEqual(out["per_case"], self.rows)
+        self.assertIn("per-rank", out["note"])
+
+    def test_generated_ut_need_not_time_a_case_without_served_call_mass(self):
+        # generate_ut.py asks for a timing case only where an observed case has call mass in a served regime.
+        self.generated()
+        meta = json.loads((self.workspace / "meta.json").read_text())
+        meta["workload"]["served_regimes"] = ["decode"]
+        meta["workload"]["cases"] += [
+            {"sig": "idle_M9", "regime": "decode", "effective_calls": 0},
+            {"sig": "eager_M2", "regime": "prefill_eager", "effective_calls": 7},
+            {"sig": "unweighted_M3", "regime": "decode"},
+        ]
+        self.write("meta.json", meta)
+        out = reader.read_baseline(self.workspace)
+        self.assertTrue(out["usable"], out)
+        self.assertEqual(out["per_case"], self.rows)
+
+    def test_generated_ut_result_of_a_failed_run(self):
+        shapes = [
+            dict(exit_code=1, correctness="fail", timing=None, receipt=None),   # stopped at correctness
+            dict(exit_code=3, timing="incomplete", receipt=None),               # timing did not finish
+            dict(exit_code=2, timing="env", receipt=None),                      # environment fault while timing
+            dict(exit_code=1, timing=None, receipt="fail"),                     # the receipt check failed
+        ]
+        for shape in shapes:
+            with self.subTest(shape=shape):
+                self.generated(**shape)
+                out = reader.read_baseline(self.workspace)
+                self.assertFalse(out["usable"])
+                self.assertEqual(out["next_run"], "full")
+
+    def test_generated_ut_result_with_a_failed_gate(self):
+        # An inconsistent record (exit code 0 beside a gate that is not "pass") is not trusted either.
+        for gate in ("contract", "correctness", "receipt"):
+            for value in ("fail", "env", "incomplete"):
+                with self.subTest(gate=gate, value=value):
+                    self.generated(**{gate: value})
+                    out = reader.read_baseline(self.workspace)
+                    self.assertFalse(out["usable"])
+                    self.assertEqual(out["next_run"], "full")
+
+    def test_generated_ut_result_missing_a_workload_case(self):
+        self.generated(rows=self.rows[:1])
+        out = reader.read_baseline(self.workspace)
+        self.assertFalse(out["usable"])
+        self.assertEqual(out["next_run"], "full")
+
+    def test_hand_written_result_with_a_string_among_its_gates_is_read_as_before(self):
+        self.write("run/ut_result.json", {
+            "exit_code": 0, "ok": True,
+            "gates": {"correctness": {"ok": True}, "timing": {"ok": True, "per_case": self.rows},
+                      "profile": "skipped"},
+        })
+        out = reader.read_baseline(self.workspace)
+        self.assertTrue(out["usable"], out)
+        self.assertEqual(out["source"], "run/ut_result.json:gates.timing.per_case")
+
+
 if __name__ == "__main__":
     unittest.main()

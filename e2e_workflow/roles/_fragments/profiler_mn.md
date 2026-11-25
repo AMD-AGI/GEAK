@@ -34,7 +34,7 @@ TRACE=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("pars
 engines' weights come from (step 3). Plan them from the BASELINE leg's engine logs, then add three
 variables to the step 1 command:
 ```bash
-KX="$SKILL_DIR/knowledge/kernel_extraction_skills/kernel-extract"
+KX="$SKILL_DIR/knowledge/kernel_extraction_skills/kernel-profile"
 BL_LOG() { python3 -c 'import json,sys;print(next(e["log"] for e in json.load(open(sys.argv[1]))["pd"]["engines"] if e["role"]==sys.argv[2]))' "$EVAL_DIR/baseline/mn_launch.json" "$1"; }
 PTS="$EVAL_DIR/profile/round_${ROUND}/points"
 IDS=$(python3 "$SKILL_DIR/knowledge/multinode_skills/multinode-traces/scripts/mn_traces.py" pd-points --skill-root "$KX" --out-dir "$PTS" \
@@ -64,7 +64,7 @@ if [ -s "$ROLES" ]; then
     MERGE+=(--engine "$R=$RD/profile_topN_$R.json" --workload "$R=$RD/profile_workload_$R.json")
   done
   # Probed points (step 1): each point's TP-0 trace -> census -> one coverage ledger.
-  KX="$SKILL_DIR/knowledge/kernel_extraction_skills/kernel-extract"; PTS="$RD/points"; WEIGH=()
+  KX="$SKILL_DIR/knowledge/kernel_extraction_skills/kernel-profile"; PTS="$RD/points"; WEIGH=()
   if [ -s "$PTS/sampling_points.json" ]; then
     CENSUS=()
     for ID in $(python3 -c 'import json,sys;print(" ".join(p["point_id"] for p in json.load(open(sys.argv[1]))["points"]))' "$PTS/sampling_points.json"); do

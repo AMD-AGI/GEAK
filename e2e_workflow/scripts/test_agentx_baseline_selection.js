@@ -8,11 +8,12 @@ const path = require('path');
 const src = fs.readFileSync(path.join(__dirname, '..', 'e2e_workflow.js'), 'utf8');
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 new AsyncFunction('args', src.replace('export const meta', 'const meta'));
+const sha256 = (text) => require('crypto').createHash('sha256').update(text).digest('hex');
 
-function between(start, end, from = 0) {
-  const a = src.indexOf(start, from), b = src.indexOf(end, a);
+function between(start, end, from = 0, text = src) {
+  const a = text.indexOf(start, from), b = text.indexOf(end, a);
   assert(a >= 0 && b > a, `source block exists: ${start}`);
-  return src.slice(a, b);
+  return text.slice(a, b);
 }
 const pdConsts = between('const IS_PD =', 'const MN_PY');
 const schemas = between('const obj =', '// Result of the ensure_flydsl');
@@ -23,6 +24,28 @@ assert(!/Date\.now\(|new Date\(/.test(helper), 'the Workflow runtime throws on w
 const pdHelpers = between('// The one PD_KINDS x PD_ROLES walk', 'function roleAgent(');
 const initial = between("  if (searchClosed('Profile and Strategize')",
   '} else {\n  // Load carried state');
+// main's e2e_workflow.js (7681c9f5), whose extractor call this one must equal (A23): from
+// $GEAK_MAIN_TREE, else `git show 7681c9f5:`, else /src/commits/7681c9f5; else a pinned digest.
+const MAIN_COMMIT = '7681c9f5';
+const mainSrc = (() => {
+  const rel = 'e2e_workflow/e2e_workflow.js';
+  const sources = [
+    () => fs.readFileSync(path.join(process.env.GEAK_MAIN_TREE || '/nonexistent', rel), 'utf8'),
+    () => require('child_process').execFileSync('git', ['-C', path.join(__dirname, '..', '..'), 'show', `${MAIN_COMMIT}:${rel}`],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }),
+    () => fs.readFileSync(path.join('/src/commits', MAIN_COMMIT, rel), 'utf8'),
+  ];
+  for (const read of sources) { try { return read(); } catch (_e) { /* try the next source */ } }
+  return null;
+})();
+const mainParts = mainSrc && {
+  schemas: between('const obj =', '// Result of the ensure_flydsl', 0, mainSrc),
+  phaseSelector: between('const PHASES =', 'const ST = A.state', 0, mainSrc),
+  helper: between('async function prepareAgentXKernels(', "\nif (want('setup'))", 0, mainSrc),
+  initial: between("  if (searchClosed('Profile and Strategize')", '} else {\n  // Load carried state', 0, mainSrc),
+};
+// sha256 of main's kernel_extractor:prepare call (role, phase, intro, inputs, options) under run(initial).
+const MAIN_PREPARE_CALL_SHA256 = '2de693df405210d727ee117e2170b5915ff2bfd5a12c2663ac42f14306df457b';
 const resume = between('  // Load carried state', '\n}\n\n// ===');
 const phaseSelector = between('const PHASES =', 'const ST = A.state');
 const config = "if (want('config')) {\n" + between('      profile = await safeAgent(',
@@ -37,6 +60,7 @@ const milestoneFilter = between('  const planCandsRaw =', '  if (!planCands.leng
 const milestoneSchedule = between('  const cands = planCands.slice(0, remaining)',
   '  // --- (b) PARALLEL optimize');
 const carry = between('const carryState = {', '\n// What this run got from the KB');
+const multiGpu = between('// ---- Multi-GPU candidates', '// ---- SINGLE-KERNEL PASS-THROUGH');
 
 function candidate(name) {
   // prepared_ut.result is the RETURN.json the packing adapter already validated. It travels WITH
@@ -56,7 +80,7 @@ function selection() {
     failed_tasks: [{ short_name: 'failed', reason: 'GPU mismatch' }],
     deferred_tasks: [{ short_name: 'later', reason: 'budget' }], coverage_summary: { tested: 2 } };
 }
-async function run(body, overrides = {}, reply = selection()) {
+async function run(body, overrides = {}, reply = selection(), parts = { schemas, phaseSelector, helper }) {
   const calls = [], phases = [];
   const env = {
     KERNEL_EXTRACT_ON: true, EVAL_DIR: '/eval', EVAL_DIR_OVERRIDE: '/eval',
@@ -89,7 +113,7 @@ async function run(body, overrides = {}, reply = selection()) {
     ...overrides,
   };
   const result = await new AsyncFunction('env', `let { ${Object.keys(env).join(',')} } = env;
-    ${pdConsts}${schemas}\n${phaseSelector}\n${pdHelpers}\n${helper}\n${body}
+    ${pdConsts}${parts.schemas}\n${parts.phaseSelector}\n${pdHelpers}\n${parts.helper}\n${body}
     return {profile, strategy, headQueue, kernelQueue,
       plan: typeof plan === 'undefined' ? null : plan,
       scheduled: typeof cands === 'undefined' ? null : cands,
@@ -115,6 +139,17 @@ async function run(body, overrides = {}, reply = selection()) {
   assert.equal(input.BASELINE_BENCH_DIR, '/eval/baseline');
   assert.equal(input.CURRENT_FLAGS, '--tp 8');
   assert.equal(input.CURRENT_OVERLAY, '/accepted-overlay');
+  assert.equal(input.GPU_ID, '0', 'single-GPU UTs still lease one pool card');
+  // The extractor's call -- role, phase, intro, inputs and options -- is main's, byte for byte (A23).
+  const prepareCall = JSON.stringify(first.calls[0]);
+  if (mainParts) {
+    const theirs = await run(mainParts.initial, {}, selection(), mainParts);
+    assert.equal(prepareCall, JSON.stringify(theirs.calls[0]), 'kernel_extractor:prepare call differs from main\'s');
+    if (process.env.PRINT_DIGESTS) console.log(`main prepare call sha256: ${sha256(JSON.stringify(theirs.calls[0]))}`);
+    assert.equal(sha256(JSON.stringify(theirs.calls[0])), MAIN_PREPARE_CALL_SHA256, 'main\'s call keeps its pinned digest');
+  } else {
+    assert.equal(sha256(prepareCall), MAIN_PREPARE_CALL_SHA256, 'kernel_extractor:prepare call differs from main\'s (pinned digest)');
+  }
   assert.equal(input.PREVIOUS_RANKING_JSON, '/old/ranking.json');
   assert.equal(input.TASK,
     'Review extraction coverage using /references/ut_delivery; preserve all observed families.',
@@ -262,7 +297,7 @@ async function run(body, overrides = {}, reply = selection()) {
       EXPERT_SKILLS_DIR: '', KB_ARGS: {}, KERNEL_BUDGET: 1, GRAPH_REQ: '', TASK: '', EXTRACT_SCHEMA: {},
       SERVING_TOPOLOGY: '', curPd: { prefill: {}, decode: {} },
       history: {ledger: []}, acceptedKernels: [], log: () => {}, noteKernelKB: () => {},
-      laneArgs: a => a, parallel: jobs => Promise.all(jobs.map(f => f())),
+      laneArgs: a => a, parallel: jobs => Promise.all(jobs.map(f => f())), milestoneGpus: null,
       extractWithBaseline: async () => ({unittest_smoke: 'pass', task_dir: '/task', target_callable: 'pkg:leaf'}),
       reserveBoundedWorkflow: async () => ({final_patch: '/patch', final_geomean: geomean, final_weighted: weighted}),
       runIntegrateBothLegs: async (_intro, inputs) => {
@@ -271,7 +306,7 @@ async function run(body, overrides = {}, reply = selection()) {
       },
       integAccepted: () => true, beatsCurTput: () => true, bankAccepted: () => {}, krOf: () => ({}), e2eFrom: () => ({}),
     };
-    await new AsyncFunction('env', `let {${Object.keys(env).join(',')}} = env; ${pdConsts}${pdHelpers}\n${engineHelpers}\n${optimizeAndIntegrate}`)(env);
+    await new AsyncFunction('env', `let {${Object.keys(env).join(',')}} = env; ${pdConsts}${pdHelpers}\n${engineHelpers}\n${multiGpu}\n${optimizeAndIntegrate}`)(env);
     return integrated;
   }
   assert.equal((await metricDispatch(true, 1.4, 0.8))[0].KERNEL_RESULT.verified_isolated_speedup, 1.4);
