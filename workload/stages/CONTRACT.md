@@ -10,7 +10,8 @@ add another only for a distinct need. A module is not a position in an execution
 Each invocation's `PLAN.md` names the question, module and implementation path, input
 identities, scope, output directory, constraints, resource/time budget and decisive
 evidence. State which request or observation prompted the call, which decision it should
-inform and which prerequisites it actually consumes. The task and explicit plan govern
+inform and which prerequisites it actually consumes. Name the source of required validation
+and the next action each possible result would support. The task and explicit plan govern
 scope, including over implementation defaults.
 
 Invoke the skill or tool with those inputs and a separate candidate/output directory.
@@ -28,7 +29,9 @@ costs remain unknown. Distinguish a measured negative result from missing eviden
 execution failure; identify reusable evidence, affected work and what would unblock the
 missing delivery. Suggestions are evidence for Brain, which chooses the next call.
 Keep receipts attributable to their invocation, source and harness; preserve them before
-reuse. Repair presentation from matching evidence, never by inventing missing facts.
+reuse. Reuse evidence whose claim-relevant inputs still match; identify the changed dependency
+before repeating it. A new output directory alone does not invalidate a receipt.
+Repair presentation from matching evidence, never by inventing missing facts.
 
 Use the validation owner for the claim: a diagnostic observation, qualified UT,
 cold-verified kernel and serving comparison are different deliveries. Changing a method

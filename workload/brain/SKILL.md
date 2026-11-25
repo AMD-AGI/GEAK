@@ -42,8 +42,12 @@ preserve the inputs and evidence of in-flight calls.
 1. Reread the selected mode, if any, and current user steering alongside new reports,
    running work and accepted/rejected evidence. Choose a call that can improve the result
    or resolve an uncertainty that changes the plan; consult
-   [experience](experience/README.md). Missing evidence can justify a bounded probe, not a claim
-   that the opportunity is absent.
+   [experience](experience/README.md). Compare expected serving benefit or decision value
+   with the full remaining cost, including delay to a useful serving comparison.
+   Missing evidence can justify a bounded probe, not a claim that the opportunity is absent.
+   Keep user/native requirements and their owners distinct from optional investigations;
+   a generated plan does not make diagnostic completeness an acceptance requirement.
+   Additional validation must address a concrete correctness or measurement risk.
 2. Write `PLAN.md` under the [module contract](../stages/CONTRACT.md); each module's
    README states the inputs its call needs, and Brain writes them. Reuse qualified
    inputs; investigate missing prerequisites or observed defects within the affected call,
@@ -60,8 +64,9 @@ preserve the inputs and evidence of in-flight calls.
    or leave unresolved in the plan's question. Reconcile input versions, observed costs and
    remaining opportunities; record the next bounded action or justified wait/stop in
    `STATE.md`, then write `PLAN.md` for a chosen call. Preserve failed and superseded calls;
-   stale evidence cannot qualify a replacement. Call termination alone does not rule out
-   an untested opportunity.
+   stale evidence cannot qualify a replacement. When a repair grows costly without answering
+   the question, reconsider its method, scope or place in the plan before adding time.
+   Call termination alone does not rule out an untested opportunity.
 
 Act on new evidence while other calls run. An implementation failure leaves a capability
 gap to resolve, not a closed optimization path. Choose bounded repair, another suitable

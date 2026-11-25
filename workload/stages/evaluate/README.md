@@ -8,6 +8,19 @@ Declare the decision this comparison supports. A scoped native screen may return
 selection evidence under the [direct-call contract](../CONTRACT.md#direct-module-calls);
 its restricted protocol and coverage are not full task acceptance. Complete comparisons
 still use the finalizer below; a screen cannot replace required adoption evidence.
+Choose its scope for a decision, not to complete an inherited list of tests. Keep workload,
+conditioning and active instrumentation comparable even for a screen; extra repetitions
+cannot repair a systematic mismatch.
+
+Resolve each arm's repeats, required quality and deployment reuse from its native owner.
+The finalizer's `repeats` applies to the candidate; a fresh stock control has its own
+admission requirements. Do not mirror one arm's count onto another. Reuse compatible
+quality evidence under its declared scope; a new client result identity alone requires no
+new quality run or server restart. Retain valid slow repeats in the declared statistic;
+keep invalid receipts and their native reasons. Cancellation, request errors and normal
+drain retain the harness's verdict rather than new admission rules after the fact.
+Each measured repeat keeps its own native run identity and raw receipt; reusing a measurement
+does not count as an independent repeat.
 
 `finalize.py` owns the shared A/B calculation and receipt admission. It consumes the
 existing `e2e/bench_summary.json` convention, including an admissible fresh `stock_control`

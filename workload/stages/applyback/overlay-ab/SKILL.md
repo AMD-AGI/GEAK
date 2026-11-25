@@ -1,33 +1,27 @@
 ---
 name: overlay-ab
-description: Install cold-re-verified kernels back into the serving stack through one reversible overlay, prove the overlay is what the serving ranks actually loaded, re-measure end to end, and A/B against the baseline — operator speedup and end-to-end delta reported as two separate numbers.
+description: Integrate qualified kernels through a reversible overlay, prove their actual serving use, and hand the runtime to Evaluate when comparison is requested.
 ---
 
 # overlay-ab
 
-The applyback stage, and the **only** place in the pipeline permitted to claim an
-end-to-end gain. Read `../README.md` for the slot contract, then do the work below.
+Read [Apply back](../README.md) for integration and effect evidence.
+[Evaluate](../../evaluate/README.md) owns serving comparisons. The sequential applyback
+stage composes both; a direct integration call need not perform the whole comparison.
 
-Two benchmarks can drive it and they are **one parameter, not two skills**:
-
-- `harness_cmd` absent → GEAK's own `e2e_workflow/scripts/bench_e2e.sh` with the
-  `agentx` client.
-- `harness_cmd` present → the reference harness that produced the baseline, with the
-  overlay handed to it through its own `python_overlay` hook. Use this whenever the
-  baseline was not measured by `bench_e2e.sh`: both legs must come from the same command,
-  or the A/B is measuring the two harnesses against each other.
-
-Everything else — building the overlay, proving it loaded, the arms, the verdict — is
-identical, and the field names of any particular harness are scenario config, not
-knowledge that belongs in this directory.
+Use the harness that produced the reference. `harness_cmd`, when present, selects that
+harness and its supported `python_overlay` hook; otherwise use GEAK's bundled
+`e2e_workflow/scripts/bench_e2e.sh` with the `agentx` client. Reference and candidate use
+the same native protocol. Harness-specific fields belong in scenario inputs; integration
+and comparison keep their shared module criteria.
 
 ## 1. Build one overlay
 
 `site-packages` is never modified. GEAK's `e2e_workflow/scripts/overlay_setup.py` builds a
-sitecustomize-driven reversible overlay that takes effect solely through
-`OVERLAY_PYTHONPATH`; remove that one variable and the stack is original again. Prefer the
-`overlay_setup.py` copy shipped inside a task directory over the repository's — it is the
-version that was current when the task was extracted.
+sitecustomize overlay through the launcher's supported Python-overlay hook. A fresh launch
+without it restores the original stack; changing an environment variable does not undo
+patches already loaded in a running process. Prefer the task's shipped `overlay_setup.py`,
+which matches its extraction version.
 
 How each kernel binds back is **not guessed**. The extraction skill already recorded it in
 `meta.json["candidate_bind"]` as `{kind, target|module, impl_module, impl_attr, file}` —
@@ -84,7 +78,7 @@ that raises on import because its nested computation is missing. Exercise the re
 before spending hours on e2e.
 
 A local callable-identity check is **preflight, not proof.** It says what this process
-resolved, not what eight serving ranks loaded.
+resolved, not what the serving workers loaded.
 
 If loading evidence reveals a shared registration collision, declare the qualified
 owner's dependency before consumer execution through the normal loader, preserving the
@@ -95,69 +89,47 @@ For extension exports, retain the actual loaded module from the declared referen
 and verify that its member is the executed callable. Preserve and recheck that owner
 through removal and collection; dynamic loaders can return unregistered modules.
 
-**For a module loaded lazily, the proof has to come from the serving workers.** Verify the
-source path and hash inside each rank *after* a warmup request has exercised that path. A
-parent-process import or a pre-warmup check establishes nothing. Where the scenario
-configures `serving_source_proof`, prepare and review the one-shot observer it names
-before starting any arm — its `producer_file` and reviewed `producer_sha256` are
-preconditions, and the builder installs that exact file as a bootstrap in each accepted
-source copy. The observer must collect from **every** serving rank after lazy loads, look
-at the callable references callers actually used, and **remove itself before measured
-traffic**. Launcher hashes, coordinator imports and standalone UT receipts are not serving
-proof. Record the restoration; never leave instrumentation in steady-state timing.
+**Lazy-load proof comes from the serving workers.** Verify the selected source identity
+and callable references actually used by every serving rank in the declared deployment
+after representative requests. Launcher hashes, a coordinator import or a UT pass cannot
+establish that claim. Prefer existing native loading/execution evidence. Add instrumentation
+only for a material gap, scoped to that gap; diagnostic completeness is not automatically
+integration acceptance.
+
+When `serving_source_proof` selects an observer, review its producer file and hash before
+launch. Reuse a compatible, qualified collection/removal lifecycle; otherwise resolve it
+within the affected call before repeating deployments, without adding a universal admission
+stage. Retain all required rank evidence. Remove instrumentation before measured traffic;
+record restoration and recover any affected runtime state. A broken observer leaves the
+claim unproved: return the gap and cost to Brain for a different evidence method or a separately
+scoped observation, without promoting the failed proof to acceptance.
 
 Environment variables set around a host command do not automatically reach a container.
 Check the runtime boundary before launch: the native launcher must forward the proof
 directory and record the actual cache placement it used.
 
-## 3. Measure
+## 3. Hand off or compose Evaluate
 
-Smoke first: `e2e_workflow/scripts/agentx_smoke.sh`. `aiperf` and InferenceX are on
-neither `$PATH` nor `/opt` on this machine. When pieces are missing, report `blocked` and
-name them. A throughput number produced before smoke passes measured something else.
+Return the integrated runtime and effect evidence to [Native E2E](../../evaluate/native-e2e/SKILL.md)
+with the task's harness, quality and comparison protocol. Use its native readiness/smoke
+contract; reuse compatible evidence rather than adding another universal readiness stage.
 
-**`REUSE_SERVER=0`.** The overlay has to be loaded by a freshly started server; reusing a
-running one measures an unpatched stack.
+A changed overlay needs a runtime that actually loads it. An unchanged, qualified deployment
+may serve independent repeated clients when the native protocol allows reuse; a new result
+identity does not by itself require a new model startup. Preserve the protocol's independent
+arm/cache boundaries and equivalent stock/candidate conditioning. Code-correctness evidence
+and process-specific loading evidence have different reuse conditions.
 
-Measure a **fresh stock control** as well as the candidate. The historical
-`reference_run` receipt reports drift; the fresh control is the A/B denominator. A long
-optimization run separates the candidate from its original reference, and an unchanged
-control is the only thing that exposes environment drift in between. Use the same cache
-placement and freshness policy on both sides — each arm gets independent
-Triton/XDG/Inductor/torch-extension directories under the configured `cache_root`.
-
-Before the measured run, exercise representative real serving paths in a **bounded,
-unmeasured preflight**: the extracted tasks determine which requests, including dtype,
-phase and layout variants. Give stock and candidates identical conditioning, record it
-separately from the historical reference, and make observer removal a barrier the
-measurement cannot start without. A standalone UT pass does not establish that the serving
-caller selected the same branch.
-
-Repeat `repeats` times and take the median. Keep valid slow repeats in the statistic —
-dropping them is how a regression becomes a no-change. Report invalid runs with their
-receipts and reasons; never delete or reuse a benchmark ID. Run cancellation, request
-errors and the harness's end-of-window drain behaviour are three different things:
-preserve the native verdict and counts rather than inventing an admission rule after the
-fact.
-
-Write `$OUT/e2e/bench_summary.json` with the candidate throughput, its `metric_basis`, the
-repeat count, and the per-arm records. Whichever benchmark ran, this one file is what the
-verdict reads.
-
-Include the fresh unchanged arm as `stock_control`: `throughput`, `metric_basis`,
-`admissible` (the native validity verdict), and `provenance` pointing to its raw receipt.
-Normalize both arms to the same metric basis. Report drift against the historical
-baseline separately in this control record; leave the baseline stage's receipt intact.
-The finalizer uses the fresh control for A/B and keeps the historical baseline alongside
-it. Without a usable fresh control, report `blocked` rather than substituting history.
+For a composed full comparison, supply Evaluate's declared summary and validity artifacts
+and preserve its configured repeats, fresh stock control and native quality requirements.
+A scoped screen returns its narrower evidence and limitations; it does not admit a replacement.
 
 ## 4. Do not grade yourself
 
-`../finalize.py` writes `result.json`, after this session, and it is the stage's
-conclusion (`engine/core/README.md`). It checks the shadow proof, the source hashes
-against optimize's record, whatever native-validity fields the scenario configured, that
-both legs share a metric basis, and the A/B itself. What it requires is written only
-there. You can run it early to see what it will say.
+For the composed driver delivery, `../finalize.py` checks integration and delegates
+comparison to Evaluate's finalizer before writing `result.json`. These owners and the
+scenario define acceptance; do not copy their predicates into another validator or expand
+them with unrelated diagnostics. Direct calls follow the module contract for their scope.
 
 If integration fails, preserve the failed arm and send its counterexample to the owning
 profile or optimize agent. A changed kernel needs new cold evidence before the overlay is
@@ -166,6 +138,6 @@ inventory, configuration and native validity still match.
 
 ## Outputs
 
-`$OUT/overlay/` (reversible), `$OUT/applied.json`, `$OUT/shadow_check.json`,
-`$OUT/e2e/bench_summary.json`, and — written by the slot, not by you — `$OUT/ab.json` and
-`$OUT/result.json`.
+Integration returns `$OUT/overlay/`, `$OUT/applied.json`, `$OUT/shadow_check.json` and any
+configured actual-loading proof. A composed full comparison also supplies Evaluate's
+`e2e/bench_summary.json`; the owning finalizers write `ab.json` and `result.json`.

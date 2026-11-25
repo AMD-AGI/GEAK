@@ -28,7 +28,10 @@ necessary runtime recovery to Setup. Choose a bounded follow-up from the install
 backend's capabilities and the observed failure, rather than repeating an unchanged call.
 Traffic, profiler acknowledgement and process exit do not prove capture success.
 Keep changed-mode diagnostic evidence distinct from deployed timing, and report the
-remaining attribution/coverage gap through the contract.
+remaining attribution/coverage gap through the contract. Collection failure blocks the
+claim that needs that capture; it does not establish candidate failure. Unless the task's
+correctness, effect or measurement contract requires that capture, return the unresolved
+diagnostic to Brain without making unrelated serving measurement wait for it.
 
 ## Candidate scope
 
