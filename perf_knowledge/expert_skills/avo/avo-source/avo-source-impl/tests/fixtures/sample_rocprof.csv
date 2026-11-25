@@ -1,0 +1,3 @@
+KernelName,FETCH_SIZE,WRITE_SIZE,Occupancy,MfmaUtil,Wavefronts
+matmul_kernel,1024,512,0.62,0.71,512
+matmul_kernel,1024,512,0.60,0.69,512

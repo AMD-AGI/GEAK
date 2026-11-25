@@ -1,3 +1,4 @@
+import contextlib
 import fcntl
 import importlib.util
 import json
@@ -7,6 +8,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -240,6 +242,57 @@ def test_dead_pending_request_is_removed_without_blocking(tmp_path):
 
     assert run_attempt(tmp_path, "0", 1) == "acquired"
     assert not stale.exists()
+
+
+def test_host_scope_names_every_file_after_the_host_and_leaves_other_hosts_alone(tmp_path):
+    gpu_lease = load_gpu_lease()
+    request = gpu_lease.GpuRequest.from_fixed_ids("0", count=1)
+    # Another machine's files on the shared lease dir: its pids do not exist on this host.
+    other = {
+        "request": tmp_path / "hostB.request_x.json",
+        "lease": tmp_path / "hostB.lease_x.json",
+    }
+    other["request"].write_text(json.dumps({
+        "request_id": "x", "manager_pid": 999999999,
+        "pid_namespace": os.readlink("/proc/self/ns/pid"),
+        "pool_ids": [0], "count": 1, "started_at_ns": 1,
+    }))
+    other["lease"].write_text(json.dumps({"gpu_ids": [0], "child_pgid": 999999999}))
+
+    with gpu_lease.GpuLease(
+        request, lock_dir=tmp_path, wait_timeout_s=1.0, poll_interval_s=0.01,
+        host_scope="hostA",
+    ) as lease:
+        assert lease.metadata_path.name.startswith("hostA.lease_")
+        # _probe_request_lock finds a waiter's lock as its request json's .lock sibling.
+        assert lease.request_path.name.startswith("hostA.request_")
+        assert lease.request_lock_path == lease.request_path.with_suffix(".lock")
+        assert lease.gpu_lock_path(0) == tmp_path / "hostA.gpu0.lock"
+        assert (tmp_path / "hostA.allocator.lock").exists()
+        assert not (tmp_path / "gpu_0.lock").exists()
+        assert not (tmp_path / "allocator.lock").exists()
+
+    assert other["request"].exists() and other["lease"].exists()
+    unscoped = gpu_lease.GpuLease(request, lock_dir=tmp_path, wait_timeout_s=0.1)
+    assert unscoped.gpu_lock_path(0) == tmp_path / "gpu_0.lock"
+
+
+def test_host_scoped_lease_waits_for_the_card_lease_a_serving_leg_holds(tmp_path):
+    gpu_lease = load_gpu_lease()
+    request = gpu_lease.GpuRequest.from_fixed_ids("0,1", count=2)
+    # mn.py's lease_file: <host>.gpu<N>.lock on the shared mount.
+    with open(tmp_path / "hostA.gpu1.lock", "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        with pytest.raises(gpu_lease.LeaseTimeout), gpu_lease.GpuLease(
+            request, lock_dir=tmp_path, wait_timeout_s=0.1, poll_interval_s=0.01,
+            host_scope="hostA",
+        ):
+            pass
+        with gpu_lease.GpuLease(
+            request, lock_dir=tmp_path, wait_timeout_s=0.1, poll_interval_s=0.01,
+            host_scope="hostB",
+        ) as lease:
+            assert lease.selected_ids == (0, 1)
 
 
 def test_failed_group_acquire_releases_partial_locks(tmp_path):
@@ -1409,3 +1462,414 @@ def test_sweep_matches_its_eval_dir_as_a_whole_path(tmp_path):
         assert result.returncode == 3, result.stdout + result.stderr
         assert f"pid={jobs[0].pid} " in result.stdout
         assert f"pid={jobs[1].pid} " not in result.stdout
+
+
+# ---- Queued group requests from several PID namespaces (amendment A09) ---------------------
+# Containers sharing one lock dir cannot probe each other's pids. A waiting manager therefore
+# holds a flock on request_<id>.lock; a request without that lock file comes from a
+# gpu_lease.py that predates it ("old version") and must keep queueing as before.
+
+OTHER_NAMESPACE = "pid:[other-container]"
+
+
+def own_pid_namespace():
+    return os.readlink("/proc/self/ns/pid")
+
+
+def write_request(
+    lock_dir, request_id, pool_ids, *, manager_pid, namespace=None, started_at_ns=None
+):
+    """A request_<id>.json with exactly the fields every gpu_lease.py version writes."""
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    path = lock_dir / f"request_{request_id}.json"
+    path.write_text(
+        json.dumps(
+            {
+                "request_id": request_id,
+                "manager_pid": manager_pid,
+                "pid_namespace": namespace or own_pid_namespace(),
+                "pool_ids": list(pool_ids),
+                "count": len(pool_ids),
+                "started_at_ns": time.time_ns() if started_at_ns is None else started_at_ns,
+            }
+        )
+    )
+    return path
+
+
+def other_namespace_request(lock_dir, request_id, pool_ids, **kwargs):
+    """A request from another container. Its manager_pid, 1, is this container's init here."""
+    return write_request(
+        lock_dir, request_id, pool_ids, manager_pid=1, namespace=OTHER_NAMESPACE, **kwargs
+    )
+
+
+def hold_request_lock(lock_dir, request_id):
+    """The flock a live manager holds while its request waits."""
+    fd = os.open(lock_dir / f"request_{request_id}.lock", os.O_CREAT | os.O_RDWR, 0o666)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def leftover_request_lock(lock_dir, request_id):
+    """The lock file of a manager that died: still there, but nobody holds it."""
+    path = lock_dir / f"request_{request_id}.lock"
+    os.close(os.open(path, os.O_CREAT | os.O_RDWR, 0o666))
+    return path
+
+
+def lease_blocked(gpu_lease, lock_dir, gpu_ids, wait_timeout_s=0.05):
+    request = gpu_lease.GpuRequest.from_fixed_ids(gpu_ids, count=len(gpu_ids.split(",")))
+    try:
+        with gpu_lease.GpuLease(
+            request, lock_dir=lock_dir, wait_timeout_s=wait_timeout_s, poll_interval_s=0.005
+        ):
+            return False
+    except gpu_lease.LeaseTimeout:
+        return True
+
+
+def wait_for_requests(lock_dir, count, timeout_s=10):
+    deadline = time.monotonic() + timeout_s
+    while len(list(lock_dir.glob("request_*.json"))) < count:
+        assert time.monotonic() < deadline, f"fewer than {count} request(s) in {lock_dir}"
+        time.sleep(0.01)
+    return sorted(lock_dir.glob("request_*.json"))
+
+
+def hold_gpu_lock(lock_dir, gpu_id):
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_dir / f"gpu_{gpu_id}.lock", os.O_CREAT | os.O_RDWR, 0o666)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+@contextlib.contextmanager
+def queued_group_lease(gpu_lease, lock_dir):
+    """A lease for GPUs 0,1 waiting in this process while GPU 0 is busy; yields its request."""
+    gpu0 = hold_gpu_lock(lock_dir, 0)
+    result = {}
+    waiter = threading.Thread(
+        target=lambda: result.update(
+            blocked=lease_blocked(gpu_lease, lock_dir, "0,1", wait_timeout_s=10.0)
+        )
+    )
+    waiter.start()
+    try:
+        [request] = wait_for_requests(lock_dir, 1)
+        yield request
+    finally:
+        os.close(gpu0)
+        waiter.join(timeout=15)
+    assert result == {"blocked": False}
+
+
+@pytest.fixture
+def live_process():
+    """A live process of this PID namespace, standing in for another lease manager."""
+    process = subprocess.Popen(["sleep", "60"])
+    yield process
+    process.kill()
+    process.wait(timeout=5)
+
+
+def test_request_for_other_gpus_is_never_touched(tmp_path):
+    gpu_lease = load_gpu_lease()
+    # Each of these would be removed if it overlapped the lease below; for GPUs 1,2 none may be.
+    dead_here = write_request(tmp_path, "dead-here", [1, 2], manager_pid=999999999)
+    dead_there = other_namespace_request(tmp_path, "dead-there", [1, 2])
+    dead_there_lock = leftover_request_lock(tmp_path, "dead-there")
+    stale_there = other_namespace_request(tmp_path, "stale-there", [1, 2], started_at_ns=1)
+
+    assert not lease_blocked(gpu_lease, tmp_path, "0", wait_timeout_s=1.0)
+    assert all(path.exists() for path in (dead_here, dead_there, dead_there_lock, stale_there))
+
+
+def test_requests_from_other_pid_namespace_keep_their_place_in_the_queue(tmp_path):
+    gpu_lease = load_gpu_lease()
+    # Oldest: an old-version manager in another container (no request lock). Its pid, 1, is
+    # this container's init here -- the "namespace mismatch" main deleted on sight.
+    old_version = other_namespace_request(tmp_path, "old-version", [0, 1])
+    # Next: a new-version manager there, holding its request lock while it waits.
+    new_version = other_namespace_request(tmp_path, "new-version", [1, 2])
+    new_version_fd = hold_request_lock(tmp_path, "new-version")
+    younger_fd = None
+    try:
+        assert lease_blocked(gpu_lease, tmp_path, "1", wait_timeout_s=0.2)
+        assert old_version.exists() and new_version.exists()
+
+        old_version.unlink()  # that manager got its GPUs; the next oldest still goes first
+        assert lease_blocked(gpu_lease, tmp_path, "1", wait_timeout_s=0.2)
+        assert new_version.exists()
+
+        # A waiter there that is younger than us neither blocks us nor loses its request.
+        younger = other_namespace_request(
+            tmp_path, "younger", [1], started_at_ns=time.time_ns() + 10**12
+        )
+        younger_fd = hold_request_lock(tmp_path, "younger")
+        new_version.unlink()  # that manager is done: json first, then its lock
+        (tmp_path / "request_new-version.lock").unlink()
+        os.close(new_version_fd)
+        new_version_fd = None
+        assert not lease_blocked(gpu_lease, tmp_path, "1", wait_timeout_s=1.0)
+        assert younger.exists() and (tmp_path / "request_younger.lock").exists()
+    finally:
+        for fd in (new_version_fd, younger_fd):
+            if fd is not None:
+                os.close(fd)
+
+
+def test_leftover_request_lock_of_dead_manager_is_cleared(tmp_path):
+    gpu_lease = load_gpu_lease()
+    # A new-version manager in another container was killed while waiting: no cleanup ran, but
+    # the kernel dropped its flock. The request is recent, so only the free lock proves death.
+    dead = other_namespace_request(tmp_path, "dead", [0, 1])
+    dead_lock = leftover_request_lock(tmp_path, "dead")
+    # Lock files without a json: one left by a dead manager, and one of a live manager (between
+    # taking its lock and writing its json, or its json was just deleted by an old version).
+    orphan_lock = leftover_request_lock(tmp_path, "orphan")
+    live_fd = hold_request_lock(tmp_path, "live")
+    try:
+        assert not lease_blocked(gpu_lease, tmp_path, "0", wait_timeout_s=1.0)
+        assert not dead.exists() and not dead_lock.exists()
+        assert not orphan_lock.exists()
+        assert (tmp_path / "request_live.lock").exists()
+    finally:
+        os.close(live_fd)
+
+
+def test_old_version_request_from_other_pid_namespace_is_kept_until_stale(tmp_path):
+    gpu_lease = load_gpu_lease()
+    one_second_ago = time.time_ns() - 1_000_000_000
+    request = other_namespace_request(tmp_path, "old-version", [0], started_at_ns=one_second_ago)
+    # No request lock, so it cannot be proven dead. For a manager whose wait limit is 10 s it is
+    # stale only after 2 x 10 s, so it queues ahead of that manager.
+    result = {}
+    waiter = threading.Thread(
+        target=lambda: result.update(
+            blocked=lease_blocked(gpu_lease, tmp_path, "0", wait_timeout_s=10.0)
+        )
+    )
+    waiter.start()
+    try:
+        wait_for_requests(tmp_path, 2)
+        time.sleep(0.3)
+        assert waiter.is_alive() and request.exists()
+        request.unlink()  # that manager is done
+    finally:
+        waiter.join(timeout=15)
+    assert result == {"blocked": False}
+
+    # For a manager whose wait limit is 0.2 s the same request (older than 2 x 0.2 s) is stale.
+    other_namespace_request(tmp_path, "old-version", [0], started_at_ns=one_second_ago)
+    assert not lease_blocked(gpu_lease, tmp_path, "0", wait_timeout_s=0.2)
+    assert not request.exists()
+
+
+def test_same_namespace_request_is_judged_by_its_pid(tmp_path, live_process):
+    gpu_lease = load_gpu_lease()
+    # An old-version manager in this container: live pid, no request lock. However old, it is
+    # a live contender (no staleness rule here), exactly as with main.
+    old_version = write_request(
+        tmp_path, "old-version", [0, 1], manager_pid=live_process.pid, started_at_ns=1
+    )
+    assert lease_blocked(gpu_lease, tmp_path, "1")
+    assert old_version.exists()
+
+    live_process.kill()
+    live_process.wait(timeout=5)
+    # Its manager is gone; so is a new-version one that left its unlocked lock file behind.
+    dead_new_version = write_request(tmp_path, "dead-new-version", [1], manager_pid=999999999)
+    dead_lock = leftover_request_lock(tmp_path, "dead-new-version")
+    assert not lease_blocked(gpu_lease, tmp_path, "1", wait_timeout_s=1.0)
+    assert not old_version.exists()
+    assert not dead_new_version.exists() and not dead_lock.exists()
+
+
+def test_unreadable_pid_namespace_is_not_proof_of_death(tmp_path, monkeypatch, live_process):
+    gpu_lease = load_gpu_lease()
+    real_probe = gpu_lease._pid_namespace_for_pid
+    # Another user's manager in this container: reading its /proc/<pid>/ns/pid fails (EACCES).
+    monkeypatch.setattr(
+        gpu_lease,
+        "_pid_namespace_for_pid",
+        lambda pid: None if pid == live_process.pid else real_probe(pid),
+    )
+    pid = live_process.pid
+
+    # Old version (no request lock): a contender, like one from another namespace ...
+    request = write_request(tmp_path, "other-user", [0], manager_pid=pid)
+    assert lease_blocked(gpu_lease, tmp_path, "0", wait_timeout_s=0.2)
+    assert request.exists()
+    # ... until it is older than twice our wait limit.
+    write_request(tmp_path, "other-user", [0], manager_pid=pid, started_at_ns=1)
+    assert not lease_blocked(gpu_lease, tmp_path, "0", wait_timeout_s=1.0)
+    assert not request.exists()
+
+    # New version: its held lock keeps it however old it is.
+    write_request(tmp_path, "other-user", [0], manager_pid=pid, started_at_ns=1)
+    fd = hold_request_lock(tmp_path, "other-user")
+    try:
+        assert lease_blocked(gpu_lease, tmp_path, "0")
+        assert request.exists()
+    finally:
+        os.close(fd)
+    (tmp_path / "request_other-user.lock").unlink()
+
+    # A missing /proc/<pid> or a zombie is proof of death, readable or not.
+    live_process.kill()
+    deadline = time.monotonic() + 5
+    while process_is_live(pid):
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    assert Path(f"/proc/{pid}").exists()  # a zombie: not reaped yet
+    assert not lease_blocked(gpu_lease, tmp_path, "0", wait_timeout_s=1.0)
+    assert not request.exists()
+    live_process.wait(timeout=5)
+    write_request(tmp_path, "other-user", [0], manager_pid=pid)
+    assert not lease_blocked(gpu_lease, tmp_path, "0", wait_timeout_s=1.0)
+    assert not request.exists()
+
+
+def test_waiting_request_keeps_the_format_older_versions_read(tmp_path):
+    gpu_lease = load_gpu_lease()
+    with queued_group_lease(gpu_lease, tmp_path) as request:
+        data = json.loads(request.read_text())
+        assert set(data) == {
+            "request_id", "manager_pid", "pid_namespace", "pool_ids", "count", "started_at_ns"
+        }
+        assert request.name == f"request_{data['request_id']}.json"
+        assert (data["manager_pid"], data["pid_namespace"]) == (os.getpid(), own_pid_namespace())
+        assert (data["pool_ids"], data["count"]) == ([0, 1], 2)
+        # main's liveness rule keeps it: same namespace as its pid, which is alive ...
+        assert gpu_lease._pid_namespace_for_pid(data["manager_pid"]) == data["pid_namespace"]
+        assert gpu_lease._pid_is_live(data["manager_pid"])
+        # ... and main never globs the lock file, which is held for as long as the lease waits.
+        fd = os.open(request.with_suffix(".lock"), os.O_RDONLY)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(fd)
+    assert not list(tmp_path.glob("request_*"))
+
+
+def test_deleted_request_is_restored_with_its_original_priority(tmp_path):
+    gpu_lease = load_gpu_lease()
+    with queued_group_lease(gpu_lease, tmp_path) as request:
+        original = json.loads(request.read_text())
+        request.unlink()  # what main's gpu_lease.py in another PID namespace does
+        deadline = time.monotonic() + 5
+        while not request.exists():
+            assert time.monotonic() < deadline, "the deleted request was not restored"
+            time.sleep(0.005)
+        assert json.loads(request.read_text()) == original
+        # Still the oldest request: a younger one for GPU 1 (free) has to wait behind it.
+        assert lease_blocked(gpu_lease, tmp_path, "1", wait_timeout_s=0.2)
+
+
+# Real PID namespaces: a waiter started through unshare(1) records a namespace of its own and
+# a pid that means nothing here, like a manager in another container sharing the lock dir. It
+# still sees this /proc (mounting its own needs privileges), so the lease must not rely on
+# /proc for its own request or for another namespace's request.
+NAMESPACE_WAITER = """
+import importlib.util, sys, time
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("gpu_lease", sys.argv[1])
+gpu_lease = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gpu_lease)
+lock_dir, gpu_ids, name, events = Path(sys.argv[2]), sys.argv[3], sys.argv[4], Path(sys.argv[5])
+request = gpu_lease.GpuRequest.from_fixed_ids(gpu_ids, count=len(gpu_ids.split(",")))
+with gpu_lease.GpuLease(request, lock_dir=lock_dir, wait_timeout_s=30, poll_interval_s=0.01):
+    with events.open("a") as log:
+        print(name, "acquired", file=log)
+    time.sleep(0.3)
+    with events.open("a") as log:
+        print(name, "released", file=log)
+"""
+
+
+@pytest.fixture(scope="module")
+def other_pid_namespace():
+    """Command prefix that runs its command in a new PID namespace, if this host allows it."""
+    probe = [sys.executable, "-c", "import os; print(os.readlink('/proc/self/ns/pid'))"]
+    for prefix in (
+        ["unshare", "--user", "--map-root-user", "--pid", "--fork", "--kill-child"],
+        ["unshare", "--pid", "--fork", "--kill-child"],
+    ):
+        try:
+            result = subprocess.run(
+                prefix + probe, capture_output=True, text=True, timeout=10, check=False
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if result.returncode == 0 and result.stdout.strip() not in ("", own_pid_namespace()):
+            return prefix
+    pytest.skip("cannot create a PID namespace here (unshare)")
+
+
+def start_namespace_waiter(prefix, lock_dir, gpu_ids, name, events):
+    arguments = [str(MODULE_PATH), str(lock_dir), gpu_ids, name, str(events)]
+    return subprocess.Popen([*prefix, sys.executable, "-c", NAMESPACE_WAITER, *arguments])
+
+
+def test_group_waiters_in_two_pid_namespaces_are_served_in_order(tmp_path, other_pid_namespace):
+    lock_dir = tmp_path / "locks"
+    events = tmp_path / "events"
+    gpu0 = hold_gpu_lock(lock_dir, 0)  # GPU 0 busy: both waiters queue
+    waiters = []
+    try:
+        # Older: a group waiter in another PID namespace for GPUs 0,1.
+        waiters.append(
+            start_namespace_waiter(other_pid_namespace, lock_dir, "0,1", "other-namespace", events)
+        )
+        [foreign] = wait_for_requests(lock_dir, 1)
+        assert json.loads(foreign.read_text())["pid_namespace"] != own_pid_namespace()
+        # Younger: a waiter here for GPU 1. GPU 1 is free, but the older request wants it too.
+        waiters.append(start_namespace_waiter([], lock_dir, "1", "this-namespace", events))
+        requests = wait_for_requests(lock_dir, 2)
+        time.sleep(0.5)  # dozens of polls by each
+        # Each sees the other's request alive: none is deleted and nobody jumps the queue.
+        assert all(path.exists() for path in requests)
+        assert not events.exists()
+        os.close(gpu0)
+        gpu0 = None
+        for waiter in waiters:
+            assert waiter.wait(timeout=30) == 0
+    finally:
+        if gpu0 is not None:
+            os.close(gpu0)
+        for waiter in waiters:
+            if waiter.poll() is None:
+                waiter.kill()
+                waiter.wait(timeout=5)
+    assert events.read_text().splitlines() == [
+        "other-namespace acquired",
+        "other-namespace released",
+        "this-namespace acquired",
+        "this-namespace released",
+    ]
+    assert not list(lock_dir.glob("request_*"))
+
+
+def test_request_of_killed_waiter_in_other_pid_namespace_is_cleared(tmp_path, other_pid_namespace):
+    gpu_lease = load_gpu_lease()
+    lock_dir = tmp_path / "locks"
+    gpu0 = hold_gpu_lock(lock_dir, 0)  # stays busy: the waiter can never get its group
+    try:
+        waiter = start_namespace_waiter(
+            other_pid_namespace, lock_dir, "0,1", "killed", tmp_path / "events"
+        )
+        try:
+            [request] = wait_for_requests(lock_dir, 1)
+            assert json.loads(request.read_text())["pid_namespace"] != own_pid_namespace()
+            assert lease_blocked(gpu_lease, lock_dir, "1")  # alive: its older request goes first
+        finally:
+            waiter.kill()  # unshare dies; --kill-child SIGKILLs the waiter, so no cleanup runs
+            waiter.wait(timeout=5)
+        assert request.exists() and request.with_suffix(".lock").exists()
+        # The kernel released the dead waiter's flock: its request no longer holds us up.
+        assert not lease_blocked(gpu_lease, lock_dir, "1", wait_timeout_s=2.0)
+        assert not request.exists() and not request.with_suffix(".lock").exists()
+    finally:
+        os.close(gpu0)

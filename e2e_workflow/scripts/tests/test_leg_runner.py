@@ -69,6 +69,9 @@ _HARNESS_STUB = textwrap.dedent('''
 
     def _torch():
         return sys.modules["torch"]
+
+    def sync(torch=None):
+        calls.append(("sync",))
 ''')
 
 _CASES_STUB = textwrap.dedent('''
@@ -81,11 +84,12 @@ _CASES_STUB = textwrap.dedent('''
         def clone(self): return self
         def cpu(self): return self
 
-    def timing_cases(h, meta):
-        return [
-            {"sig": "decode", "args": {"m": 1}, "regime": "decode", "m": 1},
-            {"sig": "prefill", "args": {"m": 4096}, "regime": "prefill", "m": 4096},
-        ]
+    def timing_specs(h, meta):
+        return [{"sig": "decode", "regime": "decode", "m": 1},
+                {"sig": "prefill", "regime": "prefill", "m": 4096}]
+
+    def make_timing_case(spec):
+        return dict(spec, args={"m": spec["m"]})
 
     def random_shapes(h, meta):
         return [{"sig": "decode", "make_inputs": lambda rng: {"seed": rng.seed,
@@ -378,6 +382,86 @@ class ModeTime(_LegRunnerTestCase):
         out = json.loads(self._main("--task", self.task, "--mode", "time"))
         self.assertIsNone(out["cases"][0]["ms"])
         self.assertIsNone(out["cases"][0]["timer"])
+
+    def test_a_timer_error_is_carried_on_the_row(self):
+        self._task_dir(harness=_HARNESS_STUB.replace(
+            'return {"ms": 1.25, "wall_ms": 1.5, "timer": "event"}',
+            'return {"ms": None, "wall_ms": None, "timer": None, "error": "RuntimeError: no hipcc"}'))
+        self._target_module()
+        out = json.loads(self._main("--task", self.task, "--mode", "time"))
+        self.assertEqual(out["cases"][0]["error"], "RuntimeError: no hipcc")
+
+
+_STREAMING_CASES_STUB = textwrap.dedent('''
+    """A cases.py with metadata-only specs and a one-shape operand factory."""
+    built, live = [], [0]
+
+    class Operand:
+        def __init__(self, sig):
+            assert live[0] == 0, "the previous shape's operands are still alive"
+            live[0] += 1
+            built.append(sig)
+        def __del__(self):
+            live[0] -= 1
+
+    def timing_specs(h, meta):
+        return [{"sig": s, "regime": "decode", "m": m} for s, m in (("a", 1), ("b", 2), ("c", 3))]
+
+    def make_timing_case(spec):
+        return dict(spec, args=Operand(spec["sig"]))
+
+    def random_shapes(h, meta):
+        return []
+
+    def call(args):
+        return None
+''')
+
+
+class TimingSweep(_LegRunnerTestCase):
+    """One `--mode time` process can stream many shapes (harness_lib.measure_legs' batched mode)."""
+
+    def test_sigs_select_and_order_the_shapes_of_one_sweep(self):
+        self._task_dir()
+        self._target_module()
+        out = json.loads(self._main("--task", self.task, "--mode", "time",
+                                    "--sigs", json.dumps(["prefill", "decode"])))
+        self.assertEqual([c["sig"] for c in out["cases"]], ["prefill", "decode"])
+        out = json.loads(self._main("--task", self.task, "--mode", "time",
+                                    "--sigs", json.dumps(["prefill"])))
+        self.assertEqual([c["sig"] for c in out["cases"]], ["prefill"])
+
+    def test_a_sig_containing_a_comma_survives_the_command_line(self):
+        cases = _CASES_STUB.replace('"sig": "decode"', '"sig": "decode,m=1"')
+        self._task_dir(cases=cases)
+        self._target_module()
+        out = json.loads(self._main("--task", self.task, "--mode", "time",
+                                    "--sigs", json.dumps(["decode,m=1"])))
+        self.assertEqual([c["sig"] for c in out["cases"]], ["decode,m=1"])
+
+    def test_listing_a_streaming_task_builds_no_operands(self):
+        self._task_dir(cases=_STREAMING_CASES_STUB)
+        self._target_module()
+        out = json.loads(self._main("--task", self.task, "--mode", "list"))
+        self.assertEqual(out["sigs"], ["a", "b", "c"])
+        self.assertEqual(sys.modules["cases"].built, [])
+
+    def test_a_streaming_task_builds_one_shape_at_a_time_in_sigs_order(self):
+        self._task_dir(cases=_STREAMING_CASES_STUB)
+        self._target_module()
+        out = json.loads(self._main("--task", self.task, "--mode", "time",
+                                    "--sigs", json.dumps(["c", "a"])))
+        self.assertEqual([c["sig"] for c in out["cases"]], ["c", "a"])
+        self.assertEqual(sys.modules["cases"].built, ["c", "a"])   # Operand asserts one live shape
+
+    def test_setup_cost_outside_the_timer_is_reported(self):
+        self._task_dir()
+        self._target_module()
+        out = json.loads(self._main("--task", self.task, "--mode", "time"))
+        for key in ("task_import_s", "runtime_init_s", "child_s"):
+            self.assertGreaterEqual(out["process"][key], 0.0)
+        for key in ("inputs_s", "time_op_s", "cleanup_s"):
+            self.assertGreaterEqual(out["cases"][0]["diagnostics"][key], 0.0)
 
 
 class ModeOracle(_LegRunnerTestCase):
