@@ -330,7 +330,8 @@ def _readme(row, meta, source_rel):
                 "each inference and the warmup inferences are dropped. An op's time runs "
                 "from the end of the previous op, so it includes the GPU's dispatch gap "
                 "before each of its kernels: a launch removed counts as well as a faster "
-                "kernel. Every case is also checked against ORT's CPU EP, in `correctness` "
+                "kernel, unless that launch is written in a frozen definition. Every case "
+                "is also checked against ORT's CPU EP, in `correctness` "
                 "too.\n" + cases + "\n")
         else:
             perf_note = ("- `performance` reports pytest `--durations` wall time per test "

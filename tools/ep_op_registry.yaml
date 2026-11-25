@@ -64,7 +64,8 @@ ops:
     # The kernels the perf cases below reach on gfx1151 (rocprofv3 kernel trace).
     entry_points:
       - matmul_nbits_gemv_dp4a_kernel     # M<=7 with u8 or no zp: every case but the next two
-      - matmul_nbits_quant_act_i8_kernel  # quantizes A for the dp4a GEMV, its own launch
+      - matmul_nbits_quant_act_i8_kernel  # quantizes A for the dp4a GEMV; launched from the
+                                          # frozen hip_matmul_nbits_dp4a, so it cannot be fused
       - matmul_nbits_gemv_kernel          # fp16 zp at M=1 (m1_o_proj_fp16zp)
       - MatMulNBitsWMMA_NoZP              # M>=8 without zp (m8_down_proj_nozp)
     frozen_symbols:                       # extern C entries the EP wrapper calls
