@@ -6,7 +6,7 @@ dtypes: [fp32, bf16, fp16, fp8_e4m3, fp8_e5m2, int8, int4]
 regimes: [both]
 updated: 2026-09-10
 sources:
-  - ../../expert_skills/skills/gluon_authoring/references/hardware/hw_constants.json
+  - ../data/hw_constants.json
   - ../../expert_skills/skills/gluon_authoring/references/platform-known-issues.md
   - https://gpuopen.com/learn/wmma-guide-amd-rdna-4-gpus-part-2/
 ---
@@ -16,7 +16,7 @@ sources:
 > Validated client RDNA 4 (`gfx1201`). **Not** Instinct CDNA. Workflow agents should prefer
 > [`kernel_workflow/knowledge/amd_rdna4.md`](../../../kernel_workflow/knowledge/amd_rdna4.md).
 > Occupancy numbers live in [occupancy.md](occupancy.md); pitfalls in [pitfalls.md](pitfalls.md).
-> Do **not** duplicate Gluon `hw_constants.json` beyond the cheat sheet — that file is the source.
+> Do **not** duplicate `perf_knowledge/hardware/data/hw_constants.json` beyond the cheat sheet — that file is the source.
 > These ISA facts apply to gfx1201 products. GEAK's product validation, serving
 > image, and calibrated peaks exist for **R9700** and **R9600D** (see
 > `roofline/peaks.md`); RX 9070 XT and other gfx1201

@@ -67,7 +67,7 @@ const archLinks = [...fs.readFileSync(archPath, 'utf8').matchAll(/\]\((?!\w+:)([
   .map((m) => path.relative(repoRoot, path.resolve(longFormDir, m[1])));
 for (const canonical of [
   'kernel_workflow/knowledge/amd_ryzen.md',
-  'perf_knowledge/expert_skills/skills/gluon_authoring/references/hardware/hw_constants.json',
+  'perf_knowledge/hardware/data/hw_constants.json',
   'e2e_workflow/knowledge/analysis_skills/roofline/peaks.md',
 ]) {
   if (!archLinks.includes(canonical)) throw new Error(`arch.md does not link the canonical ${canonical}`);

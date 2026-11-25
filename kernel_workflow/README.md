@@ -1,5 +1,8 @@
 # kernel_workflow — Dynamic Workflow for Kernel / Model Inference Optimization
 
+Optional shared AMD hardware queries: [ISA and occupancy tools](scripts/kernel_tools/isa_tools.md).
+Profiler/ATT environment checks and version pairing: [profiling dependencies](scripts/kernel_tools/profiling-dependencies.md).
+
 A deterministic **Workflow** (JS-orchestrated multi-agent pipeline) that optimizes the inference
 speed of a GPU kernel directory — a single kernel, several kernels fused together, or an end-to-end
 vLLM / SGLang model — on AMD Instinct MI-series accelerators (MI300X / MI300A / MI308X / MI325X on
