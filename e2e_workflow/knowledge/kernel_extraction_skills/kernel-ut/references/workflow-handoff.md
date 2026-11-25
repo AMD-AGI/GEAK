@@ -57,10 +57,12 @@ and deep modes retain their head-only scheduling. Missing or stale UT evidence
 fails that task rather than invoking another extractor from an optimization phase.
 
 Declare `required_gpu_count` for multi-rank tasks in `run/requested_kernel.json`.
-Current head/milestone lanes allocate one GPU per task. Completed multi-GPU UTs
-remain in the delivery and are listed as deferred for optimization, with evidence
-paths; they are not retried on one card. A collective without an explicit rank
-requirement is deferred as well. Its extraction coverage remains recorded.
+Head and milestone lanes lease that many GPUs from `GPU_LIST` for the task. A
+multi-GPU UT is listed in `deferred_tasks`, with its reason and evidence paths, only
+when its run cannot place it: it needs more GPUs than `GPU_LIST` holds, or it is
+queued for fast- or deep-mode head lanes, which lease one card each. It is never
+retried on one card. A collective without an explicit rank requirement is deferred
+as well. Its extraction coverage remains recorded.
 
 ## Package the completed tasks
 
