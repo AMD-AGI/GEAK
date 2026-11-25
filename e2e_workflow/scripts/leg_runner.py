@@ -147,14 +147,16 @@ class _Dist:
 def _check(h, cases, meta, case_execution, ref_prefix, seed, draws, base_tol, rank, override_tol=False):
     """This rank's outputs on the seeded draws against the same rank's recorded blob (eager), then the
     same draws through one captured graph per shape (static inputs refreshed in place, as the server
-    replays it). Returns {"pass", "worst", "cases": [...]}."""
+    replays it), then meta.graph_replays more replays of that graph cycling through the draws, each checked:
+    the liveness stress of a persistent multi-rank kernel (a stale read or a lost signal shows up as a wrong
+    output; a hang times the leg out). Returns {"pass", "worst", "replays", "cases": [...]}."""
     torch = h._torch()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     path = f"{ref_prefix}.rank{rank}" if rank is not None else ref_prefix
     ref = torch.load(path, map_location="cpu")
-    rows, ok_all, worst = [], True, 0.0
+    rows, ok_all, worst, replays = [], True, 0.0, None
 
-    def compare(sig, out, key, how):
+    def compare(sig, out, key, how, record=True):
         nonlocal ok_all, worst
         if key not in ref:
             ok, err = False, float("inf")
@@ -165,8 +167,10 @@ def _check(h, cases, meta, case_execution, ref_prefix, seed, draws, base_tol, ra
         ok_all = ok_all and ok
         if err == err and err != float("inf"):
             worst = max(worst, err)
-        rows.append({"case": f"{sig}|{key.split('|')[-1]}", "check": how, "correct": bool(ok),
-                     "max_rel_err": None if err != err or err == float("inf") else round(float(err), 6)})
+        if record:
+            rows.append({"case": f"{sig}|{key.split('|')[-1]}", "check": how, "correct": bool(ok),
+                         "max_rel_err": None if err != err or err == float("inf") else round(float(err), 6)})
+        return ok
 
     for shape in cases.random_shapes(h, meta):
         case_call, case_graph = case_execution(shape)
@@ -202,7 +206,17 @@ def _check(h, cases, meta, case_execution, ref_prefix, seed, draws, base_tol, ra
             g.replay()
             torch.cuda.synchronize()
             compare(shape["sig"], _snapshot(gout), key, "graph_replay")
-    return {"pass": ok_all, "worst": worst, "cases": rows}
+        n, bad = int(meta.get("graph_replays") or 0), 0
+        for i in range(n):
+            _copy_into(static, inputs[i % len(inputs)])
+            g.replay()
+            torch.cuda.synchronize()
+            bad += not compare(shape["sig"], _snapshot(gout), keys[i % len(keys)], "graph_replays", record=False)
+        if n:
+            rows.append({"case": f"{shape['sig']}|stress", "check": "graph_replays", "correct": bad == 0,
+                         "replays": n, "wrong": bad})
+            replays = n if replays is None else min(replays, n)
+    return {"pass": ok_all, "worst": worst, "replays": replays or 0, "cases": rows}
 
 
 def _rel_l2(h, out, ref, tol):
@@ -404,7 +418,7 @@ def _main_ranks(a, h, cases, meta, regime, d):
                 e = c.get("max_rel_err")
                 by_case[k] = None if e is None or by_case.get(k, 0.0) is None else max(by_case.get(k, 0.0), e)
         d.emit({"pass": all(p["pass"] for p in per), "worst": max(p["worst"] for p in per),
-                "worst_by_case": by_case,
+                "worst_by_case": by_case, "graph_replays": min(p["replays"] for p in per),
                 "per_rank": [{"rank": r, "pass": p["pass"], "worst": p["worst"],
                               "failed": [c for c in p["cases"] if not c["correct"]][:8]}
                              for r, p in enumerate(per)], "world_size": d.world, "tol": tol})
