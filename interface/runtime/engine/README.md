@@ -6,6 +6,11 @@ written against (`agent` / `parallel` / `pipeline` / `phase` / `workflow` / `log
 on some other CLI. Each `agent()` call becomes one short-lived backend process, so the CLI underneath
 never has to support parallel or nested subagents itself.
 
+For failed kernel lanes, `agent.stopLaneWork(evalDir, reason)` is an optional host capability that
+runs the repository's fixed `stop_lane_work.py` directly, with a two-minute process timeout. It uses
+no model call or agent semaphore slot, so cleanup still runs when abandoned agents fill the queue.
+Native Workflow hosts without this capability keep the lane's best-effort cleanup-agent fallback.
+
 **It is not codex-specific**, which is why it is not called `codex-engine/`. The scheduler, the
 schema layer and the backend contract mention no CLI at all; everything backend-specific is *data* in
 `registry.json`. Which CLI actually runs is a resolution result, not a property of this code.

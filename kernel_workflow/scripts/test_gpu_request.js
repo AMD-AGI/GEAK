@@ -93,6 +93,22 @@ for (const bad of [
   ok(threw, `rejects ${JSON.stringify(bad)}`);
 }
 
+console.log('\n# multinode engine prefix (gpu_ids = <engine>:<ids>)');
+const prefix = lane.match(/const GPU_IDS_ARG = [\s\S]*?\nconst GPU_LIST = [^\n]*\n/);
+const apply = lane.match(/function applyGpuResource\(r\) \{[\s\S]*?\n\}\n/);
+ok(prefix && apply, 'engine prefix parsing and applyGpuResource found in kernel_lane.js');
+const laneGpu = A => new Function('A', 'GPU_MODE', 'resolveGpuRequest',
+  `${prefix[0]}let GPU_RESOURCE, GPU_JOB, GPU_POOL, GPU_SINGLE;\n${apply[0]}` +
+  'applyGpuResource(resolveGpuRequest(A, GPU_LIST));\nreturn { GPU_LIST, GPU_JOB, GPU_POOL, GPU_SINGLE };',
+)(A, 'pool', resolveGpuRequest);
+equal(laneGpu({ gpu_ids: 'decode:3' }), { GPU_LIST: ['3'], GPU_JOB: '', GPU_POOL: 'decode:3', GPU_SINGLE: 'decode:3' },
+  'a PD lane validates the bare id and hands gpu_lock.sh the engine again');
+equal(laneGpu({ gpu_ids: '0,1' }), { GPU_LIST: ['0', '1'], GPU_JOB: '', GPU_POOL: '0,1', GPU_SINGLE: '0' },
+  'a bare pool is unchanged');
+equal(laneGpu({ gpu_ids: 'prefill:0,1', gpus_per_job: 2 }).GPU_POOL, 'prefill:pool:2:0,1',
+  'a multi-GPU spec keeps the engine in front');
+ok(/onEngine\(GPU_LIST\[i % GPU_LIST\.length\]\)/.test(lane), 'pinned placement keeps the engine');
+
 console.log('\n# propagation');
 ok(!/GPU_ID: GPU_LIST\[0\]/.test(lane), 'no phase takes GPU_LIST[0] directly');
 ok(/GPU_POOL = GPU_JOB \|\|/.test(lane), 'GPU_POOL is the group spec for multi-GPU jobs');

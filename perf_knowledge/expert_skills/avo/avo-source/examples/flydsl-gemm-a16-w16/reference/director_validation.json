@@ -1,0 +1,23 @@
+{
+  "kernel_name": "kernel_src",
+  "director_verified_speedup_geomean": 1.18613,
+  "director_verified_speedup_arithmetic": 1.19237,
+  "reported_speedup_geomean": 1.19088,
+  "validation_status": "accepted",
+  "correctness": "pass",
+  "per_case": [
+    {"name": "c2", "baseline_ms": 0.1429, "optimized_ms": 0.1326, "speedup": 1.07768},
+    {"name": "c32", "baseline_ms": 1.7594, "optimized_ms": 1.5511, "speedup": 1.13429},
+    {"name": "c64", "baseline_ms": 4.2141, "optimized_ms": 3.0869, "speedup": 1.36516}
+  ],
+  "applied_to_original": "false",
+  "final_patch": "final_patch.diff",
+  "cv": 0.0042,
+  "protocol": "repeated",
+  "formal_status": "not_applicable",
+  "infrastructure_status": "healthy",
+  "screening_only": false,
+  "positive_block_fraction": 1,
+  "bimodal": false,
+  "notes": "VERIFY_REPEATS=5. Independently benchmarked the patched workspace against a fresh true baseline. All cases were positive, correctness passed, the original remained unchanged, and the optimized implementation was hybrid: FlyDSL for c2 and retuned Triton for c32/c64."
+}

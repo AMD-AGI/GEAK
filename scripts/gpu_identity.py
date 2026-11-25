@@ -3,10 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Detect AMD GPU ISA and product identity from one structured rocminfo agent.
 
-`gfx1201` is an ISA shared by multiple products.  This helper returns target
-`r9700` or `r9600d` only when the same GPU agent reports the corresponding
-exact marketing name; every other product remains `unknown`. Product identity
-does not establish serving-policy or performance-calibration qualification.
+`gfx1201` and `gfx1100` are ISAs shared by multiple products.  This helper
+returns target `r9700` or `r9600d` (on `gfx1201`), or `w7900` (on `gfx1100`),
+only when the same GPU agent reports the corresponding exact marketing name;
+every other product remains `unknown`. Product identity does not establish
+serving-policy or performance-calibration qualification.
 """
 
 from __future__ import annotations
@@ -26,6 +27,13 @@ PRODUCT_TARGETS = {
     R9700_MARKETING_NAME: "r9700",
     R9600D_MARKETING_NAME: "r9600d",
 }
+# The W7900 nameplate is spelled both "Pro" and "PRO", so these two names are
+# matched exactly after casefolding. Both boards share one target and policy.
+CASEFOLDED_PRODUCT_TARGETS = {
+    "amd radeon pro w7900": "w7900",
+    "amd radeon pro w7900 dual slot": "w7900",
+}
+TARGET_GFX = {"r9700": "gfx1201", "r9600d": "gfx1201", "w7900": "gfx1100"}
 INTEGRATED_MARKETING_NAMES = frozenset({"AMD Radeon Graphics"})
 _AGENT_RE = re.compile(r"^\s*Agent\s+\d+\s*$")
 _FIELD_RE = re.compile(r"^\s*([^:]+):\s*(.*?)\s*$")
@@ -34,6 +42,13 @@ _GFX_RE = re.compile(r"^gfx[0-9a-f]+$", re.IGNORECASE)
 
 class IdentityError(RuntimeError):
     """Raised when visible GPU agents cannot produce one safe identity."""
+
+
+def product_target(marketing_name: str) -> str:
+    """Return the GEAK target for an exact marketing name, else `unknown`."""
+    return PRODUCT_TARGETS.get(marketing_name) or CASEFOLDED_PRODUCT_TARGETS.get(
+        marketing_name.casefold(), "unknown"
+    )
 
 
 def _agent_fields(lines: list[str]) -> dict[str, str]:
@@ -72,9 +87,12 @@ def parse_rocminfo(text: str) -> dict[str, Any]:
         if not _GFX_RE.fullmatch(gfx) or gfx == "gfx000":
             continue
         marketing_name = fields.get("marketing name", "").strip()
-        target = PRODUCT_TARGETS.get(marketing_name, "unknown")
-        if target != "unknown" and gfx != "gfx1201":
-            raise IdentityError(f"GPU agent {target} requires gfx1201, observed {gfx}")
+        target = product_target(marketing_name)
+        required_gfx = TARGET_GFX.get(target)
+        if required_gfx and gfx != required_gfx:
+            raise IdentityError(
+                f"GPU agent {target} requires {required_gfx}, observed {gfx}"
+            )
         raw_cu = fields.get("compute unit", "")
         try:
             physical_cu_count = int(raw_cu)

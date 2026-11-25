@@ -4,9 +4,10 @@ A deterministic **Workflow** (JS-orchestrated multi-agent pipeline) that optimiz
 speed of a GPU kernel directory — a single kernel, several kernels fused together, or an end-to-end
 vLLM / SGLang model — on AMD Instinct MI-series accelerators (MI300X / MI300A / MI308X / MI325X on
 CDNA3 gfx942, and MI350X / MI355X on CDNA4 gfx950) **and the validated Radeon AI PRO R9700
-product on gfx1201**.
+product on gfx1201**, plus the **Radeon Pro W7900 on gfx1100** (RDNA3; other gfx1100 boards are refused).
 The card is detected on-box (`rocminfo`), not assumed. On gfx1201, agents must follow `knowledge/amd_rdna4.md`
-(wave32, WMMA) rather than Instinct MFMA/wave64 tables. The
+(wave32, WMMA) rather than Instinct MFMA/wave64 tables; on the W7900 they follow `knowledge/amd_rdna3.md`
+(wave32, gfx11 WMMA, no FP8/MX, roofline `calibrated-w7900` from the published W7900 peaks). The
 budget loop, round fan-out, and verification are **JS control flow**, while every judgement call is made
 by an agent returning **structured JSON**.
 
@@ -39,8 +40,8 @@ by an agent returning **structured JSON**.
   `verify_engineer`, and `integrator`.
 
 ## Pipeline
-`Setup → Analyze+Roadmap → Benchmark(COMMANDMENT+baseline) → Baseline Profile → [Research (opt-in)] →`
-`LOOP[ Plan round → (Optimize ‖ Verify, pipelined) → Integrate → Commit winner → Re-profile → Update memory ] →`
+`Setup → Analyze+Roadmap → Benchmark(COMMANDMENT+baseline) → [Baseline Profile (profile=on)] → [Research (opt-in)] →`
+`LOOP[ Plan round → (Optimize ‖ Verify, pipelined) → Integrate → Commit winner → [Re-profile (profile=on)] → Update memory ] →`
 `Final Report → Director Validation`.
 
 Each round's winner is committed into the canonical workspace, so the next round builds on the
@@ -75,6 +76,9 @@ Workflow({
                                //           cumulative best for a round winner to be committed
     deep_cost: 2,              // optional, default 2: budget cost of one deep_explore direction
                                //           (heavyweight; always runs in its own dedicated round)
+    max_rounds: 0,             // optional, default 0 = no cap: hard cap on optimization rounds
+    fast_mode: "false",        // optional: "true" for time-boxed runs (see "Time-boxed runs")
+    engineer_minutes: 6,       // optional, fast_mode only: wall-clock time box per optimize engineer
     gpu_ids: "0",              // optional, comma-separated, default "0"
     gpus_per_job: 1,           // optional: GPUs each GPU command needs; detected from the task's
                                //   test when unset (see "Multi-GPU jobs"); >1 leases N of gpu_ids
@@ -83,6 +87,10 @@ Workflow({
     exp_root: "",              // optional, output root; default = sibling "exp/" next to workflow_dir
     eval_dir: "",              // optional, override the output dir for this single run
     apply_to_original: "false",// optional; if "true", write the validated patch back to kernel_path
+    gpu_perf_level: "",        // optional: the amdgpu perf level the operator set (GEAK never sets it).
+                               //   On the W7900 only, with profile: "on", "profile_standard" or
+                               //   "stable_std" gives the lanes COUNTER_GUIDANCE=gfx1100-safe-set;
+                               //   otherwise "unavailable".
     // --- mode dispatch (kernel_workflow.js is the single ENTRY POINT / dispatcher) ---
     mode: "optimize",          // optional: "optimize" (default, edit an existing kernel) | "author"
                                //   | "bakeoff" (try several backend languages, keep the fastest)
@@ -100,6 +108,8 @@ Workflow({
                                //   unweighted geomean is kept as a secondary diagnostic). Correctness is
                                //   unaffected (it stays on the frozen immutable oracle).
                                //   Also accepted as op_spec.workload_path, or op_spec.workload (inline).
+    profile: "off",            // optional, default "off": no baseline profile, no re-profile, no engineer
+                               //   self-profiling. "on" restores the profile_engineer phases.
     // --- Deep Research Agent (DRA) — opt-in web-grounded research phase before the optimize loop ---
     dra_enabled: "false",      // optional, default "false" (OFF → behavior byte-identical). "true" runs
                                //   the Research phase after Profile / before the optimize loop.
@@ -144,11 +154,36 @@ be read, or `gpu_ids` holds fewer than N GPUs, the lane logs a warning with the 
 single-GPU; pass `gpus_per_job` and enough `gpu_ids` to run it on N GPUs. What an e2e extraction
 captured from the server (selection traces, shape captures) is not scanned.
 
+A multi-rank UT task from the e2e UT module declares its GPU count (`required_gpu_count` in
+`run/requested_kernel.json` / `run/RETURN.json`, `capabilities.multi_rank.world_size` in `meta.json`),
+and Setup takes that count as it is. Give such a task at least that many `gpu_ids`: its UT starts its
+own ranks and ends with an environment error (exit 2) on fewer GPUs. For these tasks the lane uses
+the task's whole-UT limit (`meta.timeouts.total_s`, 3600 s when unset) as `GEAK_GPU_RUN_TIMEOUT`,
+Benchmark, Report and Validate carry each rank's time and the alignment method, and the return adds
+`gpus_per_job`, `timing_receipt` and `timing_receipt_gap`.
+
 `gpus_per_job`, `job_gpu_ids` (one fixed group) or `op_spec.resource` override the detection; an
 override that `gpu_ids` cannot hold stops the run. Group
 leases share the per-GPU lock files with single-GPU jobs, are acquired all-or-nothing, and are killed
 after `GEAK_GPU_RUN_TIMEOUT` seconds (default 900). Supported in `optimize` and `author` modes;
 `bakeoff` rejects multi-GPU jobs.
+
+### Time-boxed runs (`fast_mode`, opt-in)
+For workshops and demos where the whole run has to fit in ~20 minutes. Most of a run's gain usually
+comes early in the first round; `fast_mode` cuts the parts that only pay off in long runs:
+- after the last round (budget used up or `max_rounds` reached) the re-profile and the cross-round
+  memory update are skipped, since nothing reads them;
+- each optimize engineer gets a wall-clock time box (`engineer_minutes`, default 6) and stops early
+  when its last three attempts together gain < 3%.
+
+A setup that works well for a single kernel:
+```
+budget: 2, max_rounds: 1, fast_mode: "true", engineer_minutes: 6
+```
+Two directions run in parallel in one round; the integrator can still merge them. Shipping a ready
+correctness/benchmark harness in `kernel_path` saves the benchmark engineer from writing one
+(5–7 min). Measured on an fp32 1024³ GEMM (HIP, MI300X): ~20 min end to end at 4.3x, versus
+~107 min at 5.2x for a default budget-3 run.
 
 ### Deep Research Agent / Research phase (NEW, opt-in)
 `dra_enabled="true"` inserts a **`Research` phase AFTER Profile and BEFORE the optimize loop** (so the
@@ -315,7 +350,8 @@ knowledge/learned/   distilled experience cards (ADVISORY priors; each card self
                      kernel-gated (frozen-baseline isolated A/B); e2e-gated lessons stay in
                      e2e_workflow/knowledge/learned/ and cite these cards -- see learned/README.md
 scripts/             gpu_lock.sh (single-GPU, pool and multi-GPU group leases), gpu_lease.py (the
-                     group lease manager), sweep_orphan_leases.sh, profile_kernel.sh,
+                     group lease manager), sweep_orphan_leases.sh, stop_lane_work.py (stops and
+                     blocks a failed lane's leftover GPU work), profile_kernel.sh,
                      kb.py ... index      (regenerate a learned/INDEX.md from the cards' discovery
                      frontmatter; sink-agnostic -- takes the dir, so it also serves
                      e2e_workflow/knowledge/learned; `--check` for CI), test_learned_index.js (its guard),

@@ -1,0 +1,27 @@
+{
+  "best_id": "v3",
+  "best_git_ref": "avo-v3",
+  "baseline_geomean_ms": 1.013706,
+  "best_geomean_ms": 0.858618,
+  "reported_speedup": 1.190863,
+  "commits": [
+    {
+      "id": "v1",
+      "parent_id": "v0",
+      "strategy": "flydsl small-M tile retune (tile_n 256 to 128)",
+      "verified_speedup": 1.019849
+    },
+    {
+      "id": "v2",
+      "parent_id": "v1",
+      "strategy": "route big-M to retuned Triton 256x256x64, group 8, 8 warps",
+      "verified_speedup": 1.163582
+    },
+    {
+      "id": "v3",
+      "parent_id": "v2",
+      "strategy": "big-M cache policy retune from .cg to default",
+      "verified_speedup": 1.190863
+    }
+  ]
+}

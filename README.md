@@ -18,7 +18,9 @@ normally takes weeks of expert kernel engineering becomes an automated, repeatab
 GEAK targets AMD Instinct MI GPUs (CDNA, e.g. gfx942 / gfx950; the on-box card is auto-detected), and also runs
 on RDNA3.5 client parts (gfx1151 / Radeon 8060S) and the validated RDNA4 product Radeon AI PRO R9700
 (gfx1201). gfx1201 is an ISA shared by other products; it does not by itself select R9700 images,
-calibrated peaks, or serving policy. It is driven by
+calibrated peaks, or serving policy. The RDNA3 Radeon Pro W7900 (gfx1100, target `w7900`) is
+supported fail-closed: vLLM only, published W7900 roofline peaks without BF16, FP8 or INT4, and any
+other gfx1100 board is refused. It is driven by
 Claude Code and orchestrated by deterministic JS Workflows. It ships two workflows, each for a different scenario:
 
 | Workflow | Scope | What it optimizes |
@@ -44,10 +46,10 @@ optimize a single kernel.
 
 ### 1. Prerequisites
 
-- An **AMD Instinct MI GPU** (CDNA, e.g. gfx942 / gfx950), an **RDNA3.5 part** (gfx1151), or a **Radeon AI PRO R9700** (validated RDNA4/gfx1201 product), **ROCm 6+**, a profiler (`rocprof-compute` /
+- An **AMD Instinct MI GPU** (CDNA, e.g. gfx942 / gfx950), an **RDNA3.5 part** (gfx1151), a **Radeon AI PRO R9700** (validated RDNA4/gfx1201 product), or a **Radeon Pro W7900** (RDNA3/gfx1100), **ROCm 6+**, a profiler (`rocprof-compute` /
   `rocprofv3` / `rocprof`; RDNA4 PMCs may be sparse — kernel-trace still counts), Python 3.8+.
-- For E2E: a running-capable serving backend (`sglang`, `vllm`, or `atom`; R9700 is vLLM or SGLang only, gfx115x is vLLM-only) and the model weights on disk.
-- R9700 + SGLang has no image in `ci/docker_setup/docker_default.json`. The CI resolver (`ci/lib.sh`, used by `ci/node/run_local.sh`) fails with `E_IMAGE_UNAVAILABLE` unless you pass a supplied SGLang image: `IMAGE=<sglang-image> ci/node/run_local.sh ...`.
+- For E2E: a running-capable serving backend (`sglang`, `vllm`, or `atom`; R9700 and R9600D are vLLM or SGLang only, gfx115x and W7900 are vLLM-only) and the model weights on disk.
+- R9700 and R9600D + SGLang have no image in `ci/docker_setup/docker_default.json`. The CI resolver (`ci/lib.sh`, used by `ci/node/run_local.sh`) fails with `E_IMAGE_UNAVAILABLE` unless you pass a supplied SGLang image: `IMAGE=<sglang-image> ci/node/run_local.sh ...`.
 
 > **⚠️ Build your kernel environment first.** GEAK does **not** install the toolchains your kernels
 > need (e.g. PyTorch, Triton, FlyDSL, hipBLASLt) — these differ per kernel. Set up and verify the
@@ -158,6 +160,13 @@ MODEL=/models/Kimi-K3 bash e2e_workflow/scripts/agentx_smoke.sh
 See [`e2e_workflow/README.md` → *Standalone AgentX*](e2e_workflow/README.md#standalone-agentx-trace-replay-no-orchestrator)
 for the full arg spelling, what the declaration changes, and the two things that surprise people
 (`isl`/`osl` are not a benchmark; search legs are non-canonical by design).
+
+### Example — one server across machines
+
+A TP group spanning machines, or a prefill/decode pair, is served as one GEAK server with the
+single-host adapter, bench client and metric. Set `MULTI_NODE_STATE` for `run_e2e.py`, or start
+Claude Code with `GEAK_MN_STATE=<shared_fs>/pins/<run>/mn_state.json` and name the machines in the
+prompt; see [`e2e_workflow/docs/multi_node.md`](e2e_workflow/docs/multi_node.md).
 
 ---
 

@@ -98,7 +98,9 @@ see the disagreement rather than a single blended number that hides it.
    any other gfx115x ISA, is a hard unknown that never derives. `cu` is rocminfo's
    count; torch's `multi_processor_count` reports WGPs (20 on an 8060S).
    `gfx125x` is CDNA5, not RDNA4
-   — it must not use that gate. Other unknown architectures may derive from
+   — it must not use that gate. Discrete RDNA3 `gfx1100` numeric peaks exist
+   only for product `w7900` (no BF16, FP8 or INT4 entry); a gfx1100 without it is the
+   same hard unknown. Other unknown architectures may derive from
    device props with `peaks.confidence="low"` (§6 L1). Use `peak_flops_for()`
    canonical dtype keys; a missing dtype is unknown, never the table maximum.
 2. For each selected entry, pick the **e2e-critical regime** — the one carrying the launches

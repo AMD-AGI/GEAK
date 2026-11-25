@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import ast
 import atexit
+import functools
 import glob
 import gzip
 import hashlib
@@ -44,6 +45,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -578,13 +580,239 @@ def _targeting_shape(h: dict) -> tuple[int, int, str]:
     return obs_isl, obs_osl, "agentx_observed"
 
 
+# Same map as scripts/gpu_identity.py TARGET_GFX (test_run_e2e_dispatch checks it).
+_TARGET_GFX = {"r9700": "gfx1201", "r9600d": "gfx1201", "w7900": "gfx1100"}
+# ISAs that enable nothing without their product: unknown boards are refused.
+_PRODUCT_REQUIRED_GFX = {"gfx1100": "w7900"}
+
+
+def _rocminfo_available() -> bool:
+    return bool(shutil.which("rocminfo")) or Path("/opt/rocm/bin/rocminfo").is_file()
+
+
+def _probe_gpu_identity() -> dict[str, Any]:
+    """Read GEAK_GPU_IDENTITY_JSON, else run the structured rocminfo probe."""
+    env_identity = os.environ.get("GEAK_GPU_IDENTITY_JSON", "").strip()
+    if env_identity:
+        try:
+            return json.loads(env_identity)
+        except json.JSONDecodeError as error:
+            raise ValueError("GEAK_GPU_IDENTITY_JSON is not valid JSON") from error
+    proc = subprocess.run(
+        [sys.executable, str(GPU_IDENTITY_SCRIPT)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "identity probe failed").strip()
+        raise RuntimeError(
+            "GPU identity must be established before E2E policy selection: "
+            f"{detail}. Pass expected_gfx and expected_target explicitly if "
+            "this host cannot run rocminfo."
+        )
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("GPU identity probe returned invalid JSON") from error
+
+
+@functools.lru_cache(maxsize=None)
+def _read_node_state(path: str) -> dict:
+    try:
+        with open(path, encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"!!! MULTI_NODE_STATE={path}: {exc}")
+    if not isinstance(doc, dict):
+        raise SystemExit(f"!!! MULTI_NODE_STATE={path}: not a JSON object")
+    return doc
+
+
+def _node_state() -> dict:
+    """The document MULTI_NODE_STATE names ({} when unset): how Hyperloom hands GEAK a
+    multi-node deployment. Read here only; the workflow sees args.multinode, mn.py the pin."""
+    path = os.environ.get("MULTI_NODE_STATE", "").strip()
+    return _read_node_state(path) if path else {}
+
+
+def _spec_from_node_state(doc: dict, h: dict) -> dict:
+    """MULTI_NODE_STATE as the serving block mn.py normalizes: one node per engine pod with its
+    launch_command (one pod = one replica), the router pod apart. Renaming only; mn.py validates."""
+    def need(key):
+        if doc.get(key) in (None, "", []):
+            raise SystemExit(f"!!! MULTI_NODE_STATE names no {key}")
+        return doc[key]
+
+    # backend names the serving stack; sglangrouter's engines are sglang.
+    stack, framework = str(need("backend")).strip(), str(h.get("framework") or "sglang").strip()
+    backend = {"sglangrouter": "sglang"}.get(stack, stack)
+    if backend != framework:
+        raise SystemExit(f"!!! MULTI_NODE_STATE backend {backend!r} but the handoff's framework is {framework!r}")
+    pods = need("pods")
+    if not isinstance(pods, list) or not all(isinstance(p, dict) for p in pods):
+        raise SystemExit("!!! MULTI_NODE_STATE pods must be a list of objects")
+    routers = [p for p in pods if p.get("role") == "router"]
+    engines = [p for p in pods if p.get("role") != "router"]
+    if len(routers) > 1 or not engines:
+        raise SystemExit("!!! MULTI_NODE_STATE needs at least one engine pod and at most one router pod")
+    url = urllib.parse.urlsplit(str(need("service_url")))
+    if not url.hostname or not url.port:
+        raise SystemExit(f"!!! MULTI_NODE_STATE service_url {doc['service_url']!r} names no host:port")
+    front = routers[0] if routers else engines[0]
+    # A name (a k8s Service) gives only the port: the client dials that pod, whose reach check covers.
+    if url.hostname != str(front.get("podIP")) and _mn_module().is_ip(url.hostname):
+        raise SystemExit(f"!!! MULTI_NODE_STATE service_url host {url.hostname} is not the "
+                         f"{'router' if routers else 'first engine'} pod {front.get('podIP')}")
+    ssh = {"user": str(doc.get("ssh_user") or "root"),
+           **({"port": int(doc["ssh_port"])} if doc.get("ssh_port") else {}),
+           **({"key": str(doc["ssh_key_path"])} if doc.get("ssh_key_path") else {}),
+           **({"known_hosts": str(doc["ssh_known_hosts"])} if doc.get("ssh_known_hosts") else {}),
+           **({"prefix": str(doc["ssh_prefix"])} if doc.get("ssh_prefix") else {})}
+
+    def pod(p: dict) -> dict:
+        for key in ("podIP", "launch_command"):
+            if not p.get(key):
+                raise SystemExit(f"!!! MULTI_NODE_STATE pod {p.get('podIP') or p!r} names no {key}")
+        own = {**({"port": int(p["sshPort"])} if p.get("sshPort") and int(p["sshPort"]) != ssh.get("port") else {}),
+               **({"user": str(p["sshUser"])} if p.get("sshUser") and p["sshUser"] != ssh["user"] else {})}
+        return {"host": str(p["podIP"]), "launch_command": str(p["launch_command"]), **({"ssh": own} if own else {}),
+                **({"gpu_ids": p["gpuIds"]} if p.get("gpuIds") not in (None, "", []) else {})}
+
+    pd = str(doc.get("pd_mode") or "none").strip().lower() == "disaggregated"
+    shared = str(need("user_data_path")).rstrip("/")
+    # One pin per set of machines: two clusters on one shared_fs must not overwrite each other's.
+    cluster = hashlib.sha1(",".join(sorted(str(p.get("podIP")) for p in pods)).encode()).hexdigest()[:12]
+    block = {"topology": "pd_disagg" if pd else "tp_span", "shared_fs": shared,
+             "state": f"{shared}/pins/mn_state_{cluster}.json",
+             "backend": backend, "model": h.get("model_path") or "", "ssh": ssh, "serve_port": url.port,
+             "nodes": [{**pod(p), **({"role": p.get("role")} if pd else {})} for p in engines]}
+    if pd:
+        gpus = int(need("gpus_per_node"))
+        block["tp_by_role"] = {"prefill": gpus, "decode": gpus}
+        block["replicas_by_role"] = {r: sum(1 for p in engines if p.get("role") == r) or 1
+                                     for r in ("prefill", "decode")}
+    if routers:
+        block["router"] = pod(routers[0])
+    return block
+
+
+def _multinode(h: dict) -> dict:
+    """The serving block MULTI_NODE_STATE describes, else {} (GEAK's own host)."""
+    doc = _node_state()
+    return _spec_from_node_state(doc, h) if doc else {}
+
+
+@functools.lru_cache(maxsize=None)
+def _mn_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "geak_mn", E2E_DIR / "scripts" / "multi_node" / "mn.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _mn_spec(h: dict) -> dict:
+    """The MULTI_NODE_STATE block as mn.py normalizes it ({} on one host); a bad one stops the run."""
+    mn = _multinode(h)
+    if not mn:
+        return {}
+    try:
+        return _mn_module().normalize_spec(mn, h.get("tp", 1))
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f"!!! MULTI_NODE_STATE: {exc}")
+
+
+def _multinode_block(ps_args: dict) -> dict:
+    """The block the workflow serves on: args.multinode, else the carried state's (MN_ARG in the JS)."""
+    for mn in (ps_args.get("multinode"), (ps_args.get("state") or {}).get("multinode")):
+        if isinstance(mn, dict) and mn.get("nodes"):
+            return mn
+    return {}
+
+
+def _mn_relayed(block: dict) -> dict:
+    """``block`` without its launch commands (mn.py relayed)."""
+    return _mn_module().relayed(block)
+
+
+def _multinode_check(ps_args: dict) -> dict:
+    """``mn.py check`` on the workflow's block: probes the machines, writes the pin, returns the verdict.
+
+    Run here, not in the workflow: a Workflow script cannot spawn a process. The pin reaches
+    the workflow only as GEAK_MN_STATE in this process's environment (apply_bench_launcher).
+    The caller hands over its machines with its own service still up: the check stops it
+    (GEAK_MN_TAKEOVER, default 1 here) and every leg relaunches from the pods' commands."""
+    block = _multinode_block(ps_args)
+    if block.get("commands_in_pin"):
+        return {"verdict": "refused", "problems": [
+            "the multinode block carried from an earlier invocation has no launch commands (they stayed "
+            "in its pin): pass MULTI_NODE_STATE"]}
+    spec = {**block, "tp": ps_args.get("tp", 1), "work_dir": ps_args["eval_dir"]}
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(E2E_DIR / "scripts" / "multi_node" / "mn.py"), "check"],
+            env={**os.environ, "GEAK_MN_SPEC": json.dumps(spec),
+                 "GEAK_MN_TAKEOVER": os.environ.get("GEAK_MN_TAKEOVER", "1")},
+            capture_output=True, text=True, timeout=1800)
+    except subprocess.TimeoutExpired as exc:
+        return {"verdict": "refused", "problems": [f"mn.py check timed out: {exc}"]}
+    sys.stderr.write(proc.stdout + proc.stderr)
+    tag = _mn_module().CHECK_TAG
+    line = next((ln for ln in reversed(proc.stdout.splitlines()) if ln.startswith(tag)), "")
+    try:
+        verdict = json.loads(line[len(tag):]) if line else None
+    except ValueError:
+        verdict = None
+    if proc.returncode != 0 or not isinstance(verdict, dict) or verdict.get("verdict") != "ok":
+        problems = (verdict or {}).get("problems") or [
+            f"mn.py check exited {proc.returncode} without a verdict: "
+            f"{(proc.stderr or proc.stdout)[-2000:]}"]
+        return {"verdict": "refused", "problems": problems}
+    return verdict
+
+
+def _rank_layout(h: dict) -> list[dict]:
+    """Per-rank engine TP and cards ([] on one host), from mn.py's rank_layout."""
+    return _mn_spec(h).get("layout") or []
+
+
+def _multinode_gpu_identity(h: dict) -> dict:
+    """The pinned machines' GPU identity; they must all agree."""
+    spec = _mn_spec(h)
+    mod = _mn_module()
+    state = {"topology": spec["topology"], "ssh": spec["ssh"], "nodes": []}
+    targets = mod.spec_targets(spec)
+    script = mod.python_by_content(str(GPU_IDENTITY_SCRIPT))
+    replies = mod.ssh_each(state, [(t, script, 120) for t in targets])
+    found = {}
+    for t, r in zip(targets, replies):
+        try:
+            if r["rc"] != 0:
+                raise ValueError((r.get("err") or r["out"] or "identity probe failed").strip()[-500:])
+            found[t["ip"]] = json.loads(r["out"].splitlines()[-1])
+        except (ValueError, IndexError) as error:
+            raise RuntimeError(
+                f"GPU identity must be established before E2E policy selection: {t['ip']}: {error}. "
+                "Pass expected_gfx and expected_target explicitly if the nodes cannot run rocminfo."
+            ) from error
+    keys = ("gfx", "target", "marketing_name", "physical_cu_count")
+    if len({json.dumps([v.get(k) for k in keys]) for v in found.values()}) > 1:
+        raise RuntimeError("the pinned machines have different GPUs: " + "; ".join(
+            f"{ip} {[v.get(k) for k in keys]}" for ip, v in found.items()))
+    return next(iter(found.values()))
+
+
 def _expected_gpu_identity(h: dict) -> dict[str, Any]:
     """Resolve policy identity before the workflow chooses backend or knowledge.
 
     A caller may explicitly pin the expected ISA/product. Otherwise the shared
     structured rocminfo parser establishes both. A bare gfx1201 remains product
     `unknown`; exact R9700 and R9600D detection produces the corresponding
-    product target without establishing serving-policy qualification.
+    product target without establishing serving-policy qualification. A bare
+    gfx1100 is refused: only the exact Radeon Pro W7900 (`w7900`) runs on it,
+    and an explicit `w7900` must agree with the probe whenever one is available.
     """
     explicit_gfx = str(h.get("expected_gfx") or "").strip().lower()
     explicit_target = str(h.get("expected_target") or "").strip().lower()
@@ -595,52 +823,65 @@ def _expected_gpu_identity(h: dict) -> dict[str, Any]:
             )
         if not re.fullmatch(r"gfx[0-9a-f]+", explicit_gfx):
             raise ValueError(f"invalid expected_gfx: {explicit_gfx!r}")
-        if explicit_target not in RDNA4_SERVING_PRODUCTS | {"unknown"}:
+        if explicit_target not in RDNA4_SERVING_PRODUCTS | {"w7900", "unknown"}:
             raise ValueError(
-                "expected_target must be 'r9700', 'r9600d' or 'unknown'"
+                "expected_target must be 'r9700', 'r9600d' or 'unknown', "
+                "or 'w7900' with expected_gfx=gfx1100"
             )
-        if explicit_target in RDNA4_SERVING_PRODUCTS and explicit_gfx != "gfx1201":
-            raise ValueError(f"expected_target={explicit_target} requires expected_gfx=gfx1201")
-        return {
+        required_gfx = _TARGET_GFX.get(explicit_target)
+        if required_gfx and explicit_gfx != required_gfx:
+            raise ValueError(
+                f"expected_target={explicit_target} requires expected_gfx={required_gfx}"
+            )
+        required_target = _PRODUCT_REQUIRED_GFX.get(explicit_gfx)
+        if required_target and explicit_target != required_target:
+            raise ValueError(
+                f"expected_gfx={explicit_gfx} requires expected_target={required_target}: "
+                f"no other {explicit_gfx} product is validated"
+            )
+        identity = {
             "gfx": explicit_gfx,
             "target": explicit_target,
             "marketing_name": str(h.get("expected_device_name") or ""),
             "physical_cu_count": int(h.get("expected_physical_cu_count") or 0),
         }
-
-    env_identity = os.environ.get("GEAK_GPU_IDENTITY_JSON", "").strip()
-    if env_identity:
-        try:
-            identity = json.loads(env_identity)
-        except json.JSONDecodeError as error:
-            raise ValueError("GEAK_GPU_IDENTITY_JSON is not valid JSON") from error
-    else:
-        proc = subprocess.run(
-            [sys.executable, str(GPU_IDENTITY_SCRIPT)],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if proc.returncode != 0:
-            detail = (proc.stderr or proc.stdout or "identity probe failed").strip()
-            raise RuntimeError(
-                "GPU identity must be established before E2E policy selection: "
-                f"{detail}. Pass expected_gfx and expected_target explicitly if "
-                "this host cannot run rocminfo."
+        if explicit_target == "w7900" and (
+            os.environ.get("GEAK_GPU_IDENTITY_JSON", "").strip() or _rocminfo_available()
+        ):
+            probed = _validated_probe_identity(_probe_gpu_identity())
+            if (probed["gfx"], probed["target"]) != (explicit_gfx, explicit_target):
+                raise RuntimeError(
+                    f"expected_target={explicit_target} on {explicit_gfx} does not match "
+                    f"the detected GPU: {probed['target']} on {probed['gfx']} "
+                    f"({probed['marketing_name'] or 'unnamed'})"
+                )
+            identity["marketing_name"] = identity["marketing_name"] or probed["marketing_name"]
+            identity["physical_cu_count"] = (
+                identity["physical_cu_count"] or probed["physical_cu_count"]
             )
-        try:
-            identity = json.loads(proc.stdout)
-        except json.JSONDecodeError as error:
-            raise RuntimeError("GPU identity probe returned invalid JSON") from error
+        return identity
 
+    if _multinode(h) and not os.environ.get("GEAK_GPU_IDENTITY_JSON", "").strip():
+        return _validated_probe_identity(_multinode_gpu_identity(h))
+    return _validated_probe_identity(_probe_gpu_identity())
+
+
+def _validated_probe_identity(identity: dict) -> dict[str, Any]:
     gfx = str(identity.get("gfx") or "").strip().lower()
     target = str(identity.get("target") or "unknown").strip().lower()
     if not re.fullmatch(r"gfx[0-9a-f]+", gfx):
         raise RuntimeError(f"GPU identity probe returned invalid gfx: {gfx!r}")
-    if target not in RDNA4_SERVING_PRODUCTS | {"unknown"}:
+    if target not in RDNA4_SERVING_PRODUCTS | {"w7900", "unknown"}:
         raise RuntimeError(f"GPU identity probe returned invalid target: {target!r}")
-    if target in RDNA4_SERVING_PRODUCTS and gfx != "gfx1201":
-        raise RuntimeError(f"GPU identity probe returned {target} on a non-gfx1201 ISA")
+    required_gfx = _TARGET_GFX.get(target)
+    if required_gfx and gfx != required_gfx:
+        raise RuntimeError(f"GPU identity probe returned {target} on a non-{required_gfx} ISA")
+    required_target = _PRODUCT_REQUIRED_GFX.get(gfx)
+    if required_target and target != required_target:
+        raise RuntimeError(
+            f"GPU identity probe returned {gfx} with product {target}, not "
+            f"{required_target}: no other {gfx} product is validated"
+        )
     return {
         "gfx": gfx,
         "target": target,
@@ -789,15 +1030,19 @@ def map_args(
             dict.fromkeys(part for part in overlay_parts if part)
         )
     # gpu_ids is the optimization-parallelism pool AND the serving device set.
-    # Default to 0..tp-1 so serving honours the requested tensor-parallel size.
-    gpu_ids = h.get("gpu_ids") or ",".join(str(i) for i in range(max(tp, 1)))
+    # Default to 0..tp-1 so serving honours the requested tensor-parallel size;
+    # across nodes it is the cards of each pinned machine (reached over mn.py exec).
+    layout = _rank_layout(h)
+    gpu_ids = h.get("gpu_ids") or ",".join(
+        str(i) for i in range(max(layout[0]["gpus"] if layout else tp, 1))
+    )
     target_isl, target_osl, shape_provenance = _targeting_shape(h)
     ps_args = {
         "model_path": h["model_path"],
         "workflow_dir": str(E2E_DIR),
         "backend": h.get("framework") or (
             "vllm" if gpu_identity and (
-                gpu_identity["target"] in RDNA4_SERVING_PRODUCTS
+                gpu_identity["target"] in RDNA4_SERVING_PRODUCTS | {"w7900"}
                 or VLLM_ONLY_ISA_RE.fullmatch(gpu_identity["gfx"])
             ) else "sglang"
         ),
@@ -856,6 +1101,15 @@ def map_args(
         "apply_to_original": "true",
         "exp_root": h["exp_root"],
     }
+    # PD: a stack accepted on ONE engine seeds that engine alone.
+    pd = _multinode(h).get("topology") == "pd_disagg"
+    for src, dst in (("accepted_flags_by_role", "initial_extra_server_args_by_role"),
+                     ("accepted_env_by_role", "initial_extra_env_by_role")):
+        by_role = h.get(src) if pd else None
+        if isinstance(by_role, dict):
+            seeded = {r: str(by_role.get(r) or "").strip() for r in ("prefill", "decode")}
+            if any(seeded.values()):
+                ps_args[dst] = seeded
     if gpu_identity is not None:
         ps_args.update({
             "expected_gfx": gpu_identity["gfx"],
@@ -865,6 +1119,12 @@ def map_args(
         })
     else:
         ps_args["gpu_identity_status"] = "unavailable_dry_run"
+    # The operator's declared amdgpu performance level. GEAK cannot read it itself:
+    # the sysfs getter fails (EBUSY or EPERM, by driver) while the card is
+    # runtime-suspended. Absent => omitted, so handoffs without it map to the same args.
+    perf_level = str(h.get("gpu_perf_level") or "").strip().lower()
+    if perf_level:
+        ps_args["gpu_perf_level"] = perf_level
     # Launch identity for the execution tracker. A nonce allocated HERE -- before
     # the workflow is invoked -- is unique by construction, so the runtime records
     # it in the run's own args and the tracker can join THIS launch. Argument
@@ -911,6 +1171,12 @@ def map_args(
     agent_timeout_ms = _int_or_none(os.environ.get("GEAK_AGENT_TIMEOUT_MS"), "GEAK_AGENT_TIMEOUT_MS")
     if agent_timeout_ms is not None:
         ps_args["agent_timeout_ms"] = agent_timeout_ms
+    # The kernel lane has its own per-agent guard (JS default 3h). A prepared extract UT can take
+    # 20-40 min per run, so a verify on a heavy kernel can need more than 60min (GEAK #606).
+    lane_agent_timeout_ms = _int_or_none(
+        os.environ.get("GEAK_LANE_AGENT_TIMEOUT_MS"), "GEAK_LANE_AGENT_TIMEOUT_MS")
+    if lane_agent_timeout_ms is not None:
+        ps_args["lane_agent_timeout_ms"] = lane_agent_timeout_ms
     if os.environ.get("GEAK_AGENT_TIMEOUT_RETRY", "").strip():
         ps_args["agent_timeout_retry"] = (
             "true" if _as_bool(os.environ["GEAK_AGENT_TIMEOUT_RETRY"]) else "false")
@@ -1049,6 +1315,8 @@ def map_args(
         not_after=artifact_cutoff_ts,
     )
     tl_paths = {k: v for k, v in tl.items() if k != "search_root" and v}
+    if _node_state():
+        tl_paths = _node_state_tracelens(_node_state(), tl_paths)
     if tl_paths:
         ps_args["tracelens"] = tl_paths
     # --- ROUTING master switch (PR #574 review: amd-ethany) -------------------
@@ -1114,6 +1382,10 @@ def map_args(
         ps_args["optimizer"] = "evo"
         if h.get("evolution_source_paths") is not None:
             ps_args["evolution_source_paths"] = source_paths
+    # The caller owns the cluster; _multinode_check hands this block to `mn.py check`, which writes the pin.
+    multinode = _multinode(h)
+    if multinode:
+        ps_args["multinode"] = multinode
     return ps_args
 
 
@@ -1188,6 +1460,63 @@ def _find_latest_artifact(
     if not candidates:
         return None
     return max(candidates, key=lambda item: (item[0], item[1]))[1]
+
+
+_RANK0_TRACE_RE = re.compile(r"(rank|TP-)0(?!\d)")
+
+
+def _rank0_trace(engine_dir: str) -> str | None:
+    """The engine's TP-0 serving trace at the top of its directory (capture_traces/ is warmup)."""
+    names = sorted(n for n in os.listdir(engine_dir)
+                   if n.endswith((".json", ".json.gz")) and os.path.isfile(os.path.join(engine_dir, n)))
+    return next((os.path.join(engine_dir, n) for n in names if _RANK0_TRACE_RE.search(n)), None)
+
+
+def _node_state_tracelens(doc: dict, tl_paths: dict) -> dict:
+    """The caller's first-round profile (MULTI_NODE_STATE profile_trace) in place of the glob's
+    trace_file: it names exactly that profile, so no glob fallback and no cutoff. pd_disagg traces
+    sit in one <role> directory, or one <podIP>_<role> directory per engine pod; their rank0
+    traces become trace_files.
+    A role without any drops analysis_md too: annotating the merged analysis against the other
+    role's traces alone would mark this role's kernels unresolved, and the head refuses those."""
+    root = str(doc.get("profile_trace") or "").strip()
+    if not root:
+        return tl_paths
+    out = {k: v for k, v in tl_paths.items() if k != "trace_file"}
+    if not os.path.isdir(root):
+        sys.stderr.write(f"note: MULTI_NODE_STATE profile_trace {root} does not exist; GEAK profiles on its own\n")
+        return out
+    out["trace_file"] = root
+    if str(doc.get("pd_mode") or "").strip().lower() != "disaggregated":
+        return out
+    pods = {(str(p.get("podIP")), p.get("role")) for p in doc.get("pods") or []
+            if isinstance(p, dict) and p.get("role") in ("prefill", "decode")}
+    found = {}
+    for name in sorted(os.listdir(root)):
+        sub = os.path.join(root, name)
+        if not os.path.isdir(sub):
+            continue
+        ip, _, role = name.rpartition("_")
+        if (ip, role) not in pods and name not in ("prefill", "decode"):
+            sys.stderr.write(f"note: {sub} names no engine pod of MULTI_NODE_STATE; ignored\n")
+            continue
+        trace = _rank0_trace(sub)
+        if trace:
+            found[trace] = role
+        else:
+            sys.stderr.write(f"note: {sub} has no rank0 trace at its top level\n")
+    steady = str(doc.get("steady_state_trace") or "").strip()
+    traces = sorted(found, key=lambda t: t != steady)
+    if steady and steady not in found and os.path.isfile(steady):
+        traces.insert(0, steady)
+    missing = sorted({r for _, r in pods} - set(found.values()))
+    if missing:
+        sys.stderr.write(f"note: profile_trace has no trace for the {missing} engine(s); the merged "
+                         "analysis.md cannot be checked against them, so GEAK profiles on its own\n")
+        out.pop("analysis_md", None)
+        return out
+    out["trace_files"] = traces
+    return out
 
 
 def resolve_tracelens_report(
@@ -1327,6 +1656,15 @@ def apply_bench_client(h: dict) -> str:
         client = AGENTX_BENCH_CLIENT
     os.environ["BENCH_CLIENT"] = client
     return client
+
+
+def bench_client_host() -> dict:
+    """``result.json``'s ``bench_client_host`` on a multinode run, else {}: only the backend's own
+    client, which imports the serving framework, runs on rank0 (adapters/launchers/multinode.sh)."""
+    if os.environ.get("BENCH_LAUNCHER", "") != "multinode":
+        return {}
+    client = os.environ.get("BENCH_CLIENT", "native").strip().lower()
+    return {"bench_client_host": "rank0" if client == "native" else "driver"}
 
 
 # metric_basis -> the E2E_METRIC bench_summarize.py measures it under. The two
@@ -2044,6 +2382,50 @@ def _magpie_script_from_recipe(h: dict) -> str:
     return ""
 
 
+_DRIVER_SMI = ("rocm-smi", "amd-smi", "rocminfo", "nvidia-smi")
+
+
+def _exec_dir(name: str) -> Path | None:
+    """A writable `name` directory on a mount that may execute: PATH lookup skips a stub on a
+    noexec mount (a container's TMPDIR=/dev/shm) and runs the real tool behind it."""
+    statvfs, noexec = getattr(os, "statvfs", None), getattr(os, "ST_NOEXEC", 8)
+    for base in dict.fromkeys((tempfile.gettempdir(), "/tmp", "/var/tmp", os.path.expanduser("~/.cache"))):
+        d = Path(base) / name
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            if statvfs is None or not statvfs(d).f_flag & noexec:
+                return d
+        except OSError:
+            continue
+    return None
+
+
+def _shadow_driver_smi(state: str) -> None:
+    """Put stubs for the GPU-inventory tools first on PATH. They read the device nodes, not the
+    masks, so on a driver that has GPUs they report cards no engine of this run is on; an agent
+    then reads another job's VRAM as its own. The stub names the forwarded command instead.
+    mn.py drops this dir from the PATH a node's shell gets, so a node that is this machine
+    keeps the real tools too."""
+    prefix = _mn_module().DRIVER_BIN_PREFIX
+    d = _exec_dir(f"{prefix}{hashlib.sha1(state.encode()).hexdigest()[:12]}")
+    if d is None:
+        sys.stderr.write("!!! multinode: no writable directory here may execute files; the driver's "
+                         f"{', '.join(_DRIVER_SMI)} are not shadowed\n")
+        return
+    exec_cmd = (f"GEAK_MN_STATE={shlex.quote(state)} python3 "
+                f"{shlex.quote(str(GEAK_ROOT / 'e2e_workflow' / 'scripts' / 'multi_node' / 'mn.py'))} exec")
+    for tool in _DRIVER_SMI:
+        stub = d / tool
+        stub.write_text(
+            "#!/bin/sh\ncat >&2 <<EOF\n"
+            f"!!! {tool}: this is the multinode driver; its GPUs are not this run's. Run it on a node:\n"
+            f"    {exec_cmd} --target <master|rank<N>|prefill|decode> -- {tool} $*\n"
+            "EOF\nexit 1\n", encoding="utf-8")
+        stub.chmod(0o755)
+    path = os.environ.get("PATH", "").split(os.pathsep)
+    os.environ["PATH"] = os.pathsep.join([str(d)] + [p for p in path if p != str(d)])
+
+
 def apply_bench_launcher(h: dict, backend: str | None = None) -> str:
     """Align the SERVER LAUNCH recipe with the external orchestrator (Magpie).
 
@@ -2103,7 +2485,29 @@ def apply_bench_launcher(h: dict, backend: str | None = None) -> str:
         os.environ["MAGPIE_LAUNCH_SCRIPT"] = script
         os.environ["MAGPIE_LAUNCH_SCRIPT_SOURCE"] = source
 
-    if requested and requested != "auto":
+    mn = _multinode(h)
+    provided = any(isinstance(n, dict) and n.get("launch_command") for n in mn.get("nodes") or [])
+    if not mn:
+        # Only MULTI_NODE_STATE makes a run multinode. An inherited pin would send this host's
+        # serving legs (bench_e2e.sh) and kernel GPU commands (gpu_lock.sh) to its nodes.
+        stray = os.environ.pop("GEAK_MN_STATE", None)
+        if stray:
+            sys.stderr.write(f"note: ignoring inherited GEAK_MN_STATE={stray}: no MULTI_NODE_STATE, "
+                             "this run serves on this host\n")
+        if requested == "multinode":
+            raise SystemExit("!!! BENCH_LAUNCHER=multinode needs MULTI_NODE_STATE (the caller's node_state.json)")
+    if mn:
+        # Every server starts on the pinned nodes (each pod's launch_command, wrapped per node
+        # for magpie). GEAK_MN_STATE is the pin: bench_e2e.sh, gpu_lock.sh and
+        # profile_kernel.sh are multinode only through it.
+        launcher = "multinode"
+        os.environ["GEAK_MN_STATE"] = _mn_spec(h)["state"]
+        # This machine drives the nodes and serves nothing: no GPU command may land on a card
+        # here, and mn.py check refuses a driver that still sees one.
+        for mask in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+            os.environ[mask] = ""
+        _shadow_driver_smi(os.environ["GEAK_MN_STATE"])
+    elif requested and requested != "auto":
         launcher = requested
     elif script and backend in _MAGPIE_BACKENDS:
         launcher = "magpie"
@@ -2134,7 +2538,7 @@ def apply_bench_launcher(h: dict, backend: str | None = None) -> str:
     # gpu-mem-util is deliberately NOT synthesized from a GEAK default here:
     # the recipe script and its recorded EXTRA_<BACKEND>_ARGS are the source of
     # truth (vLLM and ATOM do not necessarily share the same default).
-    if launcher == "magpie":
+    if launcher == "magpie" or provided:
         replay, owned = _recipe_launch_env(h)
         _export_recipe_env(h, replay, owned, source)
 
@@ -4598,6 +5002,7 @@ def normalize_result(h: dict, wf: dict) -> dict:
         "workload_comparability": workload_comparability,
         # Measurement-protocol provenance so the comparison is self-describing.
         "bench_client": os.environ.get("BENCH_CLIENT", "native"),
+        **bench_client_host(),
         "bench_protocol": h.get("bench_protocol") or {},
         "baseline_config": {
             "accepted_flags": h.get("accepted_flags", "") or "",
@@ -4898,6 +5303,8 @@ def normalize_result(h: dict, wf: dict) -> dict:
         # client to Hyperloom/Magpie (benchmark_serving.py); "native" => the
         # backend's own client (small cross-harness differences may remain).
         "bench_client": os.environ.get("BENCH_CLIENT", "native"),
+        # Multinode only: "driver" (where GEAK runs, as Hyperloom's rebench) or "rank0" (native).
+        **bench_client_host(),
         # Measurement protocol forwarded from the handoff, surfaced at TOP LEVEL
         # (not only inside baseline_basis) so a sweep/validated reuse can pin the
         # SAME num_prompts / random_range_ratio / num_warmups / seed the headline
@@ -8266,7 +8673,6 @@ def main(argv: list[str]) -> int:
     if not h:
         sys.stderr.write(f"empty/invalid handoff: {handoff_path}\n")
         return 2
-
     try:
         artifact_cutoff_ts = handoff_path.stat().st_mtime
     except OSError:
@@ -8422,7 +8828,14 @@ def main(argv: list[str]) -> int:
             except Exception:
                 wf = None
         try:
-            if wf is not None:
+            if wf is not None and (wf.get("multinode_check") or {}).get("verdict") == "refused":
+                # Setup stopped before any measurement: there is nothing to normalize. The pinned
+                # machines were refused (no free VRAM, ports bound, unreachable); the caller gets the reasons.
+                out = {"schema_version": SCHEMA_VERSION, "status": "error",
+                       "error_class": "multinode_check_refused",
+                       "error": "mn.py check refused the machines: " + "; ".join(
+                           map(str, wf["multinode_check"].get("problems") or []))}
+            elif wf is not None:
                 out = normalize_result(h, wf)
                 if wf.get("recovered_from_disk"):
                     out["recovered_from_disk"] = True
@@ -8449,6 +8862,9 @@ def main(argv: list[str]) -> int:
                 "error_class": "normalize_failed",
                 "error": f"{type(norm_exc).__name__}: {norm_exc}",
             }
+        check = (wf or {}).get("multinode_check")
+        if isinstance(check, dict):
+            out["multinode_check"] = check
         # kernel_journey.json is a GUARANTEED interface file too (same contract as
         # result.json). Resolve eval_dir even on the error path (eval_dir_hint is
         # this run's pinned dir) so the journey always has a home, persist the
@@ -8596,6 +9012,19 @@ def main(argv: list[str]) -> int:
                           "result_json": str(result_path),
                           "speedup": refused.get("throughput_speedup")}))
         return 0 if refused.get("status") != "error" else 1
+
+    if _multinode_block(ps_args):
+        check = _multinode_check(ps_args)
+        if check.get("verdict") != "ok":
+            out = _emit(wf={"multinode_check": check})
+            print(json.dumps({"status": out.get("status"), "result_json": str(result_path),
+                              "speedup": None}))
+            return 1
+        ps_args["multinode_check"] = {**check, **({"spec": _mn_relayed(check["spec"])} if check.get("spec") else {})}
+        for holder in (ps_args, ps_args.get("state") or {}):
+            if isinstance(holder.get("multinode"), dict):
+                holder["multinode"] = _mn_relayed(holder["multinode"])
+        prompt = build_prompt(ps_args)
 
     out: dict = {}
     wf: dict | None = None

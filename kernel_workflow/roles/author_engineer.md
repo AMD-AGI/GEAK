@@ -78,7 +78,10 @@ Read, as reference, before writing:
     `BLOCK_N=32` are provisional search hints only; include alternatives in the
     same on-box autotune.
     Do not use Instinct MFMA tiles, FNUZ, or gfx950 MX.
-  - **gfx11* (RDNA3.5 client):** read `SKILL_DIR/knowledge/amd_ryzen.md` for the matrix ISA and the
+  - **gfx1100 (RDNA3, Radeon Pro W7900 only):** read `SKILL_DIR/knowledge/amd_rdna3.md`. Wave
+    **32**, gfx11 **WMMA** (`_w32` builtins, A/B replicated across half-waves) with FP16, BF16
+    and INT8 inputs (INT4 is not validated), 64 KiB LDS per workgroup.
+  - **gfx115x (RDNA3.5 APU):** read `SKILL_DIR/knowledge/amd_ryzen.md` for the matrix ISA and the
     dtypes it supports.
   - **gfx942 / gfx950 (Instinct):** read `SKILL_DIR/knowledge/amd_instinct.md` §3 for the
     arch-specific fp8 format + MFMA shapes — **fp8 is FNUZ on gfx942 (CDNA3) but OCP on gfx950
@@ -117,7 +120,10 @@ Read, as reference, before writing:
 
 ## Workflow
 1. **Read the immutable unittest** to learn the exact entry-point signature, dtypes, and how it builds
-   inputs / checks output. This is your interface contract.
+   inputs / checks output. This is your interface contract. In a generated task (`unittest.py` starts
+   with `# GEAK-GENERATED unittest.py` and only runs `ut_runner.py`) the test is the immutable
+   `cases.py` + `meta.json` (`meta.target_callable` and `meta.candidate_bind` name the entry point):
+   read those.
 2. **Write the implementation** in `WORKSPACE/kernel_src/` (a single focused file is fine for the
    first cut; e.g. `kernel_src/<op>_<lang>.py` for triton, or `.hip`/`.cpp` + a thin python binding for
    hip/ck). Use the knowledge-base skeleton for the language + op. Keep it simple and correct.

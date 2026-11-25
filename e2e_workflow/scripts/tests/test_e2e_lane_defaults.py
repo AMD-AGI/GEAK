@@ -53,7 +53,7 @@ check("gfx1201 disables the E2E learned-card corpus",
 check("RDNA4 matrix-core guidance is WMMA, not hard-coded MFMA",
       "const MATRIX_CORE_NAME = GPU_FAMILY.matrixCore" in s
       and "one fp8 MFMA" not in s,
-      "R9700-reachable task strings must use MATRIX_CORE_NAME")
+      "R9700- and W7900-reachable task strings must use MATRIX_CORE_NAME")
 
 # Every lane invocation must go through it. Two shapes exist: the bounded wrappers, which inject
 # internally, and raw `workflow(...)` calls, which must wrap their args explicitly.

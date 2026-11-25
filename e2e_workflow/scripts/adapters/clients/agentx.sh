@@ -13,6 +13,10 @@
 # Requires: aiperf on PATH (or AIPERF_BIN), INFERENCEX_PATH with map_aiperf.py
 # deployed under benchmarks/ (Hyperloom's AgentX runtime copies it there).
 
+# Resolved at source time: a launcher that re-declares adapter_bench through eval
+# (multinode.sh) moves BASH_SOURCE inside the function to the launcher's own file.
+_AGENTX_ADAPTER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # _agentx_duration — the measured window for THIS leg.
 # Shared by the bench and by the profile-window placement below so the two can
 # never disagree about how long the replay actually runs.
@@ -97,7 +101,7 @@ adapter_bench() {
   for cand in \
     "${ix_root:+${ix_root}/benchmarks/map_aiperf.py}" \
     "${ix_root:+${ix_root}/assets/agentx/map_aiperf.py}" \
-    "${BASH_SOURCE[0]%/*}/map_aiperf.py"; do
+    "${_AGENTX_ADAPTER_DIR}/map_aiperf.py"; do
     [ -n "$cand" ] && [ -f "$cand" ] && { mapper="$cand"; break; }
   done
   if [ -z "$mapper" ]; then

@@ -1,0 +1,20 @@
+{
+  "kernel_path": "kernel",
+  "exp_root": "runs",
+  "avo_language_level": "source",
+  "target_language": "flydsl",
+  "budget_s": 1800,
+  "final_phase_reserve_s": 300,
+  "gpu_ids": "0",
+  "operator": "team",
+  "operator_directions": 2,
+  "start_policy": "diverse",
+  "start_k": 2,
+  "escalate_workers": 2,
+  "min_commits": 1,
+  "max_steps": 4,
+  "verify_repeats": 3,
+  "apply_to_original": "false",
+  "use_profiling": "true",
+  "task": "Optimize the FlyDSL-capable gemm_a16_w16 dispatch for MI300X/gfx942. Preserve c2/c32/c64 correctness. Source the environment named by AVO_FLYDSL_ENV before GPU commands."
+}

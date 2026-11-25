@@ -26,9 +26,10 @@
 
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve as resolvePath } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { cpus } from 'node:os';
 import { extractJson, validate, schemaInstruction } from './schema.mjs';
-import { defaultConcurrency } from './backends/base.mjs';
+import { defaultConcurrency, spawnAgent } from './backends/base.mjs';
 import { loadRegistry, resolveSelection, neutralizeForBackend } from './config.mjs';
 import { makeGenericBackend } from './backends/generic.mjs';
 
@@ -181,6 +182,40 @@ export function createRuntime({
       sem.release();
     }
   }
+
+  // Optional host capability, feature-detected by kernel_lane.js. Cleanup must
+  // not acquire sem: the agent whose guard expired still owns that slot. Run a
+  // fixed repo script directly, without another model or arbitrary shell code.
+  // Keep concurrent requests for the same lane from stopping each other's reaper.
+  const laneStops = new Map();
+  agent.stopLaneWork = (evalDir, reason = '') => {
+    if (typeof evalDir !== 'string' || !evalDir.trim()) {
+      return Promise.reject(new Error('lane stop requires an eval directory'));
+    }
+    const dir = resolvePath(evalDir);
+    if (laneStops.has(dir)) return laneStops.get(dir);
+    const pending = (async () => {
+      const script = fileURLToPath(new URL('../../../kernel_workflow/scripts/stop_lane_work.py', import.meta.url));
+      const { stdout, stderr, code } = await spawnAgent({
+        cmd: 'python3',
+        args: [script, '--eval-dir', dir, '--block', `--reason=${String(reason)}`, '--grace', '10'],
+        cwd: '/',
+        promptOnStdin: false,
+        timeoutMs: 120000,
+      });
+      if (code !== 0 && code !== 1) {
+        throw new Error(`lane stop failed (exit ${code}): ${stderr.trim().slice(-400)}`);
+      }
+      const receipt = JSON.parse(stdout);
+      if (typeof receipt.ok !== 'boolean' || typeof receipt.blocked !== 'boolean'
+          || !Array.isArray(receipt.stopped) || !Array.isArray(receipt.survivors)) {
+        throw new Error('lane stop returned an invalid receipt');
+      }
+      return receipt; // Exit 1 is a valid receipt reporting survivors.
+    })().finally(() => laneStops.delete(dir));
+    laneStops.set(dir, pending);
+    return pending;
+  };
 
   // ---- parallel() : barrier; a throwing thunk resolves to null ------------
   async function parallel(thunks) {

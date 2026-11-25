@@ -3,6 +3,8 @@
 A deterministic **Workflow** (JS-orchestrated multi-agent pipeline) that raises the **sglang/vllm/ATOM
 serving throughput** of an LLM on AMD Instinct MI GPUs and the validated Radeon AI PRO R9700
 (gfx1201, vLLM or SGLang only). Generic gfx1201 is an ISA identity, not a supported serving product.
+The Radeon Pro W7900 (gfx1100, target `w7900`) is vLLM-only, with product-scoped roofline peaks
+that have no BF16, FP8 or INT4 entry; any other gfx1100 board is refused.
 It is a *system layer* built on top of — and recursively
 calling — the UNCHANGED single-kernel `kernel_workflow` (`../kernel_workflow/`). The single-kernel workflow's
 quality is preserved verbatim; this layer adds everything above the kernel: profiling a running
@@ -71,6 +73,9 @@ ATOM profiling is configured through `--torch-profiler-dir` at server launch and
 finalize and writes `atom_profile_manifest.json`. A missing or incomplete manifest is a failed ATOM
 profile rather than permission to continue with a partial rank-0 trace.
 
+Who starts the server is a separate choice: `BENCH_LAUNCHER=native`, `magpie` or `multinode`
+(one server across machines; see [`docs/multi_node.md`](docs/multi_node.md)).
+
 ## The three backend dimensions (per spec)
 A kernel's backend can be changed from three places, in increasing cost (knob names are backend-
 specific — see `perf_knowledge/backends/<backend>/` + `perf_knowledge/reference/env_vars.md`, as
@@ -124,8 +129,8 @@ Workflow({
     model_path: "/path/to/model",                    // REQUIRED for e2e mode (no default)
     workflow_dir: "<E2E_DIR>",                       // REQUIRED: this folder
     expected_gfx: "gfx950",                          // REQUIRED direct E2E identity
-    expected_target: "unknown",                      // REQUIRED: r9700|r9600d|unknown; gfx1201 never implies a product
-    backend: "sglang",                               // optional: sglang|vllm|atom (selects scripts/adapters/<backend>.sh) on Instinct (default sglang); R9700 is vllm or sglang only; R9600D and gfx115x are vllm-only (default vllm)
+    expected_target: "unknown",                      // REQUIRED: r9700|r9600d|w7900|unknown; gfx1201 never implies a product; gfx1100 requires w7900
+    backend: "sglang",                               // optional: sglang|vllm|atom (selects scripts/adapters/<backend>.sh) on Instinct (default sglang); R9700 and R9600D are vllm or sglang only (default vllm); gfx115x and W7900 are vllm-only (default vllm)
     launch_script: "<...>/launch.sh",                // optional; else the stack's default config
     kernel_workflow_dir: "<...>/workflows",          // optional; default = sibling kernel_workflow/
     budget: 4,            // max kernel-optimization tasks (kernel-layer tasks; config sweep is free)
@@ -390,25 +395,26 @@ it as described below. Full contract:
 ## AgentX kernel extraction and UT delivery
 
 An explicit `workload_kind: "agentx_trace_replay"` (or matching workload specification)
-activates the [kernel-extract skill](knowledge/kernel_extraction_skills/kernel-extract/SKILL.md).
-The extractor follows the complete procedure: measured baseline logs
-→ observed workload → sampling points → runtime kernel selection → source extraction
-→ standalone GPU UTs. The method comes from the validated standalone skill at `ce1dbe5`. It retains the
-five-stage procedure and the additional sampling, coverage, reference-output and
-self-noise tools. Existing capture, trace, harness, GPU-lock and delivery helpers
-are reused from the repository; their regression tests remain in one place.
+activates two skills, run in order by one extractor:
+[kernel-profile](knowledge/kernel_extraction_skills/kernel-profile/SKILL.md) (measured
+baseline logs → observed workload → sampling points → runtime census, ranking and
+selection → `profile_handoff.json`) and
+[kernel-ut](knowledge/kernel_extraction_skills/kernel-ut/SKILL.md) (task boundaries →
+source extraction → standalone GPU UTs qualified for correctness). Existing trace,
+harness, GPU-lock and delivery helpers are reused from the repository; their regression
+tests remain in one place.
 
-UT inputs default to fixed-seed generators at the observed shapes/dtypes/layouts;
-reference outputs come from the frozen baseline in an isolated process. UT execution
-does not launch serving, profile or capture shapes. Reuse or reliably reconstruct
-routing, indices, page tables and other structural metadata; capture only missing
-state. Necessary captures default to `structure_only`, with reference regeneration
-before validation. An explicit `capture_persist_policy` overrides the fallback
-storage policy; non-AgentX capture defaults are unchanged.
+UT inputs are fixed-seed generators at the handoff's shapes/dtypes/layouts; reference
+outputs come from the frozen baseline in an isolated process and are not persisted.
+UT execution does not launch serving, profile or capture, and extraction persists no
+tensors: routing, indices, page tables and other structural metadata are reused or
+reconstructed, and what cannot be is a reported gap. UT qualification runs
+`unittest.py --validation-mode correctness`; timing legs run in optimization, where
+the bare `unittest.py` measures them. Non-AgentX capture defaults are unchanged.
 
 GEAK supplies baseline/configuration paths, GPU allocation, accepted overlays and
-budgets through the [workflow handoff](knowledge/kernel_extraction_skills/kernel-extract/references/workflow-handoff.md).
-The skill completes scheduled UT work before returning a delivery path. The packaging
+budgets through the [workflow handoff](knowledge/kernel_extraction_skills/kernel-ut/references/workflow-handoff.md).
+The extractor completes scheduled UT work before returning a delivery path. The packaging
 adapter reads each task's saved declaration and return, preserves failed/deferred
 tasks and coverage, and feeds verified tasks into the existing optimization queues.
 It checks source/binding/UT evidence without repeating selection or GPU tests; changes

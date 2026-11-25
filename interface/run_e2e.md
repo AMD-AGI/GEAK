@@ -100,6 +100,7 @@ Env knobs (all optional):
 | `GEAK_NODE_BIN` | node binary for the runtime | `node` |
 | `GEAK_CONCURRENCY` | max concurrent agent subprocesses | `min(16, cpus-2)` |
 | `GEAK_AGENT_TIMEOUT_MS` | per-agent hard timeout | `3600000` |
+| `GEAK_LANE_AGENT_TIMEOUT_MS` | per-agent guard inside each kernel lane (forwarded as the lane's `agent_timeout_ms`) | unset (lane default `10800000`) |
 | `GEAK_SCHEMA_RETRIES` | in-call structured-output retries | `2` |
 | `GEAK_<CLI>_BIN` / `GEAK_<CLI>_MODEL` | per-CLI binary / model override | registry |
 | `GEAK_<CLI>_APPROVE` / `GEAK_<CLI>_EXTRA_ARGS` | auto-approve flag / extra CLI args | registry |
@@ -148,9 +149,10 @@ The fast-path artifacts live under `<exp_root>/geak_e2e_moe_int4/`
   "framework": "sglang",                 // -> backend (sglang|vllm|atom)
   "gpu_type": "MI300X",
   "expected_gfx": "gfx950",              // optional pair; otherwise probed
-  "expected_target": "unknown",          // r9700|r9600d|unknown; supply with expected_gfx
+  "expected_target": "unknown",          // r9700|r9600d|w7900|unknown; supply with expected_gfx
   "expected_device_name": "AMD Instinct MI355X",
   "expected_physical_cu_count": 256,
+  "gpu_perf_level": "auto",              // optional; the operator-declared amdgpu perf level
   "tp": 8,                               // serving tensor-parallel size (honoured, no TP=1 lock)
   "gpu_ids": "0,1,2,3,4,5,6,7",          // optional; default 0..tp-1
   "workload": { "isl": 1024, "osl": 1024, "conc": 64 },
@@ -194,7 +196,7 @@ requires `gfx1201` in explicit and detected identity pairs. The interface
 preserves the product, ISA, device name and CU count in the workflow handoff.
 
 Product identity selects product data, not separate logic. `r9700` and
-`r9600d` share the gfx1201 ISA path (vLLM-only serving, CDNA knowledge
+`r9600d` share the gfx1201 ISA path (vLLM or SGLang serving, CDNA knowledge
 isolation) and differ only in the `product:` block of
 `e2e_workflow/knowledge/analysis_skills/roofline/peaks.md`; the R9600D block
 holds its own datasheet peaks, not R9700's. The default backend is `vllm` for both.
@@ -202,6 +204,28 @@ gfx115x (Strix Halo) has no product key: the ISA alone selects `vllm`, and the w
 other backend. Only a gfx1151 Radeon 8060S has been run; other gfx115x parts get the same policy.
 Unknown gfx1201 products remain `unknown` and keep their existing refusal
 behavior.
+
+`w7900` is emitted only for the exact names `AMD Radeon Pro W7900` and
+`AMD Radeon Pro W7900 Dual Slot` (either "Pro" or "PRO" casing) on `gfx1100`, and it
+requires `expected_gfx=gfx1100`. `gfx1100` with any other target is refused, whether
+it comes from the explicit pair, `GEAK_GPU_IDENTITY_JSON` or the probe. An explicit
+`w7900` pin must also agree with the probe whenever `rocminfo` is available. The
+W7900 defaults to vLLM, uses its own product-scoped roofline peaks (no BF16, FP8
+or INT4 entry), and does not inherit any R9700 calibration.
+
+`gpu_perf_level` declares the amdgpu performance level the operator set on the
+serving cards. GEAK does not read it itself: the sysfs getter fails (`EBUSY` or
+`EPERM`, depending on the driver) while a card is runtime-suspended. The value is
+lower-cased and forwarded as the workflow arg of the same name to every kernel
+lane; when it is absent, nothing is forwarded. Only the W7900 acts on it: gfx1100
+counters read correctly only at
+`profile_standard` (amd-smi `STABLE_STD`), so `profile_standard`, `stable_std` or
+`AMDSMI_DEV_PERF_LEVEL_STABLE_STD` gives a lane with profiling on
+`COUNTER_GUIDANCE=gfx1100-safe-set` and any other value, or none, gives
+`COUNTER_GUIDANCE=unavailable`. Kernel-lane profiling is off by default, and an
+E2E run does not turn it on, so its lanes get `unavailable` whatever the level.
+Even with the safe set, the agents use counters only if the installed Metrix has
+IntelliKit's gfx1100 safe set (`amd_rdna3.md` §4). GEAK never changes the level.
 
 `--dry-run` is host-only: when neither explicit nor environment identity is
 provided it skips rocminfo and reports `gpu_identity_status:
@@ -854,7 +878,8 @@ The serving stack is launched through the selected backend adapter
 selected independently by `BENCH_CLIENT`:
 
 * `native` (default standalone) — each backend's built-in bench
-  (SGLang, vLLM, or ATOM). Small cross-harness差异 may remain.
+  (SGLang, vLLM, or ATOM). Small cross-harness差异 may remain. On a multinode run
+  it is the one client that runs on rank0 rather than the driver.
 * `inferencex` — `adapters/clients/inferencex.sh` redefines `adapter_bench` to
   call **Hyperloom/Magpie's own** `InferenceX/utils/bench_serving/benchmark_serving.py`
   (`--backend vllm --dataset-name random --request-rate inf --ignore-eos
@@ -865,8 +890,10 @@ selected independently by `BENCH_CLIENT`:
 `run_e2e.py` resolves `handoff.bench_client` (`auto` → `inferencex` when an
 InferenceX checkout is discoverable via `INFERENCEX_PATH`, else `native`) and
 exports `BENCH_CLIENT` + `INFERENCEX_PATH` so every `bench_e2e.sh` the agents run
-inherits it. The profile round (server-side trace) always delegates back to the
-backend's native bench. The chosen client is echoed in `result.bench_client`, and
+inherits it. On one host the profile-round fallback (`PROF=1`) delegates back to the
+backend's native bench; on a multinode run it is a fresh load under the launcher's
+window. The chosen client is echoed in `result.bench_client` (on a multinode run,
+where it ran in `result.bench_client_host`: `driver` | `rank0`), and
 the sweep reuse path carries it forward so sweep points use the same client.
 
 ### Server-LAUNCHER adapter (closes the launch-recipe residual)
@@ -925,3 +952,21 @@ the ambient process `PATH` stands. GEAK's own CI entrypoint
 and pins the same value into the patched handoff, so a shipped
 `baseline_config.with_envs.yaml` cannot silently flip the CI server start path
 to magpie.
+
+### Multi-node serving (`MULTI_NODE_STATE`)
+
+When the environment variable `MULTI_NODE_STATE` names a `node_state.json`, the run
+serves one instance on the pods it lists instead of on this host, and the launcher is
+`multinode` regardless of `handoff.bench_launcher`. The file's `backend` must equal
+`handoff.framework`, `service_url` must point at the router pod (or the first engine
+pod without one), and every pod needs `podIP` and `launch_command`; anything else
+stops the run with a `!!! MULTI_NODE_STATE ...` message before a Workflow is
+started.
+
+Before Setup, `run_e2e.py` runs `e2e_workflow/scripts/multi_node/mn.py check` on the
+block: it probes every node over ssh, writes the pin under `shared_fs/pins/`, and
+exports `GEAK_MN_STATE` so every later `bench_e2e.sh` serves from it. A refused check
+returns `error_class: multinode_check_refused` with the problems listed. GPU identity
+is read from the nodes, not the driver. The full contract, the environment reference
+and the failure table are in
+[`e2e_workflow/docs/multi_node.md`](../e2e_workflow/docs/multi_node.md).
