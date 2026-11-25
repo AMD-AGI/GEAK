@@ -4085,6 +4085,7 @@ function normalizeMegaWorkingSnapshot(raw) {
 function sameCommit(a, b) {
   const x = String(a || '').trim().toLowerCase();
   const y = String(b || '').trim().toLowerCase();
+  if (x && x === y) return true;
   if (!/^[0-9a-f]{7,40}$/.test(x) || !/^[0-9a-f]{7,40}$/.test(y)) return false;
   return x.length <= y.length ? y.startsWith(x) : x.startsWith(y);
 }
@@ -4492,7 +4493,7 @@ function megaFinalSelectionVerdict(selection, finalists, opts) {
     else {
       if (String(r.source || '') !== registered.source) fail.push('source mismatch');
       if (String(r.tree || '') !== registered.tree) fail.push('tree mismatch');
-      if (String(r.head || '') !== registered.head) fail.push('head mismatch');
+      if (!sameCommit(r.head, registered.head)) fail.push('head mismatch');
     }
     if (!(Number(r.score) > 1.0)) fail.push('score <= 1.0');
     if (typeof megaFrozenPerCase === 'function' &&
@@ -4739,7 +4740,7 @@ function megaCandidateFromVerification(meta, ver, opts) {
       String(v.activation_confirmed || '').toLowerCase() === 'yes' &&
       String(v.activation_on_hardware || '').toLowerCase() === 'yes',
     head_pass: !!String(meta && meta.head || '') &&
-      String(v.candidate_head || '') === String(meta && meta.head || ''),
+      sameCommit(v.candidate_head, meta && meta.head),
     launch_pass: launchPass,
     liveness_pass: livenessPass && Number(v.replay_count || 0) >= Number(o.requiredReplays || 30),
     graph_pass: String(v.graph_safe || '').toLowerCase() === 'pass',
@@ -7272,9 +7273,8 @@ async function megaFinish() {
     validation.final_patch_verified === true &&
     (APPLY_TO_ORIGINAL !== 'true' ||
       String(validation.applied_to_original || '').toLowerCase() === 'true') &&
-    String(validation.selected_source_head || '') === String(finalWinner && finalWinner.source_head || '') &&
-    String(validation.selected_materialized_head || '') ===
-      String(finalWinner && finalWinner.materialized_head || '') &&
+    sameCommit(validation.selected_source_head, finalWinner && finalWinner.source_head) &&
+    sameCommit(validation.selected_materialized_head, finalWinner && finalWinner.materialized_head) &&
     finalGuards && finalGuards.regression_pass !== false;
   mega_deliverable = !!(megaSelection && megaSelection.claim_complete === true &&
     megaSelectionContractPassed && finalWinner && correctnessClean && Number.isFinite(finalPrimary) &&
