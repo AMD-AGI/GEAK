@@ -265,10 +265,12 @@ def numeric_task(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "BUILD_DIR", str(task / "build"))
     for var in mod._ARCH_ENV_VARS:
         monkeypatch.delenv(var, raising=False)
+    import ep_abi
     meta = {"op": "k", "arch": "gfx1151", "kernel_file": "k.hip", "numeric_test": "test_k.py",
             "numeric": {"ep_repo": str(ep), "kernel_dst": str(kdst), "ep_dll": str(dll),
                         "kernel_lib": str(klib),
-                        "build_cmd": f"cp '{kdst}' '{klib}'"}}
+                        "build_cmd": f"cp '{kdst}' '{klib}'"},
+            "abi": ep_abi.manifest("CANDIDATE\n", required_includes=())}
     return meta, task, kdst, dll
 
 
@@ -277,6 +279,16 @@ def test_numeric_compile_requires_build_cmd(numeric_task):
     meta["numeric"]["build_cmd"] = ""
     ok, err = mod.numeric_compile(meta)
     assert not ok and "build_cmd" in err
+
+
+def test_numeric_compile_requires_an_abi_manifest(numeric_task):
+    meta, task, kdst, _ = numeric_task
+    del meta["abi"]
+    meta["numeric"]["build_cmd"] = "echo must-not-build; false"
+    ok, err = mod.numeric_compile(meta)
+    assert not ok and "no ABI manifest" in err and "gen_ep_task.py" in err
+    assert kdst.read_text() == "ORIGINAL\n"
+    assert not (task / "build" / "ep").exists()
 
 
 def test_numeric_compile_snapshots_ep_dir_with_rebuilt_kernel_lib(numeric_task):
@@ -294,7 +306,7 @@ def test_numeric_compile_snapshots_ep_dir_with_rebuilt_kernel_lib(numeric_task):
     assert not os.path.exists(mod._kernel_backup_path(str(kdst)))
 
 
-def test_numeric_compile_undoes_an_overlay_a_killed_compile_left(numeric_task):
+def test_numeric_compile_undoes_an_overlay_a_killed_compile_left(numeric_task, capsys):
     # A compile killed mid-build (SIGKILL) leaves its candidate in the EP tree
     # and the tree's own kernel in the backup.
     meta, task, kdst, _ = numeric_task
@@ -306,6 +318,7 @@ def test_numeric_compile_undoes_an_overlay_a_killed_compile_left(numeric_task):
     assert (task / "build" / "ep" / "libkernels.so").read_text() == "CANDIDATE\n"
     assert kdst.read_text() == "ORIGINAL\n"
     assert not os.path.exists(mod._kernel_backup_path(str(kdst)))
+    assert f"restoring {kdst} from {mod._kernel_backup_path(str(kdst))}" in capsys.readouterr().out
 
 
 def test_sigterm_during_the_build_restores_the_ep_kernel(numeric_task):
@@ -343,6 +356,36 @@ def test_sigterm_during_the_build_stops_the_whole_build(numeric_task, tmp_path, 
     assert not os.path.exists(mod._kernel_backup_path(str(kdst)))
     time.sleep(1.5)
     assert not late.exists()
+
+
+class _Unkillable:
+    pid = 4242
+
+    def poll(self):
+        return None
+
+
+def test_stop_process_group_reports_a_group_that_outlives_sigkill(monkeypatch):
+    sent = []
+    monkeypatch.setattr(mod.os, "killpg", lambda pid, sig: sent.append(sig))
+    monkeypatch.setattr(mod, "_BUILD_STOP_GRACE_S", 0.05)
+    previous = signal.getsignal(signal.SIGTERM)
+    try:
+        assert mod._stop_process_group(_Unkillable()) is False
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    assert signal.SIGTERM in sent and signal.SIGKILL in sent
+
+
+def test_run_build_warns_when_the_build_cannot_be_stopped(monkeypatch, capsys):
+    class _Interrupted(_Unkillable):
+        def wait(self):
+            raise SystemExit(1)
+    monkeypatch.setattr(mod.subprocess, "Popen", lambda *a, **k: _Interrupted())
+    monkeypatch.setattr(mod, "_stop_process_group", lambda p: False)
+    with pytest.raises(SystemExit):
+        mod._run_build("make", cwd=".")
+    assert "4242 is still alive after SIGKILL" in capsys.readouterr().err
 
 
 def test_numeric_compile_kernel_lib_defaults_to_ep_dll(numeric_task):

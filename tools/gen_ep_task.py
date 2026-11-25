@@ -40,6 +40,7 @@ REGISTRY = os.path.join(TOOLS_DIR, "ep_op_registry.yaml")
 RUNNER_SRC = os.path.join(TOOLS_DIR, "ep_task_runner.py")
 ABI_SRC = os.path.join(TOOLS_DIR, "ep_abi.py")
 PERF_DRIVER_SRC = os.path.join(TOOLS_DIR, "ep_perf_driver.py")
+DEFAULT_UPSTREAM_REF = "origin/main"
 
 # Named shape presets. (M, K, N, gs, no_zeros). K must be % 32 == 0 for the
 # matmul_nbits fast path. Covers prefill (M>=16 -> WMMA) + decode (M=1 -> GEMV),
@@ -92,6 +93,11 @@ def validate_row(row):
         sys.exit(f"op '{row['op']}' ({oracle} oracle) is missing registry fields: {missing}")
     if "shapes_preset" in row and row["shapes_preset"] not in SHAPE_PRESETS:
         sys.exit(f"op '{row['op']}': unknown shapes_preset '{row['shapes_preset']}'")
+    ids = [c.get("id") for c in (row.get("perf") or {}).get("cases", [])]
+    dup = sorted({str(i) for i in ids if ids.count(i) > 1})
+    if dup:
+        sys.exit(f"op '{row['op']}': perf case ids {dup} are not unique; the runner keys "
+                 f"results by id")
 
 
 def _require_dir(path, what):
@@ -217,11 +223,16 @@ def abi_manifest(row, kernel, inc_dir, kernel_lib):
             man["exports"] = ep_abi.exported_c_symbols(kernel_lib)
         except (OSError, RuntimeError) as e:
             sys.exit(f"cannot list the exports of {kernel_lib}: {e}")
+    else:
+        what = f"--ep-kernel-lib {kernel_lib} is not built yet" if kernel_lib else \
+            "no --ep-kernel-lib given"
+        print(f"warning: {what}, so compile will not check the rebuilt kernel library's "
+              f"exported C symbols; build the EP and pass it to freeze them", file=sys.stderr)
     return man
 
 
 def gen_numeric(row, arch, ep_repo, out, ep_dll, ep_build_cmd, ep_options,
-                ep_kernel_lib=None, upstream_ref="origin/main", ep_env=None, python=None):
+                ep_kernel_lib=None, upstream_ref=DEFAULT_UPSTREAM_REF, ep_env=None, python=None):
     kernel_dst = _vendor_ep_kernel(row, ep_repo, out)
     inc_dir = os.path.join(ep_kernels_dir(ep_repo), "include")
     abi = abi_manifest(row, kernel_dst, inc_dir, ep_kernel_lib)
@@ -238,6 +249,7 @@ def gen_numeric(row, arch, ep_repo, out, ep_dll, ep_build_cmd, ep_options,
         "frozen_symbols": row["frozen_symbols"],
         "frozen_functions": row.get("frozen_functions", []),
         "frozen_constants": list(abi["constants"]),
+        "frozen_variables": list(abi["variables"]),
         "numeric_test": row["numeric_test"],
         "ep_base_sha": ep_base_sha(ep_repo, kernel_dst),
         "abi": abi,
@@ -301,7 +313,8 @@ def _readme(row, meta, source_rel):
         intro = f"Optimizes the HIP EP `{row['op']}` kernel. GEAK edits ONLY `{source_rel}`.\n\n"
         caller = "the generated EP code"
     notes, gates, export = "", "", ""
-    fns = meta.get("frozen_functions", []) + meta.get("frozen_constants", [])
+    fns = (meta.get("frozen_functions", []) + meta.get("frozen_constants", [])
+           + meta.get("frozen_variables", []))
     if oracle == "numeric":
         perf = meta["numeric"].get("perf")
         if perf:
@@ -342,10 +355,14 @@ def _readme(row, meta, source_rel):
                if meta["numeric"].get("python") else "")
             + perf_note + "\n")
         gates = ("Every `extern \"C\"` signature in the kernel file is frozen, and so are "
-                 "these whole definitions (dispatch gates, the helpers they call and the "
-                 "constants they read): they decide which kernel a shape reaches. A launch "
-                 "written in one of these bodies stays as it is; the launchers, autotuning "
-                 "and kernels they call are editable unless listed.\n"
+                 "these whole definitions (dispatch gates, the helpers they call, and the "
+                 "namespace-scope constants, config tables and state they read): they "
+                 "decide which kernel a shape reaches. A launch written in one of these "
+                 "bodies stays as it is; the launchers, autotuning and kernels they call "
+                 "are editable unless listed. State only these functions touch may not be "
+                 "used anywhere else, no `#define`/`#undef` may be added or changed for a "
+                 "name they use, and no call that sets an environment variable may be "
+                 "added.\n"
                  + "".join(f"  - `{s}`\n" for s in fns) + "\n") if fns else ""
         export = ("\n`export-patch` writes `build/hip_ep.patch`, the candidate as a diff "
                   f"against EP commit `{meta['ep_base_sha']}`, and checks it applies there "
@@ -409,7 +426,7 @@ def main():
                     "are unchanged. Defaults to --ep-dll")
     ap.add_argument("--ep-option", action="append", default=[],
                     help="(numeric) repeatable KEY=VALUE for the EP")
-    ap.add_argument("--ep-upstream-ref", default="origin/main",
+    ap.add_argument("--ep-upstream-ref", default=DEFAULT_UPSTREAM_REF,
                     help="(numeric) ref in the EP checkout that export-patch also checks "
                     "the patch against (besides the commit the task was generated from)")
     ap.add_argument("--ep-env", action="append", default=[], metavar="KEY=VALUE",

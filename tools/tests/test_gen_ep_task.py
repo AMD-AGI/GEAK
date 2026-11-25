@@ -353,6 +353,37 @@ def test_constants_a_gate_reads_are_frozen_and_listed(monkeypatch, tmp_path, ep_
     assert "  - `kWmmaMinMDefault`" in (out / "README.md").read_text()
 
 
+def test_variables_a_gate_reads_are_frozen_and_listed(monkeypatch, tmp_path, ep_repo):
+    kernel = ep_repo / "hip-ep" / "lib" / "Runtime" / "Kernels" / "hip" / "matmul_nbits_kernel.hip"
+    kernel.write_text(kernel.read_text().replace(
+        "static bool wmmaMinM(int m) { return m > 1; }",
+        "static int g_min_m = -1;\n"
+        "static bool wmmaMinM(int m) { if (g_min_m < 0) g_min_m = 8; return m > g_min_m; }"))
+    out = tmp_path / "o"
+    _main(monkeypatch, *_numeric_args(ep_repo, out))
+    meta = json.loads((out / "task_meta.json").read_text())
+    assert meta["abi"]["variables"] == {"g_min_m": "static int g_min_m=-1;"}
+    assert meta["abi"]["mutable"] == ["g_min_m"]
+    assert meta["frozen_variables"] == ["g_min_m"]
+    assert "  - `g_min_m`" in (out / "README.md").read_text()
+
+
+def test_missing_kernel_lib_warns_that_exports_are_not_checked(monkeypatch, tmp_path, ep_repo,
+                                                               capsys):
+    _main(monkeypatch, *_numeric_args(ep_repo, tmp_path / "o"))
+    assert "no --ep-kernel-lib given" in capsys.readouterr().err
+    klib = tmp_path / "libk.so"
+    _main(monkeypatch, *_numeric_args(ep_repo, tmp_path / "p", "--ep-kernel-lib", str(klib)))
+    assert f"--ep-kernel-lib {klib} is not built yet" in capsys.readouterr().err
+
+
+def test_duplicate_perf_case_ids_are_rejected():
+    row = json.loads(json.dumps(gen.find_op(gen.load_registry(), "matmul_nbits")))
+    row["perf"]["cases"].append(dict(row["perf"]["cases"][0]))
+    with pytest.raises(SystemExit, match="not unique"):
+        gen.validate_row(row)
+
+
 def test_numeric_meta_records_kernel_lib_exports(monkeypatch, tmp_path, ep_repo):
     out, klib = tmp_path / "o", tmp_path / "libk.so"
     klib.write_text("ELF")

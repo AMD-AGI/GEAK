@@ -115,28 +115,33 @@ def _run_build(build_cmd, cwd):
     try:
         return p.wait()
     except BaseException:
-        _stop_process_group(p)
+        if not _stop_process_group(p):
+            print(f"warning: build process group {p.pid} is still alive after SIGKILL; it may "
+                  f"write the EP tree after the original kernel is restored",
+                  file=sys.stderr, flush=True)
         raise
 
 
 def _stop_process_group(p):
-    """SIGTERM p's process group, SIGKILL what is left after the grace period,
-    and return once the group is empty."""
+    """SIGTERM p's process group, then SIGKILL what is left after the grace
+    period. True once the group is empty; False if it outlives the SIGKILL
+    grace period too (a process stuck in uninterruptible sleep, say)."""
     # The runner is exiting; a second SIGTERM must not cut the wait short.
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
             os.killpg(p.pid, sig)
         except ProcessLookupError:
-            return
+            return True
         deadline = time.monotonic() + _BUILD_STOP_GRACE_S
         while time.monotonic() < deadline:
             p.poll()
             try:
                 os.killpg(p.pid, 0)
             except ProcessLookupError:
-                return
+                return True
             time.sleep(0.1)
+    return False
 
 
 # ----------------------------------------------------------------------------
@@ -403,9 +408,7 @@ def _mtime_ns(path):
 
 def _abi_violations(meta, candidate):
     """Frozen-contract violations in the candidate source (empty when it only
-    changes kernel bodies), or None for tasks generated without an ABI manifest."""
-    if not meta.get("abi"):
-        return None
+    changes kernel bodies)."""
     return _ep_abi().check_source(candidate.decode("utf-8", errors="replace"), meta["abi"])
 
 
@@ -438,6 +441,9 @@ def numeric_compile(meta):
                        "kernel_src/ would never be compiled; regenerate with --ep-build-cmd")
     if not dll:
         return False, "numeric oracle: no ep_dll configured; regenerate with --ep-dll"
+    if not meta.get("abi"):
+        return False, ("numeric oracle: task_meta.json has no ABI manifest, so the frozen "
+                       "contract cannot be checked; regenerate the task with tools/gen_ep_task.py")
     _, err = _resolve_offload_arch(meta["arch"])
     if err:
         return False, err
@@ -455,6 +461,9 @@ def numeric_compile(meta):
     with open(_ep_build_lock_path(nm["ep_repo"]), "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if os.path.exists(backup):
+            print(f"restoring {dst} from {backup}, saved by a compile that was killed "
+                  f"mid-build; if the EP checkout changed since, delete the backup and re-run",
+                  flush=True)
             with open(backup, "rb") as f:
                 original = f.read()
         else:
@@ -535,8 +544,9 @@ def _perf_driver(meta, check_only):
            *[f"--ep-option={opt}" for opt in nm.get("ep_options", [])],
            f"--op={perf.get('op', meta['op'])}",
            f"--cases={json.dumps(perf['cases'], separators=(',', ':'))}",
-           f"--warmup={perf.get('warmup', 5)}", f"--iters={perf.get('iters', 20)}",
-           f"--rotate-mib={perf.get('rotate_mib', 128)}"]
+           # unset ones take the driver's defaults
+           *[f"--{key.replace('_', '-')}={perf[key]}"
+             for key in ("warmup", "iters", "rotate_mib") if key in perf]]
     if check_only:
         cmd.append("--check-only")
     r = _run(cmd, cwd=TASK_DIR, env=_ep_env(meta), capture_output=True, text=True)
@@ -653,7 +663,7 @@ def numeric_export_patch(meta):
         with open(patch_path, "w") as f:
             f.write(patch)
         applies = {}
-        for ref in dict.fromkeys([base, nm.get("upstream_ref") or "origin/main"]):
+        for ref in dict.fromkeys(r for r in (base, nm.get("upstream_ref")) if r):
             if _git(top, ["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"]).returncode:
                 applies[ref] = "unresolved"
                 continue
