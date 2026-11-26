@@ -25,7 +25,7 @@ serving comparison and to any screen that will judge model correctness.
 Run the [GSM8K client](../../../../e2e_workflow/scripts/gsm8k_eval.py) once against
 each arm's actual serving deployment, outside timed performance traffic. Set `ARM` to
 `reference` or `candidate`, `BASE_URL` to that server's OpenAI-compatible `/v1` URL,
-`MODEL` to its served model name and `LIMIT` to the sample size for this decision.
+`MODEL` to its served model name and `LIMIT` to the question count in Brain's `PLAN.md`.
 
 ```bash
 python3 "$GEAK_ROOT/e2e_workflow/scripts/gsm8k_eval.py" \

@@ -53,7 +53,9 @@ preserve the inputs and evidence of in-flight calls.
    a generated plan does not make diagnostic completeness an acceptance requirement.
    Additional validation must address a concrete correctness or measurement risk.
 2. Write `PLAN.md` under the [module contract](../stages/CONTRACT.md); each module's
-   README states the inputs its call needs, and Brain writes them. Reuse qualified
+   README states the inputs its call needs, and Brain writes them. For a GSM8K comparison,
+   set the question count and acceptable accuracy drop before scoring, following
+   [Evaluate's quality criterion](../stages/evaluate/README.md#model-correctness). Reuse qualified
    inputs; investigate missing prerequisites or observed defects within the affected call,
    rather than adding a separate readiness stage to every route.
 3. Bind invocation options to their native prerequisites and actual receipts. Adapter

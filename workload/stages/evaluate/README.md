@@ -18,14 +18,21 @@ Use paired GSM8K final-answer exact match for model correctness. Score the uncha
 reference and the deployed candidate against gold answers on the same test questions.
 A throughput-only screen leaves correctness unevaluated.
 
-Use the merged config's `gsm8k` policy or the [workload defaults](../../config/default.json)
-for a direct call. Use `screen_questions` for a quality screen and `finalist_questions`
-for the adoption decision. Record any task-specific overrides before measuring.
+Use the question count and maximum acceptable accuracy drop (in percentage points)
+from the call's `PLAN.md`. Honor values specified by the user or scenario. Brain
+chooses any unspecified tolerance from the task's quality requirements and any
+unspecified sample size from the precision needed and the evaluation budget.
+Record the rationale before scoring. One net correct answer moves the measured gap
+by `100 / N` percentage points on `N` paired questions. Prior runs can also show how
+often the arms differ on which questions they answer correctly. If using a staged
+sample, state when to expand it and keep the tolerance fixed across stages.
+
 Report correct/total and accuracy for each arm, then compute the signed change in
 percentage points as `100 × (candidate_correct − reference_correct) / total`.
-Quality passes when this change is at least `−max_drop_pp`. A larger drop is an
-accuracy regression. A missing, incomplete or unmatched pair leaves quality unevaluated
-and blocks adoption. Carry the quality decision and both receipts alongside the native
+A drop exceeding the planned tolerance is an accuracy regression. If sampling
+uncertainty leaves the decision unresolved, report it as inconclusive and keep the
+reference. A missing, incomplete or unmatched pair leaves quality unevaluated and
+blocks adoption. Carry the quality decision and both receipts alongside the native
 performance verdict.
 
 ## Performance comparison
