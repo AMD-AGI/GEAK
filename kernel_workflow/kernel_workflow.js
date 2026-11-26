@@ -10,120 +10,80 @@ export const meta = {
   ],
 };
 
-// ---------------------------------------------------------------------------
-// Args. This is a DISPATCHER: on mode=optimize/author it forwards straight to the
-// single-language worker (kernel_lane.js) unchanged; on mode=bakeoff it acts
-// as the multi-language bake-off orchestrator. The worker script is a sibling in
-// this same dir, so it is called via workflow() at exactly ONE nesting level
-// (dispatcher=level0 -> worker=level1). The dispatcher never nests a second level.
-// ---------------------------------------------------------------------------
+// DISPATCHER: optimize/author forward unchanged to kernel_lane.js; bakeoff and config_aware orchestrate
+// lanes here. Lanes are always called via workflow() at exactly ONE nesting level.
 const A = args || {};
-const CONFIG_AWARE = ['true', 'on'].includes(
-  String(A.config_aware != null ? A.config_aware : 'false').trim().toLowerCase());
-if (!CONFIG_AWARE && !A.kernel_path) throw new Error('args.kernel_path is required (absolute path to the kernel/op dir)');
+const fail = (m) => { throw new Error(m); };
+const CONFIG_AWARE = ['true', 'on'].includes(String(A.config_aware != null ? A.config_aware : 'false').trim().toLowerCase());
+if (!CONFIG_AWARE && !A.kernel_path) fail('args.kernel_path is required (absolute path to the kernel/op dir)');
 const WORKFLOW_DIR = String(A.workflow_dir || '').replace(/\/+$/, '');
 if (!WORKFLOW_DIR) {
-  throw new Error('args.workflow_dir is required: absolute path to the directory containing ' +
+  fail('args.workflow_dir is required: absolute path to the directory containing ' +
     'kernel_workflow.js + kernel_lane.js + roles/ + knowledge/ (i.e. the dirname of this script).');
 }
-// The single-language worker lane (unchanged behavior). Same dir as this dispatcher.
-if (A.optimizer != null && typeof A.optimizer !== 'string') {
-  throw new Error('optimizer must be greedy or evo (a string)');
-}
+if (A.optimizer != null && typeof A.optimizer !== 'string') fail('optimizer must be greedy or evo (a string)');
 const OPTIMIZER = String(A.optimizer || '').trim().toLowerCase();
-if (OPTIMIZER && !['greedy', 'evo'].includes(OPTIMIZER)) {
-  throw new Error('optimizer must be greedy or evo');
-}
-if (OPTIMIZER === 'evo' && A.kernel_lane_script) {
-  throw new Error('optimizer=evo cannot override kernel_lane_script');
-}
+if (OPTIMIZER && !['greedy', 'evo'].includes(OPTIMIZER)) fail('optimizer must be greedy or evo');
+if (OPTIMIZER === 'evo' && A.kernel_lane_script) fail('optimizer=evo cannot override kernel_lane_script');
 const WORKER = String(A.kernel_lane_script || `${WORKFLOW_DIR}/kernel_lane.js`);
 const MODE = String(A.mode != null ? A.mode : 'optimize').trim().toLowerCase() || 'optimize';
-if (OPTIMIZER === 'evo' && MODE === 'bakeoff') {
-  throw new Error('optimizer=evo currently supports optimize and author lanes, not bakeoff');
-}
+if (OPTIMIZER === 'evo' && MODE === 'bakeoff') fail('optimizer=evo currently supports optimize and author lanes, not bakeoff');
+// Same default as kernel_lane.js, so the tracker runs without args.exp_root.
+const EXP_ROOT = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/exp')).replace(/\/+$/, '');
 
-// ---- Live execution tracker (read-only observer; see interface/geak_trace_collector.py) ----
-// Started HERE so a direct kernel run is tracked from its first agent, not only
-// at the end. Both dispatcher lanes (pass-through and bakeoff) pass through this
-// point, so one call covers them. The observer resolves its own workflow run from
-// the runtime's workflow record (no eval-dir substring matching) — needed because
-// neither EXP_ROOT nor eval_dir exists yet on the pass-through branch.
-//
-// Detached, read-only and strictly non-fatal: it never influences model choice,
-// prompts, budgets or optimization decisions. Set GEAK_LIVE_TRACE=0 to disable.
+// Live execution tracker: detached, read-only, strictly non-fatal. GEAK_LIVE_TRACE=0 disables it.
 (function startLiveTracker() {
   try {
     if (String(process.env.GEAK_LIVE_TRACE || '1') === '0') return;
-    // Same default as kernel_lane.js computes for EXP_ROOT: args.exp_root is NOT
-    // required, so bailing out when it is absent silently disabled tracking for
-    // every ordinary invocation.
-    const expRoot = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/exp'))
-      .replace(/\/+$/, '');
     const { spawn } = require('child_process');
     const child = spawn('python3', [
-      '-B', `${WORKFLOW_DIR}/../interface/geak_trace_collector.py`,
-      '--exp-root', expRoot,
-      // Runtime-supplied invocation identity: the wf_*.json record carries this
-      // same args object, so matching it identifies THIS launch deterministically
-      // instead of guessing from timing or from being the only run around.
-      '--identity-args', JSON.stringify(A),
-      '--script-dir', WORKFLOW_DIR,
-      // Per-run filename: two runs under one exp_root must not overwrite each other.
-      '--out-dir', expRoot,
-      '--watch',
-      '--interval', String(process.env.GEAK_LIVE_TRACE_INTERVAL_S || '30'),
-      '--resolve-timeout', '600',
+      '-B', `${WORKFLOW_DIR}/../interface/geak_trace_collector.py`, '--exp-root', EXP_ROOT,
+      '--identity-args', JSON.stringify(A), '--script-dir', WORKFLOW_DIR, '--out-dir', EXP_ROOT, '--watch',
+      '--interval', String(process.env.GEAK_LIVE_TRACE_INTERVAL_S || '30'), '--resolve-timeout', '600',
       '--max-seconds', String(process.env.GEAK_LIVE_TRACE_MAX_S || '172800'),
     ], { detached: true, stdio: 'ignore' });
-    // spawn reports a missing executable ASYNCHRONOUSLY: try/catch cannot see it,
-    // and without this listener the ENOENT is an unhandled error event.
+    // spawn reports a missing executable asynchronously; try/catch cannot see it.
     child.on('error', (err) => {
-      try { log(`Live execution tracker failed to start (non-fatal): ${err && err.message}`); }
-      catch (_) {}
+      try { log(`Live execution tracker failed to start (non-fatal): ${err && err.message}`); } catch (_) {}
     });
     child.unref();
-    log(`Live execution tracker started -> ${expRoot}/geak_trace_<runId>.json`);
+    log(`Live execution tracker started -> ${EXP_ROOT}/geak_trace_<runId>.json`);
   } catch (e) {
     try { log(`Live execution tracker not started (non-fatal): ${e && e.message}`); } catch (_) {}
   }
 })();
 
-// ===========================================================================
-// SINGLE-LANGUAGE PASS-THROUGH (mode=optimize | author) — byte-compatible with
-// the pre-dispatcher behavior. Forward EVERY arg to the worker unchanged (the
-// worker ignores dispatcher-only args like `backends`). One nesting level.
-// ===========================================================================
+const obj = (props, required) => ({ type: 'object', properties: props, required: required || [], additionalProperties: true });
+const arrStr = { type: 'array', items: { type: 'string' } };
+const arrObj = { type: 'array', items: { type: 'object', additionalProperties: true } };
+const cfg = (o) => Object.entries(o).map(([k, v]) =>
+  `- ${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join('\n');
+// args.llm_stats="false" makes LLM token+time accounting a no-op.
+const LLM_STATS = String(A.llm_stats != null ? A.llm_stats : 'true').trim().toLowerCase() !== 'false';
+const STATS_SCHEMA = obj({ written: { type: 'boolean' }, path: { type: 'string' }, ok: { type: 'boolean' } }, []);
+const statsPrompt = (evalDir, timeline) => {
+  const tlPath = `${evalDir}/reports/trace/agent_timeline.json`;
+  return `You are the file_writer. PHASE=persist_llm_stats.\n` +
+    `Do exactly two things, in order:\n` +
+    `1. Use the Write tool to create "${tlPath}" with EXACTLY the JSON below, verbatim ` +
+    `(create parent directories if needed; do NOT reformat, truncate or summarize it):\n\n` +
+    '```json\n' + JSON.stringify(timeline) + '\n```\n\n' +
+    `2. Then run this Bash command (best-effort; if it fails, carry on and report ok=false).\n` +
+    `   It runs the token/time/cost ledger AND renders the role-execution-tree report (HTML + MD):\n` +
+    `   python3 -B "${WORKFLOW_DIR}/../interface/geak_report.py" --eval-dir "${evalDir}"\n\n` +
+    `Then return {"written": true, "path": "${tlPath}", "ok": <true if the command exited 0 else false>}.`;
+};
+
+// SINGLE-LANGUAGE PASS-THROUGH (optimize | author): forward EVERY arg to the worker unchanged.
 if (!CONFIG_AWARE && (MODE === 'optimize' || MODE === 'author')) {
-  phase('Bakeoff');            // reuse a declared phase slot for the single passthrough lane
+  phase('Bakeoff');
   log(`mode=${MODE}: single-language pass-through -> ${WORKER}`);
   const r = await workflow({ scriptPath: WORKER }, { ...A, workflow_dir: WORKFLOW_DIR });
-  // Final step: render the run report (token/time/cost ledger -> clickable role-execution-tree
-  // HTML + MD twin) from the lane's OWN timeline. In passthrough the dispatcher makes no agent calls
-  // itself, so the lane result carries the timeline (`llm_timeline`) + its `eval_dir`. This is the
-  // top-level entry for optimize/author runs, so it owns the report (E2E nests kernel_lane.js directly
-  // and reports at its own top level, so there is no double-emit). NOTE: this branch runs BEFORE the
-  // obj()/agentT()/LLM_STATS definitions below, so it is self-contained: raw agent() + inline schema +
-  // an inline llm_stats check. Entirely best-effort — never fail a real result over accounting.
-  const llmStatsOn = String(A.llm_stats != null ? A.llm_stats : 'true').trim().toLowerCase() !== 'false';
-  if (llmStatsOn && r && r.eval_dir && r.llm_timeline) {
+  // Render the run report from the lane's own timeline (raw agent(): agentT's constants are not defined yet).
+  if (LLM_STATS && r && r.eval_dir && r.llm_timeline) {
     try {
-      const tlJson = JSON.stringify({ ...r.llm_timeline, instance: r.eval_dir });
-      const tlPath = `${r.eval_dir}/reports/trace/agent_timeline.json`;
-      await agent(
-        `You are the file_writer. PHASE=persist_llm_stats.\n` +
-        `Do exactly two things, in order:\n` +
-        `1. Use the Write tool to create "${tlPath}" with EXACTLY the JSON below, verbatim ` +
-        `(create parent directories if needed; do NOT reformat, truncate or summarize it):\n\n` +
-        '```json\n' + tlJson + '\n```\n\n' +
-        `2. Then run this Bash command (best-effort; if it fails, carry on and report ok=false).\n` +
-        `   It runs the token/time/cost ledger AND renders the role-execution-tree report (HTML + MD):\n` +
-        `   python3 -B "${WORKFLOW_DIR}/../interface/geak_report.py" --eval-dir "${r.eval_dir}"\n\n` +
-        `Then return {"written": true, "path": "${tlPath}", "ok": <true if the command exited 0 else false>}.`,
-        { phase: 'Bakeoff', label: 'file_writer:persist_llm_stats',
-          schema: { type: 'object',
-            properties: { written: { type: 'boolean' }, path: { type: 'string' }, ok: { type: 'boolean' } },
-            required: [], additionalProperties: true } });
+      await agent(statsPrompt(r.eval_dir, { ...r.llm_timeline, instance: r.eval_dir }),
+        { phase: 'Bakeoff', label: 'file_writer:persist_llm_stats', schema: STATS_SCHEMA });
       log(`LLM token+time+cost ledger + run report (HTML+MD) -> ${r.eval_dir}/reports/trace/ and ${r.eval_dir}/report/.`);
     } catch (e) {
       log(`LLM stats/report emit failed (NON-FATAL — the run is unaffected): ${String(e)}`);
@@ -131,8 +91,6 @@ if (!CONFIG_AWARE && (MODE === 'optimize' || MODE === 'author')) {
   }
   return r;
 }
-
-const EXP_ROOT = String(A.exp_root || (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/exp')).replace(/\/+$/, '');
 
 // ---- GPU families: keep this block identical in kernel_workflow.js, kernel_lane.js and e2e_workflow.js ----
 // Per-GPU-family policy, looked up by ISA. The Workflow sandbox has no import, so each workflow carries
@@ -154,39 +112,17 @@ const GPU_FAMILY_DEFAULT = { name: 'default', isa: null, isolate: false, matrixC
 const gpuFamily = (gfx) => GPU_FAMILIES.find((f) => f.isa.test(String(gfx || ''))) || GPU_FAMILY_DEFAULT;
 // ---- end GPU families ----
 
-// ---------------------------------------------------------------------------
-// Schema helpers.
-// ---------------------------------------------------------------------------
-const obj = (props, required) => ({ type: 'object', properties: props, required: required || [], additionalProperties: true });
-const arrStr = { type: 'array', items: { type: 'string' } };
-const arrObj = { type: 'array', items: { type: 'object', additionalProperties: true } };
-
-const cfg = (o) => Object.entries(o).map(([k, v]) =>
-  `- ${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join('\n');
-
 // Hung-agent + API-fault guard (same contract as kernel_lane.js:agentT).
 const AGENT_TIMEOUT_MS = parseInt(A.agent_timeout_ms != null ? A.agent_timeout_ms : 3600000, 10);
 const AGENT_RETRIES = Math.max(1, parseInt(A.agent_retries != null ? A.agent_retries : 4, 10));
-// LLM token+time accounting (PURELY ADDITIVE; args.llm_stats="false" makes it a no-op).
-// DELIBERATELY NO TIMESTAMPS: Date.now()/new Date() are unavailable in workflow scripts. Every
-// duration in the report comes from the transcripts (scripts/llm_ledger.py); this records only the
-// role/phase/attempt identity of each agent call so the ledger attributes tokens to the right agent.
-const LLM_STATS = String(A.llm_stats != null ? A.llm_stats : 'true').trim().toLowerCase() !== 'false';
+// No timestamps (Date is unavailable in workflow scripts): durations come from the transcripts.
 const LLM_TL = { schema: 'geak.agent_timeline/1', workflow: 'kernel_workflow', events: [], nested: [] };
 const TL_ROLE_RE = /You are the ([A-Za-z0-9_.\-]+)\.\s*PHASE=([A-Za-z0-9_.\-]+)\./;
-
-// This dispatcher's own roles (oracle_freezer) live under WORKFLOW_DIR/roles/.
 const roleAgent = (role, phaseName, intro, inputs) => roleAgentFrom(WORKFLOW_DIR, role, phaseName, intro, inputs);
 
-// ===========================================================================
-// CONFIG-AWARE OPERATOR FAMILY (args.config_aware = "true" | "on").
-// One kernel_lane.js per family_spec config, launched together over the GPU pool like bakeoff (one GPU id
-// per lane, a thrown lane is caught), so nesting stays dispatcher -> kernel_lane. Validation, statuses,
-// aggregate and catalog are computed here; agents only propose an advisory plan and write files. The
-// catalog covers each config's own exact signature and is never deployment_ready.
-// ===========================================================================
+// CONFIG-AWARE OPERATOR FAMILY: one kernel_lane.js per family_spec config, one GPU id each. Validation,
+// statuses, aggregate and catalog are computed here; agents only plan (advisory) and write files.
 if (CONFIG_AWARE) {
-  const fail = (m) => { throw new Error(m); };
   if (MODE === 'bakeoff') fail('config_aware does not support mode=bakeoff yet; set each config\'s mode in family_spec.');
   if (MODE !== 'optimize' && MODE !== 'author') fail(`unknown mode='${MODE}' with config_aware; each config carries its own mode.`);
   if (OPTIMIZER) fail(`config_aware does not support optimizer=${OPTIMIZER} yet`);
@@ -206,7 +142,6 @@ if (CONFIG_AWARE) {
   const str = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
   const low = (v) => String(v == null ? '' : v).trim().toLowerCase();
   const clip = (v, n) => (str(v) || '').slice(0, n);
-  // Key-order-independent JSON, so equal contracts compare equal however they were written.
   const canon = (v) => Array.isArray(v) ? `[${v.map(canon).join(',')}]`
     : isObj(v) ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canon(v[k])}`).join(',')}}`
     : JSON.stringify(v === undefined ? null : v);
@@ -220,7 +155,6 @@ if (CONFIG_AWARE) {
     warm_start: ['on', 'off', 'true', 'false', 'none', 'reference', 'return_after_read'],
   };
 
-  // ---- Phase 1: validate (synchronous, nothing spawned yet); every problem is reported in one error ----
   const errs = [];
   const need = (cond, msg) => { if (!cond) errs.push(msg); return !!cond; };
   const onlyFields = (o, allowed, at) =>
@@ -258,7 +192,6 @@ if (CONFIG_AWARE) {
     need(isObj(c.op_spec), `${at}: op_spec must be an object`);
     const ov = c.overrides == null ? {} : c.overrides;
     if (need(isObj(ov), `${at}: overrides must be an object`)) onlyFields(ov, LANE_FIELDS, `${at}.overrides`);
-    // config.overrides -> family_spec.defaults -> kernel_lane default (target_language has no default).
     const pick = (f) => [ov, defaults].map((o) => (isObj(o) ? o[f] : undefined)).find((v) => v != null);
     const knobs = {};
     for (const [f, allowed] of Object.entries(ENUMS)) {
@@ -317,7 +250,6 @@ if (CONFIG_AWARE) {
     status: 'unsupported',
     reason: 'no candidate adapter: a lane patch is relative to its own workspace, so no implementation was run on a sibling config',
   };
-  // Knobs forwarded from the parent call to every lane, only when the caller set them.
   const PARENT_FORWARD = ['exp_root', 'expected_device_name', 'expected_physical_cu_count', 'gpu_perf_level',
     'kb_artifacts_dir', 'kb_mode', 'kb_store_dir', 'kb_framework_version', 'perf_knowledge_dir',
     'use_expert_skills', 'expert_skills_dir', 'llm_stats', 'profile', 'fast_mode', 'max_rounds', 'min_improve',
@@ -364,10 +296,7 @@ if (CONFIG_AWARE) {
     report: `${FAMILY_DIR}/family_report.md`, catalog: `${FAMILY_DIR}/implementation_catalog.json`,
   };
 
-  // ---- Phase 2: plan (advisory; an invalid answer falls back to one group per config) ----
   phase('Discover');
-  // The planner reads the learned KB: off when any config turns it off (a KB-off arm stays KB-off) or the
-  // expected GPU family is isolated from the MI-series-calibrated knowledge.
   const PLANNER_KB = CONFIGS.some((c) => c.kb.use_learned_kb === 'false') || gpuFamily(LANE_GFX).isolate ? 'off' : 'on';
   const raw = await agentT(
     roleAgent('operator_family_planner', 'plan', 'Write no files and run no benchmarks.', {
@@ -376,7 +305,6 @@ if (CONFIG_AWARE) {
       OBJECTIVE: 'per-config verified speedup against each config\'s own baseline; each config runs its own lane',
       CONFIGS: CONFIGS.map(({ index, kernel_path, gpu_mode, budget, kb, task, incumbent, ...c }) => ({ ...c, has_incumbent: !!incumbent })),
     }),
-    // The role file specifies each group's fields; planError() below checks them.
     { phase: 'Discover', label: 'operator_family_planner:plan',
       schema: obj({ groups: arrObj, execution_order: arrStr, notes: { type: 'string' } }, ['groups']) });
   const planError = (() => {
@@ -418,7 +346,6 @@ if (CONFIG_AWARE) {
       config_hints: Object.fromEntries(g.config_ids.map((id) => [id, clip(isObj(g.config_hints) ? g.config_hints[id] : '', 400)])
         .filter(([, h]) => h)),
     })),
-    // Default order: priority ascending, then input order. It only sorts the report; every lane launches together.
     execution_order: orderOk ? eo.slice() : CONFIGS.slice()
       .sort((a, b) => (a.priority ?? Infinity) - (b.priority ?? Infinity) || a.index - b.index).map((c) => c.id),
     order_source: orderOk ? 'planner' : 'default', notes: planError ? '' : clip(raw.notes, 800),
@@ -427,7 +354,6 @@ if (CONFIG_AWARE) {
   const groupOf = new Map(PLAN.groups.flatMap((g) => g.config_ids.map((id) => [id, g])));
   const planPersisted = await persist('file_writer:family_plan', [{ path: P.plan, content: JSON.stringify(PLAN, null, 2) }]);
 
-  // ---- Phase 3: one kernel_lane.js per config, all launched together, one GPU id each ----
   const sigStr = (c) => (c.signature ? `[${c.signature.join(', ')}]` : '');
   const familyTask = (c, g) => {
     const sib = CONFIGS.filter((x) => x.id !== c.id).map((x) => x.id + sigStr(x));
@@ -444,7 +370,6 @@ if (CONFIG_AWARE) {
       c.task ? `caller task: ${c.task}` : '',
     ].filter(Boolean).join('\n');
   };
-  // Family status of one lane, decided from its structured return, never by an agent.
   const TERMINAL = ['flagged', 'author_failed', 'no_baseline', 'failed'];
   const laneRecord = (c, k, gpu, evalDir, r, thrown) => {
     const R = isObj(r) ? r : {};
@@ -494,7 +419,6 @@ if (CONFIG_AWARE) {
       thrown = String(e && e.message ? e.message : e).slice(0, 500);
       log(`config ${id} lane failed: ${thrown}`);
     }
-    // Absorb the lane's timeline so this run's ledger accounts for every lane's agents.
     if (LLM_STATS && isObj(r) && r.llm_timeline) LLM_TL.nested.push(r.llm_timeline);
     const rec = laneRecord(c, k, gpu, evalDir, r, thrown);
     log(`config ${id} -> ${rec.status}` + (rec.speedup_vs_stock != null ? ` ${rec.speedup_vs_stock.toFixed(2)}x` : '') +
@@ -503,7 +427,6 @@ if (CONFIG_AWARE) {
   })));
   RECORDS.sort((a, b) => a.execution_index - b.execution_index);
 
-  // ---- Phase 4-6: summary, aggregate and catalog are pure functions of RECORDS; the writer renders the report ----
   const isOk = (r) => r.status === 'optimized' || r.status === 'accepted_no_improvement';
   const by_status = {};
   for (const r of RECORDS) by_status[r.status] = (by_status[r.status] || 0) + 1;
@@ -585,51 +508,34 @@ if (CONFIG_AWARE) {
   };
 }
 
-// ===========================================================================
-// From here on: mode=bakeoff — the multi-language bake-off orchestrator. Pass
-// args.backends to pick the languages, or leave it empty to auto-discover.
-// ===========================================================================
-if (MODE !== 'bakeoff') {
-  throw new Error(`unknown mode='${MODE}'. Use optimize | author | bakeoff.`);
-}
-// Bake-off lanes each take a slice of gpu_ids, so multi-GPU jobs are only supported by the
-// single-language modes for now.
+// From here on: mode=bakeoff, the multi-language bake-off orchestrator.
+if (MODE !== 'bakeoff') fail(`unknown mode='${MODE}'. Use optimize | author | bakeoff.`);
 if ((A.gpus_per_job != null && String(A.gpus_per_job).trim() !== '1') || String(A.job_gpu_ids || '').trim()) {
-  throw new Error('mode=bakeoff does not support gpus_per_job > 1 or job_gpu_ids; use mode=optimize or mode=author.');
+  fail('mode=bakeoff does not support gpus_per_job > 1 or job_gpu_ids; use mode=optimize or mode=author.');
 }
-
-// Sibling e2e_workflow dir — we REFERENCE its op_benchmarker role + bench scripts in place (no copy).
-const E2E_WF_DIR = String(A.e2e_workflow_dir ||
-  (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/e2e_workflow')).replace(/\/+$/, '');
+const GEAK_DIR = WORKFLOW_DIR.replace(/\/[^/]*$/, '');
+const E2E_WF_DIR = String(A.e2e_workflow_dir || (GEAK_DIR + '/e2e_workflow')).replace(/\/+$/, '');
 const EXPECTED_GFX = String(A.expected_gfx || '').trim().toLowerCase();
 const EXPECTED_TARGET = String(A.expected_target || '').trim().toLowerCase();
 const EXPECTED_DEVICE_NAME = String(A.expected_device_name || '').trim();
 const EXPECTED_PHYSICAL_CU_COUNT = Number(A.expected_physical_cu_count || 0);
-if (!!EXPECTED_GFX !== !!EXPECTED_TARGET) {
-  throw new Error('expected_gfx and expected_target must be supplied together');
-}
+if (!!EXPECTED_GFX !== !!EXPECTED_TARGET) fail('expected_gfx and expected_target must be supplied together');
 if ((EXPECTED_GFX && !/^gfx[0-9a-f]+$/.test(EXPECTED_GFX)) ||
     (EXPECTED_TARGET && !['r9700', 'r9600d', 'w7900', 'unknown'].includes(EXPECTED_TARGET))) {
-  throw new Error('invalid bakeoff identity: expected_gfx must be a gfx token and expected_target r9700|r9600d|w7900|unknown');
+  fail('invalid bakeoff identity: expected_gfx must be a gfx token and expected_target r9700|r9600d|w7900|unknown');
 }
 if (['r9700', 'r9600d'].includes(EXPECTED_TARGET) && EXPECTED_GFX !== 'gfx1201') {
-  throw new Error(`expected_target=${EXPECTED_TARGET} requires expected_gfx=gfx1201`);
+  fail(`expected_target=${EXPECTED_TARGET} requires expected_gfx=gfx1201`);
 }
 if (EXPECTED_GFX === 'gfx1200' || EXPECTED_TARGET === 'gfx1200') {
-  throw new Error('gfx1200 is not supported: this workflow is hardware-validated only on R9700 / gfx1201');
+  fail('gfx1200 is not supported: this workflow is hardware-validated only on R9700 / gfx1201');
 }
-if (EXPECTED_TARGET === 'w7900' && EXPECTED_GFX !== 'gfx1100') {
-  throw new Error('expected_target=w7900 requires expected_gfx=gfx1100');
-}
+if (EXPECTED_TARGET === 'w7900' && EXPECTED_GFX !== 'gfx1100') fail('expected_target=w7900 requires expected_gfx=gfx1100');
 if (EXPECTED_GFX === 'gfx1100' && EXPECTED_TARGET !== 'w7900') {
-  throw new Error(
-    `expected_gfx=gfx1100 requires expected_target=w7900 (got ${EXPECTED_TARGET}): ` +
-    'no other gfx1100 product is validated');
+  fail(`expected_gfx=gfx1100 requires expected_target=w7900 (got ${EXPECTED_TARGET}): no other gfx1100 product is validated`);
 }
 let GPU_FAMILY = gpuFamily(EXPECTED_GFX);
-let KERNEL_KNOWLEDGE_DIR = String(A.perf_knowledge_dir ||
-  (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/perf_knowledge')).replace(/\/+$/, '');
-if (GPU_FAMILY.isolate) KERNEL_KNOWLEDGE_DIR = '';
+let KERNEL_KNOWLEDGE_DIR = GPU_FAMILY.isolate ? '' : String(A.perf_knowledge_dir || (GEAK_DIR + '/perf_knowledge')).replace(/\/+$/, '');
 const KERNEL_PATH_ORIG = A.kernel_path;
 const KERNEL_NAME_HINT = String(KERNEL_PATH_ORIG).replace(/\/+$/, '').split('/').pop();
 const BUDGET = parseInt(A.budget != null ? A.budget : 6, 10);
@@ -639,112 +545,50 @@ const WORKLOAD_SPEC_PATH = String(A.workload_spec_path || (OP_SPEC && OP_SPEC.wo
 const APPLY_TO_ORIGINAL = String(A.apply_to_original != null ? A.apply_to_original : 'false');
 const ENABLE_FP8 = String(A.enable_fp8 != null ? A.enable_fp8 : 'false');
 const GPU_LIST = String(A.gpu_ids != null ? A.gpu_ids : '0').split(',').map(s => s.trim()).filter(Boolean);
-// Forwarded verbatim to each lane worker; the dispatcher itself does not schedule. Without the
-// passthrough gpu_mode would be settable only on a direct kernel_lane.js call, so the pinned "before"
-// arm would be unreachable through the normal entry point and the A/B could not be run at all.
 const GPU_MODE = String(A.gpu_mode || 'pool') === 'pin' ? 'pin' : 'pool';
-// Explicit backend list (empty => auto-discover from the freeze + op_benchmarker probe).
-const BACKENDS = (Array.isArray(A.backends) ? A.backends
-  : (typeof A.backends === 'string' ? A.backends.split(',') : []))
+const BACKENDS = (Array.isArray(A.backends) ? A.backends : (typeof A.backends === 'string' ? A.backends.split(',') : []))
   .map(s => String(s == null ? '' : s).trim().toLowerCase()).filter(Boolean);
-// Expert-skills passthrough (advisory; OFF by default -> nothing injected).
 let USE_EXPERT_SKILLS = !GPU_FAMILY.isolate && String(A.use_expert_skills != null ? A.use_expert_skills : 'false') === 'true';
 const EXPERT_SKILLS_DIR = String(A.expert_skills_dir ||
   (KERNEL_KNOWLEDGE_DIR ? KERNEL_KNOWLEDGE_DIR + '/expert_skills' : '')).replace(/\/+$/, '');
 const EXPERT_SKILL_ROLES = new Set(['op_benchmarker']);
+let WARM_START = GPU_FAMILY.isolate ? 'off' : (String(A.warm_start != null ? A.warm_start : 'on').trim().toLowerCase() || 'on');
+const KB_ARTIFACTS_DIR = String(A.kb_artifacts_dir || (GEAK_DIR + '/kb_artifacts')).replace(/\/+$/, '');
+const KB_PLANE_ARGS = Object.fromEntries(['kb_mode', 'kb_store_dir', 'kb_framework_version']
+  .filter((k) => A[k] != null).map((k) => [k, String(A[k])]));
 
-// Warm-start experience KB. Passed to each lane explicitly (the bakeoff lane invocation spreads
-// specific keys, not ...A) so every language lane reads/writes its own <kernel>__<lang>__<gfx> slug.
-let WARM_START = GPU_FAMILY.isolate ? 'off'
-  : (String(A.warm_start != null ? A.warm_start : 'on').trim().toLowerCase() || 'on');
-const KB_ARTIFACTS_DIR = String(A.kb_artifacts_dir ||
-  (WORKFLOW_DIR.replace(/\/[^/]*$/, '') + '/kb_artifacts')).replace(/\/+$/, '');
-// Plane selection, forwarded the same way and for the same reason: every bakeoff lane must read and
-// write the plane the run was launched with, not each its own default.
-const KB_PLANE_ARGS = {
-  ...(A.kb_mode != null ? { kb_mode: String(A.kb_mode) } : {}),
-  ...(A.kb_store_dir != null ? { kb_store_dir: String(A.kb_store_dir) } : {}),
-  ...(A.kb_framework_version != null ? { kb_framework_version: String(A.kb_framework_version) } : {}),
-};
-
-// oracle_freezer output — the standalone counterpart of e2e's kernel_extractor.extract_op, built from a
-// kernel dir instead of a live server. Same op-task-dir contract; also creates the run dir (EVAL_DIR).
+const S_ = { type: 'string' };
+const B_ = { type: 'boolean' };
+const N_ = { type: 'number' };
 const FREEZE_SCHEMA = obj({
-  eval_dir: { type: 'string' },            // the isolated run dir this freeze created under EXP_ROOT
-  op_kind: { type: 'string' },             // gemm|attn|elementwise|moe|other
-  task_dir: { type: 'string' },            // the immutable op task dir (unittest.py + meta.json + baseline_src/)
-  live_backend: { type: 'string' },        // the input kernel's language, e.g. "hip"
-  candidate_backends: arrStr,
-  baseline_frozen: { type: 'boolean' },
-  baseline_callable: { type: 'string' },
-  device_gfx: { type: 'string' },
-  device_target: { type: 'string' },
-  device_name: { type: 'string' },
-  physical_cu_count: { type: 'number' },
-  // Always "" from oracle_freezer — a freezer-built task dir records NO golden tensors (correctness is
-  // live parity vs baseline_src/). Kept in the schema because an e2e kernel_extractor task dir, which
-  // captures unsynthesizable real routing / paged-KV metadata, does ship a reference_io.pt and fills it.
-  reference_io_sha256: { type: 'string' },
-  op_spec: { type: 'object', additionalProperties: true },
-  workload_path: { type: 'string' },
-  smoke: { type: 'string' },               // "pass" required to proceed
-  notes: { type: 'string' },
+  eval_dir: S_, op_kind: S_, task_dir: S_, live_backend: S_, candidate_backends: arrStr, baseline_frozen: B_,
+  baseline_callable: S_, device_gfx: S_, device_target: S_, device_name: S_, physical_cu_count: N_,
+  reference_io_sha256: S_, op_spec: { type: 'object', additionalProperties: true }, workload_path: S_, smoke: S_, notes: S_,
 }, ['op_kind', 'task_dir', 'smoke']);
-
-// op_benchmarker output — the role file is reused VERBATIM from e2e (referenced in place, never edited);
-// the standalone-tune behavior is steered entirely by the discover prompt below. `baseline_ms` +
-// `tuned_speedup` are extra fields this dispatcher asks the agent to fill (in the prompt) so a tuned env
-// backend can be ranked against the SAME frozen input-kernel baseline as the author/optimize lanes.
+// baseline_ms + tuned_speedup rank a tuned env backend against the SAME frozen baseline as the lanes.
 const OPBENCH_SCHEMA = obj({
-  short_name: { type: 'string' }, op_kind: { type: 'string' }, provenance_ok: { type: 'boolean' },
-  winner_backend: { type: 'string' }, winner_kind: { type: 'string' },
-  // null when nothing was timed -- a speedup is a measurement, and 0.0 read as
-  // 'benched, not faster'. `measured` is the discriminator; gate on it, not on the number.
-  isolated_speedup: { type: ['number', 'null'] }, measured: { type: 'boolean' },
-  winner_editable: { type: 'boolean' },
-  best_known_ms: { type: 'number' },
-  baseline_ms: { type: 'number' },     // ms of the FROZEN input kernel (baseline_src/) on the same oracle
-  tuned_speedup: { type: 'number' },   // best tuned env backend's speedup vs the FROZEN baseline (baseline_ms/tuned_ms)
-  recommend_tier_c: { type: 'boolean' }, author_plan: arrObj, tuning_artifact: { type: 'string' },
-  apply_env: { type: 'string' }, apply_flags: { type: 'string' }, code_patch: { type: 'string' },
-  per_backend: arrObj, parity_note: { type: 'string' },
-  gate: { type: 'string' }, harness_suspect: { type: 'boolean' }, reason: { type: 'string' },
+  short_name: S_, op_kind: S_, provenance_ok: B_, winner_backend: S_, winner_kind: S_,
+  isolated_speedup: { type: ['number', 'null'] }, measured: B_, winner_editable: B_, best_known_ms: N_,
+  baseline_ms: N_, tuned_speedup: N_, recommend_tier_c: B_, author_plan: arrObj, tuning_artifact: S_,
+  apply_env: S_, apply_flags: S_, code_patch: S_, per_backend: arrObj, parity_note: S_,
+  gate: S_, harness_suspect: B_, reason: S_,
 }, ['gate', 'isolated_speedup']);
+const REPORT_SCHEMA = obj({ report_path: S_, applied_to_original: S_, note: S_ }, ['report_path']);
+const UPDATE_EXPERIENCE_SCHEMA = obj({ action: S_, card_path: S_, key: S_, note: S_ }, []);
 
-const REPORT_SCHEMA = obj({
-  report_path: { type: 'string' }, applied_to_original: { type: 'string' }, note: { type: 'string' },
-}, ['report_path']);
-
-const UPDATE_EXPERIENCE_SCHEMA = obj({
-  action: { type: 'string' },      // created | merged | skipped
-  card_path: { type: 'string' },   // path under knowledge/learned/, or "" if nothing distilled
-  key: { type: 'string' }, note: { type: 'string' },
-}, []);
-
-// ---------------------------------------------------------------------------
-// Prompt + agent helpers (self-contained; mirror kernel_lane.js / e2e_workflow.js).
-// ---------------------------------------------------------------------------
-// Called AT DISPATCH (before the await) so LLM_TL.events is in dispatch order, not completion order.
-// Returns the event so the caller flips `ok` once the attempt resolves (null when off).
+// Recorded AT DISPATCH so LLM_TL.events is in dispatch order; the caller flips `ok` once it resolves.
 function tlAgent(prompt, o, attempt) {
   if (!LLM_STATS) return null;
   const m = TL_ROLE_RE.exec(String(prompt || ''));
-  const e = {
-    seq: LLM_TL.events.length,
-    phase: (o && o.phase) || '',
-    label: (o && o.label) || 'agent',
-    role: m ? m[1] : '',
-    sub_phase: m ? m[2] : '',
-    attempt: attempt,
-    ok: false,
-  };
+  const e = { seq: LLM_TL.events.length, phase: (o && o.phase) || '', label: (o && o.label) || 'agent',
+    role: m ? m[1] : '', sub_phase: m ? m[2] : '', attempt: attempt, ok: false };
   LLM_TL.events.push(e);
   return e;
 }
 async function agentT(p, o) {
   const label = (o && o.label) ? o.label : 'agent';
   for (let attempt = 1; attempt <= AGENT_RETRIES; attempt++) {
-    const ev = tlAgent(p, o, attempt);   // record AT DISPATCH; ok=false until it resolves
+    const ev = tlAgent(p, o, attempt);
     try {
       if (typeof setTimeout !== 'function' || !(AGENT_TIMEOUT_MS > 0)) {
         const r0 = await agent(p, o); if (ev && r0) ev.ok = true; return r0;
@@ -784,7 +628,6 @@ function expertSkillsBlock(role) {
     `overriding your isolated A/B vs the oracle, never reducing a result below the measured baseline.`;
 }
 
-// Read a role file from an arbitrary roles/ dir (used for e2e's op_benchmarker referenced in place).
 function roleAgentFrom(dir, role, phaseName, intro, inputs) {
   const base = `You are the ${role}. PHASE=${phaseName}.
 First Read ${dir}/roles/${role}.md and follow its instructions for PHASE=${phaseName}.
@@ -798,7 +641,6 @@ Return ONLY the structured JSON the role file specifies (a StructuredOutput tool
   if (CONFIG_AWARE) return base;
   return base + expertSkillsBlock(role);
 }
-// GPU semaphore: 1 GPU per lane, EXCLUSIVE. size==1 serializes lanes. (Lifted from e2e_workflow.js.)
 function makeSem(ids) {
   const free = ids.slice(); const waiters = [];
   const pump = () => { while (waiters.length && waiters[0].n <= free.length) {
@@ -812,24 +654,15 @@ function makeSem(ids) {
   };
 }
 
-// PRIMARY metric of a worker (kernel_lane.js) result: its final_speedup is already the weighted number
-// when the run was workload-aligned, else the geomean. Fall back defensively.
 const primSpeedup = (r) => {
   if (!r) return 0;
   const g = r.final_speedup != null ? r.final_speedup
-          : (r.final_weighted != null ? r.final_weighted
-             : (r.final_geomean != null ? r.final_geomean : 0));
+    : (r.final_weighted != null ? r.final_weighted : (r.final_geomean != null ? r.final_geomean : 0));
   return Number.isFinite(g) ? g : 0;
 };
-
-// Gate fields like `smoke` are free strings in the schemas, so an agent legitimately answers
-// "PASS - 15/15 parity draws, geomean 0.994" and a `=== 'pass'` test throws the whole run away.
-// Match the leading word instead: "PASS - ..." / "passed" gate open, "FAIL"/"did not pass" stay shut.
+// Gate fields are free strings ("PASS - 15/15 parity draws ..."): match the leading word, not equality.
 const says = (v, w) => String(v == null ? '' : v).trim().toLowerCase().startsWith(w);
 
-// ===========================================================================
-// PHASE: Freeze — establish the ONE immutable oracle + frozen baseline (denominator)
-// ===========================================================================
 phase('Freeze');
 const oracle = await agentT(
   roleAgent('oracle_freezer', 'freeze',
@@ -837,7 +670,6 @@ const oracle = await agentT(
       KERNEL_PATH: KERNEL_PATH_ORIG, EXP_ROOT, KERNEL_NAME_HINT, GPU_ID: GPU_LIST[0],
       OP_SPEC, WORKLOAD_SPEC_PATH, SKILL_DIR: WORKFLOW_DIR,
       EXPECTED_GFX, EXPECTED_TARGET, EXPECTED_DEVICE_NAME, EXPECTED_PHYSICAL_CU_COUNT,
-      // harness_lib.py (the shared timing/correctness lib) ships with e2e_workflow; gpu_lock.sh ships here.
       HARNESS_LIB: `${E2E_WF_DIR}/scripts/harness_lib.py`,
       GPU_LOCK: `${WORKFLOW_DIR}/scripts/gpu_lock.sh`,
     }),
@@ -851,47 +683,33 @@ const DETECTED_GFX = String(oracle.device_gfx || '').trim().toLowerCase();
 const DETECTED_TARGET = String(oracle.device_target || '').trim().toLowerCase();
 const DETECTED_DEVICE_NAME = String(oracle.device_name || '').trim();
 const DETECTED_PHYSICAL_CU_COUNT = Number(oracle.physical_cu_count);
-if (!DETECTED_GFX || !DETECTED_TARGET) {
-  throw new Error('Freeze failed: oracle_freezer did not return structured device_gfx and device_target');
-}
-if (DETECTED_GFX === 'gfx1200') {
-  throw new Error('Detected gfx1200, which is not validated by this workflow; refusing R9700 guidance');
-}
-if (EXPECTED_GFX && DETECTED_GFX !== EXPECTED_GFX) {
-  throw new Error(`GPU architecture mismatch: expected ${EXPECTED_GFX}, detected ${DETECTED_GFX}`);
-}
+if (!DETECTED_GFX || !DETECTED_TARGET) fail('Freeze failed: oracle_freezer did not return structured device_gfx and device_target');
+if (DETECTED_GFX === 'gfx1200') fail('Detected gfx1200, which is not validated by this workflow; refusing R9700 guidance');
+if (EXPECTED_GFX && DETECTED_GFX !== EXPECTED_GFX) fail(`GPU architecture mismatch: expected ${EXPECTED_GFX}, detected ${DETECTED_GFX}`);
 if (['r9700', 'r9600d'].includes(EXPECTED_TARGET) && DETECTED_TARGET !== EXPECTED_TARGET) {
-  throw new Error(`GPU product mismatch: expected ${EXPECTED_TARGET}, detected ${DETECTED_TARGET}`);
+  fail(`GPU product mismatch: expected ${EXPECTED_TARGET}, detected ${DETECTED_TARGET}`);
 }
-if (EXPECTED_TARGET === 'w7900' && DETECTED_TARGET !== 'w7900') {
-  throw new Error(`GPU product mismatch: expected w7900, detected ${DETECTED_TARGET}`);
-}
+if (EXPECTED_TARGET === 'w7900' && DETECTED_TARGET !== 'w7900') fail(`GPU product mismatch: expected w7900, detected ${DETECTED_TARGET}`);
 if (DETECTED_GFX === 'gfx1100' && DETECTED_TARGET !== 'w7900') {
-  throw new Error(
-    `Detected gfx1100 with device_target=${DETECTED_TARGET}: only the exact Radeon Pro W7900 is ` +
+  fail(`Detected gfx1100 with device_target=${DETECTED_TARGET}: only the exact Radeon Pro W7900 is ` +
     'validated on gfx1100; refusing RDNA3 guidance');
 }
 if (DETECTED_TARGET === 'w7900' && DETECTED_GFX !== 'gfx1100') {
-  throw new Error(`Freeze returned device_target=w7900 on ${DETECTED_GFX}: w7900 requires gfx1100`);
+  fail(`Freeze returned device_target=w7900 on ${DETECTED_GFX}: w7900 requires gfx1100`);
 }
 if (!Number.isFinite(DETECTED_PHYSICAL_CU_COUNT) || DETECTED_PHYSICAL_CU_COUNT <= 0) {
-  throw new Error('Freeze failed: oracle_freezer did not return a positive physical_cu_count');
+  fail('Freeze failed: oracle_freezer did not return a positive physical_cu_count');
 }
 if (EXPECTED_DEVICE_NAME && DETECTED_DEVICE_NAME !== EXPECTED_DEVICE_NAME) {
-  throw new Error(
-    `GPU product name mismatch: expected ${EXPECTED_DEVICE_NAME}, detected ${DETECTED_DEVICE_NAME || 'unknown'}`);
+  fail(`GPU product name mismatch: expected ${EXPECTED_DEVICE_NAME}, detected ${DETECTED_DEVICE_NAME || 'unknown'}`);
 }
-if (EXPECTED_PHYSICAL_CU_COUNT > 0 &&
-    DETECTED_PHYSICAL_CU_COUNT !== EXPECTED_PHYSICAL_CU_COUNT) {
-  throw new Error(
-    `GPU physical CU mismatch: expected ${EXPECTED_PHYSICAL_CU_COUNT}, ` +
-    `detected ${DETECTED_PHYSICAL_CU_COUNT}`);
+if (EXPECTED_PHYSICAL_CU_COUNT > 0 && DETECTED_PHYSICAL_CU_COUNT !== EXPECTED_PHYSICAL_CU_COUNT) {
+  fail(`GPU physical CU mismatch: expected ${EXPECTED_PHYSICAL_CU_COUNT}, detected ${DETECTED_PHYSICAL_CU_COUNT}`);
 }
 const LANE_GFX = EXPECTED_GFX || DETECTED_GFX;
 const LANE_TARGET = EXPECTED_TARGET || DETECTED_TARGET;
 const LANE_DEVICE_NAME = EXPECTED_DEVICE_NAME || DETECTED_DEVICE_NAME;
-const LANE_PHYSICAL_CU_COUNT =
-  EXPECTED_PHYSICAL_CU_COUNT || DETECTED_PHYSICAL_CU_COUNT;
+const LANE_PHYSICAL_CU_COUNT = EXPECTED_PHYSICAL_CU_COUNT || DETECTED_PHYSICAL_CU_COUNT;
 if (gpuFamily(DETECTED_GFX).isolate) {
   GPU_FAMILY = gpuFamily(DETECTED_GFX);
   KERNEL_KNOWLEDGE_DIR = '';
@@ -901,20 +719,9 @@ if (gpuFamily(DETECTED_GFX).isolate) {
 const EVAL_DIR = oracle.eval_dir || `${EXP_ROOT}/bakeoff_${KERNEL_NAME_HINT}`;
 log(`Freeze done. op_kind=${oracle.op_kind}, task_dir=${oracle.task_dir}, live_backend=${oracle.live_backend || '?'}`);
 
-// ===========================================================================
-// PHASE: Discover — per-language existing-impl probe + measure + author_plan +
-// OFFLINE per-backend tune. e2e's op_benchmarker role is reused IN PLACE and
-// UNCHANGED (SKILL_DIR=E2E_WF_DIR so its knowledge/scripts resolve). Its Tier-B
-// step is written for a live server; since there is none here, the prompt below
-// REDIRECTS the tune to run OFFLINE on the frozen oracle's shapes (which carry the
-// real M/N/K/bias/dtype) and to verify engagement in the ISOLATED unittest — so a
-// standalone bake-off STILL gets the aiter/CK GEMM tune, without touching the role
-// file. Only pure server-flag levers (--attention-backend swap, serving-only
-// engagement probes) are skipped.
-// ===========================================================================
 phase('Discover');
-const DISCOVER_INTRO = GPU_FAMILY.isolate
-  ? (
+// e2e's op_benchmarker role is reused unchanged; this intro redirects its Tier-B tune to run OFFLINE.
+const DISCOVER_INTRO = GPU_FAMILY.isolate ? (
   'STANDALONE kernel bake-off — there is NO live server (do not try to launch or capture from one).\n' +
   `${GPU_FAMILY.name} / ${LANE_GFX} ISOLATION: do NOT consult learned KB, expert skills, AITER CDNA win cards, or CK/AITER offline tune.\n` +
   'Do NOT inject MFMA / FNUZ / Instinct guidance.' +
@@ -925,8 +732,7 @@ const DISCOVER_INTRO = GPU_FAMILY.isolate
   '(3) Fill `baseline_ms` = the FROZEN input kernel`s ms on the oracle.\n' +
   '(4) DECIDE the author_plan as usual without CDNA SOTA cards.\n' +
   '(5) DO NOT curate e2e_workflow/knowledge/learned/. WRITE NOTHING under e2e_workflow/.'
-  )
-  : (
+) : (
   'STANDALONE kernel bake-off — there is NO live server (do not try to launch or capture from one).\n' +
   '(1) Tier-A DISCOVER: bench every candidate backend on the immutable oracle in OP_TASK_DIR.\n' +
   '(2) Tier-B TUNE is STILL IN SCOPE — run it OFFLINE, not from a server capture. The step`s "capture ' +
@@ -949,7 +755,7 @@ const DISCOVER_INTRO = GPU_FAMILY.isolate
   'This run`s learned sink is kernel_workflow/knowledge/learned/, curated by the TechLead`s ' +
   'update_experience step after Report. WRITE NOTHING under e2e_workflow/ — read it freely, but the ' +
   'only files you create or modify live under EVAL_DIR (plus the tuning artifacts you were asked for).'
-  );
+);
 const bake = await agentT(
   roleAgentFrom(E2E_WF_DIR, 'op_benchmarker', 'bakeoff', DISCOVER_INTRO, {
     EVAL_DIR, OP_TASK_DIR: oracle.task_dir, OP_KIND: oracle.op_kind,
@@ -959,17 +765,8 @@ const bake = await agentT(
   }),
   { phase: 'Discover', label: 'op_benchmarker:discover', schema: OPBENCH_SCHEMA }) || {};
 
-// Resolve lanes. The INCUMBENT (original input) language ALWAYS competes as an in-place `optimize` lane:
-// it is the floor every rewrite must beat, and the entire premise of a bake-off is "keep the fastest,
-// INCLUDING simply optimizing what we already have". args.backends only ADDS rewrite candidates on top —
-// it can never drop the incumbent (otherwise a rewrite could "win" while being slower than the un-tried
-// in-place optimization of the original). Other languages author (or rewrite->optimize if an editable impl
-// already exists on the box).
-// `author_plan` is a free-form array of objects in the schema, so the agent may name the language under
-// any of a few obvious keys. Naive `String(a.language)` turned a missing key into the *string* "undefined",
-// which is truthy — it survived .filter(Boolean) and became a real lane literally named `undefined` (lane
-// dir `bakeoff/undefined/`, winner row `lang: "undefined"`). Read the aliases; an entry that still has no
-// name is an entry about THIS op, so attribute it to the incumbent language rather than inventing one.
+// The incumbent language ALWAYS competes as an in-place optimize lane (the floor every rewrite must beat);
+// args.backends only adds candidates. An author_plan entry with no language is attributed to the incumbent.
 const liveLang = String(oracle.live_backend || '').toLowerCase();
 const rawLang = (a) => String((a && (a.language || a.lang || a.backend || a.target_language)) || '').trim();
 const langOf = (a) => rawLang(a).toLowerCase() || liveLang;
@@ -977,67 +774,42 @@ const unnamed = (bake.author_plan || []).filter(a => !rawLang(a)).length;
 if (unnamed) log(`WARNING: ${unnamed} author_plan entr(y|ies) carried no language field; ` +
                  `attributed to the incumbent language '${liveLang || '(unknown)'}'. Check Discover output.`);
 const modeOf = (a) => (a && a.route === 'rewrite') ? 'optimize' : 'author';
-// route per language, for the explicit-`backends` path (an existing editable impl => optimize, not author).
 const planByLang = Object.fromEntries((bake.author_plan || []).map(a => [langOf(a), modeOf(a)]));
 if (!liveLang) {
-  // The freezer could not identify the input language, so the incumbent optimize lane cannot be guaranteed.
-  // Do NOT silently proceed with rewrites only — that would let a slower rewrite "win" over a baseline we
-  // never tried to optimize in-place. Surface it loudly so it is caught, then continue with what we have.
   log('WARNING: oracle.live_backend is empty — cannot guarantee the incumbent-language optimize lane; ' +
       'rewrites will still run but the original language is under-represented. Check oracle_freezer.');
 }
-// Incumbent FIRST (force-included regardless of args.backends / discovery), then the requested/discovered
-// rewrites. Deduped on lang+mode, NOT on lang alone: "optimize the existing Triton in place" and "author a
-// fresh Triton from scratch" are two genuinely different candidates and both deserve a lane.
+// Deduped on lang+mode: optimizing an existing impl and authoring a fresh one are different candidates.
 const wanted = [];
 const seen = new Set();
 const want = (lang, mode) => {
-  if (!lang) return;
-  const k = `${lang}:${mode}`;
-  if (seen.has(k)) return;
-  seen.add(k);
-  wanted.push({ lang, mode });
+  if (lang && !seen.has(`${lang}:${mode}`)) { seen.add(`${lang}:${mode}`); wanted.push({ lang, mode }); }
 };
 want(liveLang, 'optimize');
 if (BACKENDS.length) BACKENDS.forEach(l => want(l, l === liveLang ? 'optimize' : (planByLang[l] || 'author')));
 else (bake.author_plan || []).forEach(a => want(langOf(a), modeOf(a)));
-// Lane dir/log key: plain language when that language has a single lane, `<lang>_<mode>` when it has two.
 const laneCount = {};
 wanted.forEach(w => { laneCount[w.lang] = (laneCount[w.lang] || 0) + 1; });
-const lanes = wanted.map(w => ({
-  lang: w.lang, mode: w.mode,
-  key: laneCount[w.lang] > 1 ? `${w.lang}_${w.mode}` : w.lang,
-}));
+const lanes = wanted.map(w => ({ lang: w.lang, mode: w.mode, key: laneCount[w.lang] > 1 ? `${w.lang}_${w.mode}` : w.lang }));
 if (!lanes.length) {
   log('Discover produced no viable lanes; aborting.');
   return { mode: MODE, task_dir: oracle.task_dir, validation_status: 'no_lanes', winner: null };
 }
-// a single discovered lane just runs that one lane below (equivalent to a plain single-language optimize).
 log(`baseline ${bake.best_known_ms != null ? bake.best_known_ms + ' ms' : '(unknown)'}; ` +
     `${lanes.length} lane(s) = ${lanes.map(l => `${l.lang}:${l.mode}`).join(', ')}; ` +
     `GPUs=${GPU_LIST.length} => concurrency ${Math.min(lanes.length, GPU_LIST.length)}; ` +
     `est cost ~${lanes.length}x a single ${BUDGET}-budget run.`);
 
-// ===========================================================================
-// PHASE: Bakeoff — one UNCHANGED kernel_lane worker per language, parallel over the
-// GPU pool. dispatcher(level0) -> worker(level1): exactly one nesting level per lane.
-// Every lane runs against oracle.task_dir's immutable unittest => the SAME frozen
-// baseline denominator => directly comparable speedups (anti-cheating invariant).
-// ===========================================================================
+// One kernel_lane per language over the GPU pool, all scored on the SAME frozen oracle. This arg object is
+// explicit (not {...A}), so any knob omitted here silently reverts to the lane's default.
 phase('Bakeoff');
 const sem = makeSem(GPU_LIST);
 const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
   try {
     const r = await workflow({ scriptPath: WORKER }, {
-      kernel_path: oracle.task_dir, workflow_dir: WORKFLOW_DIR,
-      // This lane runs on an oracle_freezer-frozen task dir, so a GEAK_TIMING_RECEIPT is EXPECTED and
-      // its absence is a real fault. The optimize/author path spreads {...A} and never sets this, so a
-      // pass-through lane (and e2e, which calls this worker directly) correctly defaults to false —
-      // there is no Freeze on those routes, so director must not demand a receipt they cannot produce.
-      frozen_oracle: 'true',
+      kernel_path: oracle.task_dir, workflow_dir: WORKFLOW_DIR, frozen_oracle: 'true',
       expected_gfx: LANE_GFX, expected_target: LANE_TARGET,
-      expected_device_name: LANE_DEVICE_NAME,
-      expected_physical_cu_count: LANE_PHYSICAL_CU_COUNT,
+      expected_device_name: LANE_DEVICE_NAME, expected_physical_cu_count: LANE_PHYSICAL_CU_COUNT,
       ...(A.gpu_perf_level ? { gpu_perf_level: String(A.gpu_perf_level) } : {}),
       mode: l.mode, target_language: l.lang,
       op_spec: oracle.op_spec || OP_SPEC, workload_spec_path: oracle.workload_path || WORKLOAD_SPEC_PATH || '',
@@ -1045,28 +817,16 @@ const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
       exp_root: `${EVAL_DIR}/bakeoff/${l.key}`,
       use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
       perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
-      // Forward the KB switch. This arg object is explicit (the optimize/author path spreads {...A},
-      // this one does not), so anything omitted here silently reverts to the lane's default — a
-      // caller asking for a KB-off bakeoff would have got eight KB-on lanes and no error.
       use_learned_kb: A.use_learned_kb != null ? String(A.use_learned_kb) : 'true',
-      // This explicit arg object drops nothing load-bearing that the parent set: forward llm_stats
-      // when supplied so a parent opt-out reaches each lane (unset stays absent -> lane default on).
       ...(A.llm_stats != null ? { llm_stats: String(A.llm_stats) } : {}),
-      // Forward the Expt-3 routing switch the same way, so a routed bake-off reaches every lane's
-      // kernel_lane (unset stays absent -> routing OFF -> byte-identical run).
       ...(A.routing != null ? { routing: String(A.routing) } : {}),
-      // ...and the cost-ladder knobs (thresholds, caps, floors, decider), each only when set.
       ...Object.fromEntries(['route_conf_escalate', 'route_max_retries_per_lane', 'route_max_top_escalations',
         'route_max_output_tokens', 'route_floors', 'route_decider', 'route_eikos_tau', 'route_eikos_max_consults',
         'route_eikos_carrier_model', 'route_eikos_carrier_timeout_ms', 'route_eikos_probe_failed']
         .filter((k) => A[k] != null).map((k) => [k, typeof A[k] === 'object' ? JSON.stringify(A[k]) : String(A[k])])),
-      // Curation is central in bake-off mode (see the UpdateExperience step below). In optimize/author
-      // mode this dispatcher is a passthrough, so the lane keeps its default `on` and curates itself.
-      update_experience: 'off',
+      update_experience: 'off', // bake-off curates centrally after Report
       warm_start: WARM_START, kb_artifacts_dir: KB_ARTIFACTS_DIR, ...KB_PLANE_ARGS,
     });
-    // Absorb this lane's own agent timeline so the dispatcher's returned timeline accounts for every
-    // lane's attempts (kernel lanes never persist their own trace file, so this is the only path).
     if (LLM_STATS && r && r.llm_timeline) LLM_TL.nested.push(r.llm_timeline);
     const speedup = primSpeedup(r);
     log(`lane ${l.key}:${l.mode} -> ${speedup ? speedup.toFixed(2) + 'x' : 'no result'} (${r ? r.validation_status : 'null'})`);
@@ -1077,20 +837,13 @@ const results = await Promise.all(lanes.map(l => sem.with(1, async ([gpu]) => {
   }
 })));
 
-// ===========================================================================
-// PHASE: Report — rank ALL candidates on the SAME frozen baseline; write table + winner.
-// Candidates are THREE classes, all scored against the one frozen input-kernel baseline:
-//   (a) each kernel_lane lane (input-language optimize + per-language author) — a source patch;
-//   (b) the tuned env backend from Discover (aiter/CK offline tune) — an env/config winner (no patch).
-// ===========================================================================
 phase('Report');
-// (a) lane candidates
 const cands = results.map(x => ({
   lang: x.lane.lang, mode: x.lane.mode, kind: 'lane', speedup: x.speedup,
   validation_status: x.r ? x.r.validation_status : 'failed',
   eval_dir: x.r ? x.r.eval_dir : '', patch: x.r ? x.r.final_patch : '', apply_env: '', tuning_artifact: '',
 }));
-// (b) tuned env backend candidate (only if it beat the frozen baseline)
+// Candidates: every lane (a source patch) plus the tuned env backend from Discover (no patch).
 const tunedSpeedup = Number(bake.tuned_speedup);
 if (Number.isFinite(tunedSpeedup) && tunedSpeedup > 1.0 && bake.winner_backend && bake.winner_backend !== 'none') {
   cands.push({
@@ -1100,16 +853,7 @@ if (Number.isFinite(tunedSpeedup) && tunedSpeedup > 1.0 && bake.winner_backend &
   });
   log(`tuned env backend ${bake.winner_backend} -> ${tunedSpeedup.toFixed(2)}x (vs frozen baseline)`);
 }
-// A candidate only WINS if it actually BEAT the frozen baseline (speedup > 1.0) — the SAME guard the
-// tuned env candidate uses above. Slower-than-baseline lanes remain in the table (laneRows) for full
-// transparency but must never win "by default"; winner=null => validation_status 'no_winner' => keep
-// the original kernel. Without this, a lane that is SLOWER than baseline (e.g. the only non-failed lane
-// at 0.17x) would be mislabeled the winner and mislead downstream automation reading .winner.
-// ...and only if the director ACCEPTED it. Ranking on speed alone let a lane whose validation came
-// back `flagged` (patch did not install, correctness failed, contended box) win the bake-off, be
-// applied to the original kernel, and be curated into the KB — a number with a known reason not to
-// be believed, promoted by every downstream step. Reported in review of #411. `laneRows` still
-// carries every lane for transparency; only eligibility to WIN is tightened.
+// A candidate wins only if it beat the frozen baseline (> 1.0x) and, for a lane, the director accepted it.
 const ACCEPTED = (c) => String(c.validation_status || '').toLowerCase() === 'accepted';
 const ranked = cands.filter(c => c.speedup > 1.0 && (c.kind !== 'lane' || ACCEPTED(c)))
   .sort((a, b) => b.speedup - a.speedup);
@@ -1122,8 +866,6 @@ const winner = ranked[0] || null;
 const laneRows = cands;
 const bestSpeedup = cands.reduce((m, c) => Math.max(m, Number(c.speedup) || 0), 0);
 
-// Apply instruction depends on the winner class: a lane winner is a source patch (git apply); an
-// env-tune winner is a config/env deploy (no source change — record apply_env + tuning_artifact).
 const applyStep = (APPLY_TO_ORIGINAL !== 'true' || !winner)
   ? `Do NOT modify the original kernel (report only). Set applied_to_original to "".`
   : (winner.kind === 'env')
@@ -1170,11 +912,7 @@ log(winner
   ? `Bake-off COMPLETE. winner=${winner.lang}:${winner.mode} ${winner.speedup.toFixed(2)}x. Results in ${EVAL_DIR}`
   : `Bake-off COMPLETE. NO candidate beat the frozen baseline (best ${bestSpeedup.toFixed(2)}x <= 1.0x across ${cands.length} candidate(s)) — keeping the ORIGINAL kernel. Results in ${EVAL_DIR}`);
 
-// ---------------------------------------------------------------------------
-// PHASE: UpdateExperience — bake-off curates CENTRALLY here (its lanes run with
-// update_experience=off): the reusable lesson is the cross-language routing outcome, which
-// no single lane can see. Sink is THIS workflow's knowledge/learned/ (see its README.md),
-// never e2e's. Only on a measured win, and ADD-only — a failed step is byte-neutral.
+// Bake-off curates CENTRALLY into this workflow's knowledge/learned/ (lanes run update_experience=off).
 if (winner && winner.speedup > 1.0) {
   const LEARNED_DIR = `${WORKFLOW_DIR}/knowledge/learned`;
   try {
@@ -1197,30 +935,13 @@ if (winner && winner.speedup > 1.0) {
   }
 }
 
-// Persist the agent timeline, then render the run report (ledger -> clickable role-execution-tree
-// HTML + MD twin) as the very last step. kernel_workflow is always a TOP-LEVEL entry point (E2E nests
-// kernel_lane.js, not this dispatcher), so it owns its own ledger + report. The nested lane timelines
-// are already merged into LLM_TL.nested, so this one report covers the whole bake-off. The script has
-// no filesystem access, so a tiny agent writes the timeline and runs the report driver. Entirely
-// best-effort: accounting must never fail a run that produced a real speedup.
 if (EVAL_DIR && LLM_STATS) await emitRunReport(EVAL_DIR);
 
+// Best-effort: accounting must never fail a run that produced a real speedup.
 async function emitRunReport(EVAL_DIR) {
   try {
-    const tlJson = JSON.stringify({ ...LLM_TL, instance: EVAL_DIR });
-    const tlPath = `${EVAL_DIR}/reports/trace/agent_timeline.json`;
-    await agentT(
-      `You are the file_writer. PHASE=persist_llm_stats.\n` +
-      `Do exactly two things, in order:\n` +
-      `1. Use the Write tool to create "${tlPath}" with EXACTLY the JSON below, verbatim ` +
-      `(create parent directories if needed; do NOT reformat, truncate or summarize it):\n\n` +
-      '```json\n' + tlJson + '\n```\n\n' +
-      `2. Then run this Bash command (best-effort; if it fails, carry on and report ok=false).\n` +
-      `   It runs the token/time/cost ledger AND renders the role-execution-tree report (HTML + MD):\n` +
-      `   python3 -B "${WORKFLOW_DIR}/../interface/geak_report.py" --eval-dir "${EVAL_DIR}"\n\n` +
-      `Then return {"written": true, "path": "${tlPath}", "ok": <true if the command exited 0 else false>}.`,
-      { phase: 'Report', label: 'file_writer:persist_llm_stats',
-        schema: obj({ written: { type: 'boolean' }, path: { type: 'string' }, ok: { type: 'boolean' } }, []) });
+    await agentT(statsPrompt(EVAL_DIR, { ...LLM_TL, instance: EVAL_DIR }),
+      { phase: 'Report', label: 'file_writer:persist_llm_stats', schema: STATS_SCHEMA });
     const nestedNote = LLM_TL.nested.length ? ' plus ' + LLM_TL.nested.length + ' nested lane(s)' : '';
     log(`LLM token+time+cost ledger -> ${EVAL_DIR}/reports/trace/ and run report (HTML+MD) -> ` +
         `${EVAL_DIR}/report/. ${LLM_TL.events.length} agent attempts recorded${nestedNote}.`);
@@ -1231,17 +952,14 @@ async function emitRunReport(EVAL_DIR) {
 
 return {
   mode: MODE,
-  // `instance` = this run's eval dir: a stable identity so the parser dedupes a timeline reached
-  // twice without collapsing two distinct same-shape lanes.
   llm_timeline: LLM_STATS ? { ...LLM_TL, instance: EVAL_DIR } : undefined,
   task_dir: oracle.task_dir,
   eval_dir: EVAL_DIR,
   baseline_ms: bake.baseline_ms != null ? bake.baseline_ms : (bake.best_known_ms != null ? bake.best_known_ms : null),
   candidates: laneRows,
   winner: winner && {
-    lang: winner.lang, mode: winner.mode, kind: winner.kind, speedup: winner.speedup,
-    eval_dir: winner.eval_dir, final_patch: winner.patch,
-    apply_env: winner.apply_env, tuning_artifact: winner.tuning_artifact,
+    lang: winner.lang, mode: winner.mode, kind: winner.kind, speedup: winner.speedup, eval_dir: winner.eval_dir,
+    final_patch: winner.patch, apply_env: winner.apply_env, tuning_artifact: winner.tuning_artifact,
     validation_status: winner.validation_status,
   },
   report_path: rep ? rep.report_path : `${EVAL_DIR}/bakeoff_report.md`,
