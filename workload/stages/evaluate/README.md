@@ -12,6 +12,13 @@ Choose its scope for a decision, not to complete an inherited list of tests. Kee
 conditioning and active instrumentation comparable even for a screen; extra repetitions
 cannot repair a systematic mismatch.
 
+For model correctness, run the [GSM8K client](../../../e2e_workflow/scripts/gsm8k_eval.py)
+on both arms with the same questions and decoding settings, outside timed traffic.
+Before scoring, Brain sets the question count (`--limit`) and maximum acceptable drop
+in percentage points in `PLAN.md`, honoring user or scenario requirements. For adoption,
+report both final-answer exact-match accuracies (correct/total) and compare the change
+(candidate minus reference) with the planned tolerance.
+
 Resolve each arm's repeats, required quality and deployment reuse from its native owner.
 The finalizer's `repeats` applies to the candidate; a fresh stock control has its own
 admission requirements. Do not mirror one arm's count onto another. Reuse compatible
