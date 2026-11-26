@@ -41,6 +41,6 @@ def test_optimize_and_author_runs_are_unchanged():
 
 
 def test_the_lane_script_stays_under_the_workflow_size_cap():
-    # The Workflow runtime rejects a script over 512 KiB; keep room for the next change.
+    # The Workflow runtime rejects a script over 512 KiB; same margin as e2e_workflow/scripts/test_workflow_script_size.js.
     size = (HERE.parents[1] / "kernel_lane.js").stat().st_size
-    assert size < 512 * 1024 - 16 * 1024, f"kernel_lane.js is {size} bytes"
+    assert size <= 512 * 1024 - 4096, f"kernel_lane.js is {size} bytes"

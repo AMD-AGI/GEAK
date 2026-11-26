@@ -50,11 +50,13 @@ CASES = textwrap.dedent('''
     def call(args):
         return op(args["x"])
 
-    def timing_cases(h, meta):
+    def timing_specs(h, meta):
+        return [{"sig": f"n{n}", "regime": "decode", "m": n} for n in (8, 64)]
+
+    def make_timing_case(spec):
         import torch
-        import torch.distributed as dist
-        for n in (8, 64):   # inputs are built per rank, so listing the cases needs the process group too
-            yield {"sig": f"n{n}", "regime": "decode", "args": {"x": torch.ones(n) * (dist.get_rank() + 1)}, "m": n}
+        import torch.distributed as dist   # operands are built per rank, inside the process group
+        return dict(spec, args={"x": torch.ones(spec["m"]) * (dist.get_rank() + 1)})
 
     def random_shapes(h, meta):
         import torch
@@ -105,6 +107,9 @@ class MultiRankLegs(unittest.TestCase):
         }
         with open(os.path.join(self.task, "meta.json"), "w") as fh:
             json.dump(self.meta, fh)
+        self._env = dict(os.environ)
+        # CPU only: the 2 ranks must not compete for whatever GPUs this box exposes.
+        os.environ["HIP_VISIBLE_DEVICES"] = os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
         os.environ["PYTHONPATH"] = os.pathsep.join(
             [os.path.join(self.root, "site")] + ([os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else []))
         subprocess.run([sys.executable, os.path.join(self.task, "overlay_setup.py"), "add-marker",
@@ -113,6 +118,8 @@ class MultiRankLegs(unittest.TestCase):
         self.h = _load_harness()
 
     def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self._env)
         shutil.rmtree(self.root, ignore_errors=True)
 
     def _edit(self, name, text):
@@ -129,6 +136,12 @@ class MultiRankLegs(unittest.TestCase):
         row = res["cases"][0]
         self.assertEqual(len(row["per_rank_ms"]), 2)
         self.assertEqual(row["ms"], max(row["per_rank_ms"]))
+
+    def test_list_is_one_process_and_time_follows_sigs_order(self):
+        base = os.path.join(self.task, "baseline_overlay")
+        self.assertEqual(self.h._run_leg(self.task, base, "list", timeout=300)["sigs"], ["n8", "n64"])
+        res = self.h._run_leg(self.task, base, "time", sigs=["n64", "n8"], timeout=300)
+        self.assertEqual([r["sig"] for r in res["cases"]], ["n64", "n8"])
 
     def test_an_unchanged_candidate_passes_on_every_rank(self):
         res = self.h.run_correctness_ranks(self.task, self.meta, timeout=300)

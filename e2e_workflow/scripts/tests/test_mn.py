@@ -1807,7 +1807,7 @@ class PdLoadWaitTest(unittest.TestCase):
 
 
 KX_SCRIPTS = os.path.join(os.path.dirname(SCRIPTS_DIR), "knowledge", "kernel_extraction_skills",
-                          "kernel-extract", "scripts")
+                          "kernel-profile", "scripts")
 
 PROBE_DRIVER = """set -uo pipefail
 HERE="{scripts}"
@@ -1820,7 +1820,7 @@ echo "FN_RC=$?"
 
 @unittest.skipIf(BASH is None or not mn.local_identity(), "bash and a Linux boot_id")
 class ProbeArgsTest(unittest.TestCase):
-    """adapter_probe_args feeds the kernel-extract skill's serving_probe.py: whatever it prints
+    """adapter_probe_args feeds the kernel-profile skill's serving_probe.py: whatever it prints
     must be flags that script's own parser accepts, naming this server's engines and logs."""
 
     PD_FACTS = ('_MN_TOPOLOGY=pd_disagg\n'
@@ -2517,7 +2517,7 @@ class PdTopnMergeTest(unittest.TestCase):
 
 class PdPointsTest(unittest.TestCase):
     SKILL = os.path.join(os.path.dirname(SCRIPTS_DIR), "knowledge", "kernel_extraction_skills",
-                         "kernel-extract")
+                         "kernel-profile")
     ARGS = ("[2026-10-30 10:00:00] server_args=ServerArgs(model_path='m', chunked_prefill_size=8192, "
             "cuda_graph_bs=[1, 2, 4, 8, 16], decode_log_interval=40, disaggregation_mode='{}')")
     # Newer sglang logs a dict, and splits the graph sizes per phase.
@@ -2600,7 +2600,7 @@ class PdMassTest(unittest.TestCase):
         {"id": "P_rest", "name": "P_rest", "share_of_phase_pct": {"PREFILL": 70.0}, "selection_pct_gpu_time": 42.0},
         {"id": "D_rest", "name": "D_rest", "share_of_phase_pct": {"DECODE": 65.0}, "selection_pct_gpu_time": 26.0}]}
     SELECT = os.path.join(os.path.dirname(SCRIPTS_DIR), "knowledge", "kernel_extraction_skills",
-                          "kernel-extract", "scripts", "select_targets.py")
+                          "kernel-profile", "scripts", "select_targets.py")
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="mn_mass_")

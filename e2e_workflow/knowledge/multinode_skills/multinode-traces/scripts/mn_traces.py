@@ -430,7 +430,7 @@ def pd_mass(coverage_paths: list, roles_path: str) -> dict:
 
 
 def apply_pd_mass(ranking_path: str, mass: dict) -> dict:
-    """Rewrite a kernel-extract ranking's selection_pct_gpu_time as S_k; the agent's number is kept."""
+    """Rewrite a kernel-profile ranking's selection_pct_gpu_time as S_k; the agent's number is kept."""
     with open(ranking_path, encoding="utf-8") as handle:
         doc = json.load(handle)
     rows = doc.get("ranking") or []
@@ -483,7 +483,7 @@ def cmd_pd_mass(argv: list) -> int:
 # --------------------------------------------------------------------------
 # PD POINTS  (mn_traces.py pd-points)
 # --------------------------------------------------------------------------
-# Fixed-length pd_disagg prices its engines the way AgentX does: the kernel-extract
+# Fixed-length pd_disagg prices its engines the way AgentX does: the kernel-profile
 # skill's planner picks sampling points from each engine's own baseline log (PREFILL
 # from the prefill engine, DECODE from the decode engine), bench_e2e's probe mode
 # measures them, and coverage_ledger's mass feeds topn-merge --coverage.
@@ -547,7 +547,7 @@ def cmd_pd_points(argv: list) -> int:
     ap = argparse.ArgumentParser(prog="mn_traces.py pd-points")
     ap.add_argument("--engine-log", action="append", required=True, metavar="NAME=PATH",
                     help="one engine's server log from the baseline leg (prefill=, decode=)")
-    ap.add_argument("--skill-root", required=True, help="the kernel-extract skill directory")
+    ap.add_argument("--skill-root", required=True, help="the kernel-profile skill directory")
     ap.add_argument("--points-per-phase", type=int, default=3)
     ap.add_argument("--out-dir", required=True, help="writes sampling_points.json and its inputs here")
     args = ap.parse_args(argv)

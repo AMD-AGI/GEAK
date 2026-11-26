@@ -18,7 +18,7 @@ cases.setup_dist(h, meta) when the task defines it, and then the SAME cases in t
 fixed iteration counts -- ranks that disagree on the order would wait on each other forever. `time`
 reports the slowest rank's ms (the operator is as fast as its slowest rank) plus every rank's; `oracle`
 saves one blob per rank (`<out>.rank<r>`); `check` compares every rank's outputs with that rank's blob.
-Only rank 0 prints the JSON result.
+Only rank 0 prints the JSON result. `list` is metadata only (timing_specs) and runs as one process.
 """
 import argparse
 import importlib
@@ -26,6 +26,10 @@ import importlib.util
 import json
 import os
 import sys
+import time
+
+_STARTED = time.perf_counter()
+_SETUP = {}
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 # this file lives IN the task dir next to a file named unittest.py — drop it from sys.path before
@@ -262,6 +266,18 @@ def _copy_into(dst, src):
         dst.copy_(src)
 
 
+def timing_rows(cases, h, meta, bucket="", sigs=None, metadata_only=False):
+    """Timed cases from metadata-only `timing_specs(h, meta)`, filtered by --bucket and ordered by
+    --sigs; `make_timing_case(spec)` builds ONE shape's operands at a time, so --mode list builds
+    none and --mode time never holds two shapes' operands at once."""
+    specs = [c for c in cases.timing_specs(h, meta) if not bucket or c["sig"] == bucket]
+    if sigs is not None:
+        order = {sig: i for i, sig in enumerate(json.loads(sigs))}
+        specs = sorted((c for c in specs if c["sig"] in order), key=lambda c: order[c["sig"]])
+    for spec in specs:
+        yield spec if metadata_only else cases.make_timing_case(spec)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--task", required=True)
@@ -269,6 +285,7 @@ def main():
     ap.add_argument("--ref", default="", help="check: the baseline leg's oracle blob (per rank: <ref>.rank<r>)")
     ap.add_argument("--tol", type=float, default=0.0, help="check: tolerance (default meta.tol)")
     ap.add_argument("--bucket", default="")
+    ap.add_argument("--sigs", default=None, help="time mode: JSON list of sigs, timed in THIS order")
     ap.add_argument("--out", default="")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--draws", type=int, default=0)
@@ -285,14 +302,17 @@ def main():
     if a.target_callable:
         ap.error("--target-callable is only valid with --mode resolve")
 
+    _SETUP["environment_s"] = time.perf_counter() - _STARTED
+    imports_started = time.perf_counter()
     h = _load("harness_lib", os.path.join(task, "harness_lib.py"))
     cases = _load("cases", os.path.join(task, "cases.py"))
+    _SETUP["task_import_s"] = time.perf_counter() - imports_started
     regime = meta.get("regime", {})
 
-    d = _Dist(meta)
-    if a.mode == "list" and d.world <= 1:
-        print(json.dumps({"sigs": [c["sig"] for c in cases.timing_cases(h, meta)]}))
+    if a.mode == "list":
+        print(json.dumps({"sigs": [c["sig"] for c in timing_rows(cases, h, meta, metadata_only=True)]}))
         return
+    d = _Dist(meta)
     if d.world > 1:
         d.start(h, cases)
         try:
@@ -320,19 +340,61 @@ def main():
         return phase_call, h.deployment_graph_mode(phase_regime)
 
     if a.mode == "time":
-        sel = [c for c in cases.timing_cases(h, meta) if not a.bucket or c["sig"] == a.bucket]
+        import gc
+        init_started = time.perf_counter()
+        torch = h._torch()
+        have_cuda = torch.cuda.is_available()
+        if have_cuda:
+            torch.cuda.init()
+            h.sync(torch)
+        _SETUP["runtime_init_s"] = time.perf_counter() - init_started
+        sel = iter(timing_rows(cases, h, meta, a.bucket, a.sigs))
         out = []
-        for c in sel:
+        while True:
+            input_started = time.perf_counter()
+            try:
+                c = next(sel)
+            except StopIteration:
+                break
+            h.sync(torch)
+            inputs_s = time.perf_counter() - input_started
             case_call, case_graph = case_execution(c)
+            timing_started = time.perf_counter()
             r = h.time_op(lambda c=c: case_call(c["args"]), graph=case_graph, detail=True)
-            out.append({"sig": c["sig"], "regime": c.get("regime", ""), "m": c.get("m"),
-                        "ms": (r or {}).get("ms"), "wall_ms": (r or {}).get("wall_ms"),
-                        "timer": (r or {}).get("timer"),
-                        # Which cache condition produced `ms`. A decode A/B read under 'write-evict' is
-                        # not comparable to one read under 'read-evict' (1.40 vs 1.12 on MI355X --
-                        # see harness_lib.cache_policy), so the two must never be folded together.
-                        "cache_condition": (r or {}).get("cache_condition")})
-        print(json.dumps({"cases": out, "identity": _identity(meta["target_callable"])}))
+            timing_s = time.perf_counter() - timing_started
+            row = {"sig": c["sig"], "regime": c.get("regime", ""), "m": c.get("m"),
+                   "ms": (r or {}).get("ms"), "wall_ms": (r or {}).get("wall_ms"),
+                   "timer": (r or {}).get("timer"),
+                   # Which cache condition produced `ms`. A decode A/B read under 'write-evict' is
+                   # not comparable to one read under 'read-evict' (1.40 vs 1.12 on MI355X --
+                   # see harness_lib.cache_policy), so the two must never be folded together.
+                   "cache_condition": (r or {}).get("cache_condition"),
+                   **({"error": r["error"]} if r and r.get("error") else {}),
+                   # Setup cost OUTSIDE the device-event window (ms is unaffected by any of it).
+                   "diagnostics": dict((r or {}).get("stages_s") or {}, inputs_s=inputs_s,
+                                       time_op_s=timing_s)}
+            # Whether `ms` is device work or host dispatch latency (time_op's three states:
+            # True / False / ABSENT); carry both keys or neither.
+            if r and "primed" in r:
+                row["primed"], row["host_ms"] = r["primed"], r.get("host_ms")
+            out.append(row)
+            # One process streams every shape: do not keep this shape's operands alive while the
+            # next one is built. JIT/autotune state stays warm; unused tensor storage is freed.
+            cleanup_started = time.perf_counter()
+            del c, case_call, r
+            # A full scan of torch/serving-stack's long-lived Python heap per shape can cost hundreds
+            # of ms. Refcounts release normal tensor owners; collect young cycles here and scan the
+            # older generations periodically.
+            gc.collect(0)
+            if len(out) % 32 == 0:
+                gc.collect()
+            if have_cuda:
+                h.sync(torch)
+                torch.cuda.empty_cache()
+                row["diagnostics"]["live_tensor_bytes_after"] = torch.cuda.memory_allocated()
+            row["diagnostics"]["cleanup_s"] = time.perf_counter() - cleanup_started
+        print(json.dumps({"cases": out, "identity": _identity(meta["target_callable"]),
+                          "process": dict(_SETUP, child_s=time.perf_counter() - _STARTED)}))
         return
 
     torch = h._torch()
@@ -376,13 +438,9 @@ def _main_ranks(a, h, cases, meta, regime, d):
     torch = h._torch()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     draws = a.draws or int(meta.get("random_draws", 3))
-    if a.mode == "list":                     # a multi-rank task's cases build their inputs on every rank
-        d.emit({"sigs": [c["sig"] for c in cases.timing_cases(h, meta)]})
-        return
     if a.mode == "time":
-        sel = [c for c in cases.timing_cases(h, meta) if not a.bucket or c["sig"] == a.bucket]
         out = []
-        for c in sel:
+        for c in timing_rows(cases, h, meta, a.bucket, a.sigs):
             case_call, case_graph = case_execution(c)
             d.barrier()
             r = h.time_op(lambda c=c: case_call(c["args"]), graph=case_graph, detail=True) or {}
@@ -394,7 +452,11 @@ def _main_ranks(a, h, cases, meta, regime, d):
                         "wall_ms": max((x["wall_ms"] or 0) for x in per) or None,
                         "timer": per[0]["timer"], "per_rank_ms": ms,
                         "cache_condition": r.get("cache_condition")})
-        d.emit({"cases": out, "world_size": d.world, "identity": _identity(meta["target_callable"])})
+            del c, case_call, r
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        d.emit({"cases": out, "world_size": d.world, "identity": _identity(meta["target_callable"]),
+                "process": dict(_SETUP, child_s=time.perf_counter() - _STARTED)})
         return
     if a.mode == "oracle":
         blob = {}

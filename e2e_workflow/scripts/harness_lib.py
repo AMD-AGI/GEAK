@@ -348,6 +348,7 @@ def time_op(call, warmup=10, repeats=50, inner=1, graph=False, *, detail=False):
     whenever the timer can produce them. None if `call` raises. On a box without CUDA, device time is
     unavailable so ms == wall_ms and timer='wall'."""
     policy = cache_policy()   # outside the try: a bad size must raise, not read as "call raised"
+    stages = {}
     torch = _torch()
     inner = max(1, int(inner))
     try:
@@ -355,30 +356,40 @@ def time_op(call, warmup=10, repeats=50, inner=1, graph=False, *, detail=False):
     except Exception:
         have_cuda = False
     try:
+        phase_started = time.monotonic()
         if have_cuda:
             _flush_buffer(torch, policy["bytes"])   # allocate once BEFORE warmup, never inside a sample
+            sync(torch)
+        stages['cache_setup_s'] = time.monotonic() - phase_started
         if have_cuda and graph:
+            phase_started = time.monotonic()
             g = _try_capture(torch, call, inner)
+            stages['graph_prepare_s'] = time.monotonic() - phase_started
             if g is not None:
-                dev, wall = _time_graph(torch, g, warmup, repeats, policy)
+                dev, wall = _time_graph(torch, g, warmup, repeats, policy, stages)
                 # One replay issues all `inner` launches, so divide to put host on the SAME per-launch
                 # basis as `dev` -- otherwise a clean inner>1 graph reads as host-bound.
                 host = _host_dispatch_ms(torch, lambda: g[0].replay()) / g[1]
-                return _timing_result(dev, wall, "cuda_event_graph", detail, host, host < dev, policy)
+                return _timing_result(dev, wall, "cuda_event_graph", detail, host, host < dev, policy, stages)
         if have_cuda:
-            dev, wall = _time_events(torch, call, warmup, repeats, inner, policy)
+            dev, wall = _time_events(torch, call, warmup, repeats, inner, policy, stages)
             host = _host_dispatch_ms(torch, call)
-            return _timing_result(dev, wall, "cuda_event", detail, host, host < dev, policy)
-        wall = _time_wall(torch, call, warmup, repeats, inner)   # no device timeline -> wall only
-        return _timing_result(wall, wall, "wall", detail, policy=policy)
-    except Exception:
+            return _timing_result(dev, wall, "cuda_event", detail, host, host < dev, policy, stages)
+        wall = _time_wall(torch, call, warmup, repeats, inner, stages)   # no device timeline -> wall only
+        return _timing_result(wall, wall, "wall", detail, policy=policy, stages=stages)
+    except Exception as exc:
+        if detail:
+            return {'ms': None, 'wall_ms': None, 'timer': None, 'stages_s': stages,
+                    'error': '%s: %s' % (type(exc).__name__, str(exc))}
         return None
 
 
-def _timing_result(dev_ms, wall_ms, timer, detail, host_ms=None, primed=None, policy=None):
+def _timing_result(dev_ms, wall_ms, timer, detail, host_ms=None, primed=None, policy=None, stages=None):
     if not detail:
         return dev_ms
     d = {"ms": dev_ms, "wall_ms": wall_ms, "timer": timer}
+    if stages is not None:
+        d['stages_s'] = stages
     if policy is not None:
         # ABSENT means the measurement predates the cache receipt, i.e. it was taken under an
         # unconditional write-evict -- see director.md. Never read absence as "no cache preparation".
@@ -485,7 +496,7 @@ def flush_cache(torch=None, mb=None):
     _CACHE_FLUSH_SINK = buf.sum()   # kept alive so the reduction cannot be optimized away
 
 
-def _time_events(torch, call, warmup, repeats, inner, policy):
+def _time_events(torch, call, warmup, repeats, inner, policy, stages=None):
     """Median (device_ms, wall_ms) over `repeats` samples of `inner` back-to-back launches: device via
     cuda.Event (host-free), wall via perf_counter (reference). `policy` names the cache preparation run
     before each sample, so a memory-bound kernel is not timed on lines the previous sample left resident.
@@ -496,9 +507,13 @@ def _time_events(torch, call, warmup, repeats, inner, policy):
     configurations, and under `flush` let the two timers disagree on K itself by up to 2.8x -- flush and
     kernel become two commands in a packed queue, so the cold-HBM guarantee stops holding. Do not
     reintroduce it without re-running that fit."""
+    phase_started = time.monotonic()
     for _ in range(max(1, warmup)):
         call()
     sync(torch)
+    if stages is not None:
+        stages['warmup_s'] = time.monotonic() - phase_started
+    phase_started = time.monotonic()
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
     dev, wall = [], []
@@ -514,14 +529,20 @@ def _time_events(torch, call, warmup, repeats, inner, policy):
         wall.append((time.perf_counter() - t0) * 1e3 / inner)
         dev.append(start.elapsed_time(end) / inner)
     dev.sort(); wall.sort()
+    if stages is not None:
+        stages['sampling_s'] = time.monotonic() - phase_started
     return dev[len(dev) // 2], wall[len(wall) // 2]
 
 
-def _time_wall(torch, call, warmup, repeats, inner):
+def _time_wall(torch, call, warmup, repeats, inner, stages=None):
     """Wall-clock-only fallback for boxes with no CUDA-event device timeline (CPU/no-CUDA)."""
+    phase_started = time.monotonic()
     for _ in range(max(1, warmup)):
         call()
     sync(torch)
+    if stages is not None:
+        stages['warmup_s'] = time.monotonic() - phase_started
+    phase_started = time.monotonic()
     samples = []
     for _ in range(max(1, repeats)):
         t0 = time.perf_counter()
@@ -530,6 +551,8 @@ def _time_wall(torch, call, warmup, repeats, inner):
         sync(torch)
         samples.append((time.perf_counter() - t0) * 1e3 / inner)
     samples.sort()
+    if stages is not None:
+        stages['sampling_s'] = time.monotonic() - phase_started
     return samples[len(samples) // 2]
 
 
@@ -553,14 +576,18 @@ def _try_capture(torch, call, inner):
         return None
 
 
-def _time_graph(torch, g, warmup, repeats, policy):
+def _time_graph(torch, g, warmup, repeats, policy, stages=None):
     """Median (device_ms, wall_ms) of a captured-graph replay, device via cuda.Event, with `policy`'s
     read eviction before each sample so replay's static buffers do not keep weights resident across
     samples."""
     graph, inner = g
+    phase_started = time.monotonic()
     for _ in range(max(1, warmup)):
         graph.replay()
     sync(torch)
+    if stages is not None:
+        stages['warmup_s'] = time.monotonic() - phase_started
+    phase_started = time.monotonic()
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
     dev, wall = [], []
@@ -575,6 +602,8 @@ def _time_graph(torch, g, warmup, repeats, policy):
         wall.append((time.perf_counter() - t0) * 1e3 / inner)
         dev.append(start.elapsed_time(end) / inner)
     dev.sort(); wall.sort()
+    if stages is not None:
+        stages['sampling_s'] = time.monotonic() - phase_started
     return dev[len(dev) // 2], wall[len(wall) // 2]
 
 
@@ -612,9 +641,9 @@ def reconstruct_captured(obj, device="cpu"):
         # file no longer holds, so there is nothing here to compare against. Raising is the
         # point -- a placeholder that reached a correctness gate would pass it vacuously.
         raise ValueError(
-            "this capture was taken with CAPTURE_PERSIST_POLICY=structure_only and its "
-            "output has not been regenerated. Run scripts/regen_reference.py against it "
-            "inside the serving container and point the task at the regenerated file.")
+            "this capture was taken with CAPTURE_PERSIST_POLICY=structure_only: it is a "
+            "structural fixture, not an oracle. Take the reference from the frozen baseline "
+            "on the same seeded inputs (baseline_random_outputs) instead.")
     if isinstance(obj, dict) and obj.get("__synth__"):
         raise ValueError(
             "a __synth__ operand descriptor reached reconstruct_captured. Materialize it "
@@ -680,11 +709,6 @@ def iter_eager_cases_from_oracle(path, device="cpu"):
             "sig": record.get("sig", ""),
             "regime": record.get("regime", ""),
         }
-
-
-def eager_cases_from_oracle(path, device="cpu"):
-    """Materialize all eager cases; prefer ``iter_eager_cases_from_oracle`` for large oracles."""
-    return list(iter_eager_cases_from_oracle(path, device=device))
 
 
 def check_correct_multi_lazy(call, case_iter, tol, max_keep_live=2):
@@ -1517,12 +1541,12 @@ def world_size(task_dir):
 
 
 def _run_leg(task_dir, overlay, mode, *, bucket="", out="", seed=0, draws=0, timeout=3600,
-             target_callable="", ref="", tol=0.0):
+             target_callable="", sigs=None, ref="", tol=0.0):
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join([overlay] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
-    world = world_size(task_dir) if mode in ("list", "time", "oracle", "check") else 1
+    world = world_size(task_dir) if mode in ("time", "oracle", "check") else 1
     # A multi-rank leg runs every rank of the operator under torchrun on the GPUs this process was leased
-    # (HIP_VISIBLE_DEVICES); resolve only imports code and stays single-process.
+    # (HIP_VISIBLE_DEVICES); list (metadata only) and resolve (imports only) stay single-process.
     launcher = [sys.executable] if world <= 1 else [
         sys.executable, "-m", "torch.distributed.run", "--standalone", f"--nproc-per-node={world}"]
     cmd = launcher + [os.path.join(task_dir, "leg_runner.py"),
@@ -1537,6 +1561,8 @@ def _run_leg(task_dir, overlay, mode, *, bucket="", out="", seed=0, draws=0, tim
         cmd += ["--out", out]
     if draws:
         cmd += ["--draws", str(int(draws))]
+    if sigs is not None:
+        cmd += ["--sigs", json.dumps(list(sigs))]   # JSON: a sig label may contain a comma
     if target_callable:
         if mode != "resolve":
             raise ValueError("target_callable override is only valid for identity resolution")
@@ -1544,6 +1570,7 @@ def _run_leg(task_dir, overlay, mode, *, bucket="", out="", seed=0, draws=0, tim
     # Own process GROUP, not just a child: on timeout the leg may be mid-kernel or may have spawned
     # helpers, and killing only the direct child leaves those holding the GPU allocation. The NEXT leg
     # then times against a busy device and reads as a slowdown attributable to nothing.
+    started = time.monotonic()
     # torchrun imports torch with the CWD first on sys.path; a task dir there shadows stdlib `unittest`.
     p = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                          start_new_session=True, **({"cwd": "/"} if world > 1 else {}))
@@ -1558,7 +1585,11 @@ def _run_leg(task_dir, overlay, mode, *, bucket="", out="", seed=0, draws=0, tim
     lines = [ln for ln in stdout.strip().splitlines() if ln.startswith("{")]
     if not lines:
         raise RuntimeError(f"leg({mode}) under {overlay} produced no JSON: {stdout[-800:]}")
-    return json.loads(lines[-1])
+    result = json.loads(lines[-1])
+    if mode == "time":
+        result["process"] = dict(result.get("process") or {}, pid=p.pid,
+                                 wall_s=time.monotonic() - started)
+    return result
 
 
 def build_candidate_overlay(task_dir, meta):
@@ -1632,68 +1663,134 @@ def _median(xs):
     return s[n // 2] if n % 2 else 0.5 * (s[n // 2 - 1] + s[n // 2])
 
 
-def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1.10)):
-    """`per_case` for `serving_weighted_speedup`, one bucket per FRESH subprocess per leg.
+def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1.10),
+                 process_mode="batched"):
+    """`per_case` for `serving_weighted_speedup`. Baseline and candidate always run in SEPARATE
+    processes: a warm interpreter shared by the two legs shares JIT/autotune state and reports a
+    pseudo-1.0x that is an artifact, not a measurement.
 
-    Fresh-per-bucket is not optional: a warm interpreter shares JIT/autotune state between the legs and
-    reports a pseudo-1.0x that is an artifact, not a measurement.
+    `process_mode="batched"` (default) starts ONE process per leg per round, streaming every
+    pending bucket. A cold torch/stack import costs 5-25 s, so paying it
+    once per leg instead of once per (bucket, leg, pair) is most of a UT's wall time. Round 2+
+    reverses the leg order and the bucket order, so drift over a sweep is not one-sided.
+    `process_mode="fresh"` restarts for every (bucket, leg, pair); keep it for A/A checks of state
+    carried between buckets inside one process (e.g. an autotune cache keyed without the varying
+    dimension). Warmup, device-event windows, graph policy and cache preparation are the same.
 
-    But fresh-per-bucket is also what makes ONE pair per bucket too coarse: fresh-process variance is
-    exactly the variance `time_op`'s in-process repeats cannot average away. Measured on gfx950 it is
-    ~0.1-0.5% on a prefill bucket and up to ~14% on a small-M decode bucket — so a real 1.05x candidate
-    sits inside the noise of a single unpaired pair, which is the resolution the direction fix needs and
-    did not have.
-
-    Two things fix that, and only one of them costs anything:
+    Process-to-process variance is what `time_op`'s in-process repeats cannot average away. Measured
+    on gfx950 it is ~0.1-0.5% on a prefill bucket and up to ~14% on a small-M decode bucket — so a
+    real 1.05x candidate sits inside the noise of a single unpaired pair. Two things fix that:
 
     - INTERLEAVE. Each rep is a B,C PAIR, never all Bs then all Cs. Any drift over the sweep (clocks,
       thermals, a neighbour on the box) then lands on both legs and cancels, instead of accruing to
-      whichever leg ran later. This is free — same subprocess count.
+      whichever leg ran later.
     - REPEAT, BUT ONLY WHEN IT MATTERS. `max_reps` pairs is the CEILING, not the plan. After each pair
       the running median ratio is checked: once it is outside `undecided`, the verdict cannot plausibly
-      flip and the bucket stops. A 2.3x bucket costs one pair, exactly as before; a 1.05x bucket — the
-      one whose answer is in doubt — spends the full budget. Flat `reps=3` would have tripled the cost
-      of every bucket to buy resolution on the few that need it, and this path already pays a cold
-      torch import per subprocess.
+      flip and the bucket stops. A 2.3x bucket costs one pair; a 1.05x bucket — the one whose answer
+      is in doubt — spends the full budget.
 
     `baseline_ms`/`optimized_ms` are the MEDIAN over the pairs actually run, so one unlucky process
     cannot carry the bucket. `reps` and `speedup_spread` (per-pair speedup range / median, 0.0 for a
-    single pair) ride along so a wide bucket is visible downstream rather than averaged into silence."""
+    single pair) ride along so a wide bucket is visible downstream rather than averaged into silence.
+    A bucket with no case on a leg is skipped; an untimeable one reports `speedup: None`."""
+    if process_mode not in ("batched", "fresh"):
+        raise ValueError("process_mode must be 'batched' or 'fresh'")
     task = os.path.abspath(task_dir)
     base, cand = build_candidate_overlay(task, meta)
     assert_legs_differ(task, base, cand, meta)
-    lo, hi = undecided
-    per_case = []
-    for sig in _run_leg(task, base, "list", timeout=timeout)["sigs"]:
-        row, bms, oms = None, [], []
-        for _ in range(max(1, int(max_reps))):
-            b = _run_leg(task, base, "time", bucket=sig, timeout=timeout)["cases"]
-            o = _run_leg(task, cand, "time", bucket=sig, timeout=timeout)["cases"]
-            if not b or not o:
-                break
-            if row is None:
-                row = b[0]
-            bms.append(b[0].get("ms"))
-            oms.append(o[0].get("ms"))
-            good_b, good_o = [x for x in bms if x], [y for y in oms if y]
-            if not good_b or not good_o:
-                break                      # nothing timable here; more pairs cannot change that
-            if not (lo <= _median(good_b) / _median(good_o) <= hi):
-                break                      # decisive already — do not buy resolution we do not need
-        if row is None:
-            continue
-        good_b, good_o = [x for x in bms if x], [y for y in oms if y]
-        bm = _median(good_b) if good_b else None
-        om = _median(good_o) if good_o else None
-        pair_sp = [x / y for x, y in zip(bms, oms) if x and y]
-        per_case.append({"sig": sig, "regime": row.get("regime", ""), "m": row.get("m"),
-                         "baseline_ms": bm, "optimized_ms": om,
-                         **({"world_size": world_size(task)} if world_size(task) > 1 else {}),
-                         "speedup": (bm / om) if (bm and om) else None,
-                         "reps": len(bms),
-                         "speedup_spread": ((max(pair_sp) - min(pair_sp)) / _median(pair_sp)
-                                            if len(pair_sp) > 1 else 0.0)})
-    return per_case
+    sigs = _run_leg(task, base, "list", timeout=timeout)["sigs"]
+    if len(sigs) != len(set(sigs)):
+        raise ValueError("duplicate timing case sigs: %s" % sigs)
+    if process_mode == "fresh":
+        rows = {s: _measure_bucket(task, base, cand, s, timeout, max_reps, undecided) for s in sigs}
+    else:
+        rows = _measure_sweep(task, base, cand, sigs, timeout, max_reps, undecided)
+    ranks = {"world_size": world_size(task)} if world_size(task) > 1 else {}
+    return [dict(rows[s], process_mode=process_mode, **ranks) for s in sigs if rows.get(s)]
+
+
+def _measure_sweep(task, base, cand, sigs, timeout, max_reps, undecided):
+    """Rounds of one baseline process + one candidate process over every still-undecided sig."""
+    pending, rows, pairs = list(sigs), {}, {s: ([], []) for s in sigs}
+    for rep in range(max(1, int(max_reps))):
+        if not pending:
+            break
+        order = pending if rep % 2 == 0 else pending[::-1]
+        sides = [("baseline", base), ("candidate", cand)][::-1 if rep % 2 else 1]
+        got = {side: _checked_timing_rows(_run_leg(task, overlay, "time", sigs=order, timeout=timeout),
+                                          order, side)
+               for side, overlay in sides}
+        again = []
+        for sig in pending:
+            b, o = got["baseline"].get(sig), got["candidate"].get(sig)
+            if b is None or o is None:
+                continue
+            pairs[sig][0].append(b)
+            pairs[sig][1].append(o)
+            if rep + 1 < max_reps and _undecided(*pairs[sig], undecided):
+                again.append(sig)
+            else:
+                rows[sig] = dict(_summarize_pairs(sig, *pairs[sig]),
+                                 pair_order=["CB" if n % 2 else "BC" for n in range(rep + 1)])
+        pending = again
+    return rows
+
+
+def _measure_bucket(task, base, cand, sig, timeout, max_reps, undecided):
+    """One bucket's interleaved B,C pairs, each leg a fresh process; None if a leg has no case."""
+    brows, orows = [], []
+    for _ in range(max(1, int(max_reps))):
+        b = _checked_timing_rows(_run_leg(task, base, "time", bucket=sig, timeout=timeout),
+                                 [sig], "baseline").get(sig)
+        o = _checked_timing_rows(_run_leg(task, cand, "time", bucket=sig, timeout=timeout),
+                                 [sig], "candidate").get(sig)
+        if b is None or o is None:
+            break
+        brows.append(b)
+        orows.append(o)
+        if not _undecided(brows, orows, undecided):
+            break
+    return _summarize_pairs(sig, brows, orows) if brows else None
+
+
+def _undecided(brows, orows, band):
+    """True while more pairs can still change the verdict: both legs timable and the running median
+    ratio inside `band`. Nothing timable -> more pairs cannot help; decisive -> none needed."""
+    good_b = [r.get("ms") for r in brows if r.get("ms")]
+    good_o = [r.get("ms") for r in orows if r.get("ms")]
+    return bool(good_b and good_o) and band[0] <= _median(good_b) / _median(good_o) <= band[1]
+
+
+def _checked_timing_rows(response, expected, side):
+    """{sig: row} of one timing process. An absent sig is a bucket with no case (skipped); a
+    duplicated or unrequested one means the leg did not time what was asked."""
+    found = response.get("cases", [])
+    got = [r.get("sig") for r in found]
+    if len(got) != len(set(got)) or not set(got) <= set(expected):
+        raise RuntimeError("%s timing leg duplicated or added cases: asked %s, got %s"
+                           % (side, list(expected), got))
+    for row in found:
+        row["process"] = response.get("process", {})
+    return {r["sig"]: r for r in found}
+
+
+def _summarize_pairs(sig, brows, orows):
+    bms, oms = [r.get("ms") for r in brows], [r.get("ms") for r in orows]
+    good_b, good_o = [x for x in bms if x], [y for y in oms if y]
+    bm = _median(good_b) if good_b else None
+    om = _median(good_o) if good_o else None
+    pair_sp = [x / y for x, y in zip(bms, oms) if x and y]
+    return {"sig": sig, "regime": brows[0].get("regime", ""), "m": brows[0].get("m"),
+            "baseline_ms": bm, "optimized_ms": om,
+            "speedup": (bm / om) if (bm and om) else None,
+            "reps": len(bms),
+            "speedup_spread": ((max(pair_sp) - min(pair_sp)) / _median(pair_sp)
+                               if len(pair_sp) > 1 else 0.0),
+            # setup cost OUTSIDE the device-event window, per pair: process + per-bucket stages
+            "diagnostics": {"baseline": [dict(r.get("diagnostics") or {}, process=r["process"])
+                                         for r in brows],
+                            "candidate": [dict(r.get("diagnostics") or {}, process=r["process"])
+                                          for r in orows]}}
 
 
 def run_correctness_ranks(task_dir, meta, *, tol=None, seed=0, draws=0, timeout=3600, overlay=None):
@@ -1712,9 +1809,15 @@ def run_correctness_ranks(task_dir, meta, *, tol=None, seed=0, draws=0, timeout=
 
 def baseline_random_outputs(task_dir, meta, *, seed=0, draws=0, timeout=3600):
     """Random-draw outputs recorded by the BASELINE leg in its own process, for
-    `check_random_vs_baseline(baseline_outputs=...)`. Same seed => same inputs on both sides."""
+    `check_random_vs_baseline(baseline_outputs=...)`. Same seed => same inputs on both sides.
+    The file only carries the outputs across the process boundary; it is removed once loaded, so
+    no golden output outlives the run that produced it."""
     task = os.path.abspath(task_dir)
     out = os.path.join(task, "_baseline_random.pt")
-    _run_leg(task, os.path.join(task, "baseline_overlay"), "oracle",
-             out=out, seed=seed, draws=draws, timeout=timeout)
-    return _torch().load(out, map_location="cpu")
+    try:
+        _run_leg(task, os.path.join(task, "baseline_overlay"), "oracle",
+                 out=out, seed=seed, draws=draws, timeout=timeout)
+        return _torch().load(out, map_location="cpu")
+    finally:
+        if os.path.exists(out):
+            os.remove(out)
