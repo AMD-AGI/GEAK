@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 
-TOOL = Path(__file__).resolve().parents[1] / "tools" / "expert_skill_runtime.py"
+TOOL = Path(__file__).resolve().parents[1] / "scripts" / "mega" / "expert_skill_runtime.py"
 MEGAMOE_SKILL = (
     Path(__file__).resolve().parents[2]
     / "perf_knowledge"

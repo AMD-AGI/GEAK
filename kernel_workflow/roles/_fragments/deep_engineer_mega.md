@@ -11,16 +11,16 @@ Read ALL of these before and during your work, and re-consult as the bottleneck 
   layout, graph capture). Re-read every time you re-profile.
 - `SKILL_DIR/knowledge/hip_optimization.md` / `triton_optimization.md` — per the kernel's language.
 - `SKILL_DIR/knowledge/wrapper_optimization.md` — host/runtime patterns (you own these too).
-- `SKILL_DIR/knowledge/jit_arm_isolation.md` — REQUIRED before authoring any env/config-gated arm on a
+- `SKILL_DIR/knowledge/mega/jit_arm_isolation.md` — REQUIRED before authoring any env/config-gated arm on a
   caching JIT: how to make the two arms actually compile to two binaries, and how to prove they did.
-- `SKILL_DIR/knowledge/distributed_fusion.md` — ONLY when the op issues several serialized launches
+- `SKILL_DIR/knowledge/mega/distributed_fusion.md` — ONLY when the op issues several serialized launches
   per rank and exchanges data with peers: the persistent-megakernel playbook (missing readiness
   edges, per-item vs whole-phase joins, coherence scope, residency/acyclicity invariants, and the
   measured anti-patterns). Skip entirely for a single-GPU, single-launch kernel.
 - `SKILL_DIR/knowledge/amd_instinct.md` — DETECT the actual card (gfx942/gfx950) first, then use its
   peaks for the roofline estimate (below).
 - `SKILL_DIR/knowledge/profiling_guide.md` — how to read whatever profiler is available.
-- `SKILL_DIR/knowledge/mega_self_monitoring.md` — the guard signals (you raise the step caps, see below).
+- `SKILL_DIR/knowledge/mega/mega_self_monitoring.md` — the guard signals (you raise the step caps, see below).
 
 ## Rules (NON-NEGOTIABLE)
 1. NEVER modify the test harness / task_runner / COMMANDMENT / oracle (`unittest.py`, `meta.json`,

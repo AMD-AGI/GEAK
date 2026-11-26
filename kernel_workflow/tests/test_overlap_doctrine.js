@@ -35,10 +35,10 @@ const ok = (cond, msg) => {
   else { console.error('  FAIL:', msg); failures++; }
 };
 
-const df = read('knowledge', 'distributed_fusion.md');
-const fp = read('knowledge', 'fusion_preconditions.md');
-const tg = read('knowledge', 'tile_task_graph.md');
-const po = read('knowledge', 'pipe_occupancy.md');
+const df = read('knowledge', 'mega', 'distributed_fusion.md');
+const fp = read('knowledge', 'mega', 'fusion_preconditions.md');
+const tg = read('knowledge', 'mega', 'tile_task_graph.md');
+const po = read('knowledge', 'mega', 'pipe_occupancy.md');
 const amd = read('knowledge', 'amd_instinct.md');
 const bench = flat(megaRole('benchmark_engineer'));
 

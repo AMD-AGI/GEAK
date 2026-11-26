@@ -200,7 +200,7 @@ behaviour and nothing in the source says so:
   the spill; an earlier scheduler that never hoisted makes the anchor pure overhead. Record the
   compiler version alongside the ISA deltas so the next run can tell which happened.
 
-This is the same failure family as `distributed_fusion.md` Lever 6b (a wait the compiler is allowed
+This is the same failure family as `mega/distributed_fusion.md` Lever 6b (a wait the compiler is allowed
 to move is not a wait): in both cases the source expresses an intent the compiler is under no
 obligation to honour, and the only place the intent is either kept or broken is the ISA.
 

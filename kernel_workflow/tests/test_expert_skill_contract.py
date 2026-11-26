@@ -12,7 +12,7 @@ import pytest
 import yaml
 
 
-TOOL = Path(__file__).resolve().parents[1] / "tools" / "expert_skill_contract.py"
+TOOL = Path(__file__).resolve().parents[1] / "scripts" / "mega" / "expert_skill_contract.py"
 SPEC = importlib.util.spec_from_file_location("expert_skill_contract", TOOL)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader

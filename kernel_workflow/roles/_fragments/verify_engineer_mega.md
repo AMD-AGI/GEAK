@@ -282,7 +282,7 @@ denominator.
    multi-rank kernel replaces kernel-boundary ordering with in-kernel readiness counters, so it can be
    numerically correct on a single shot and still **hang or read stale data** at a different block
    count or on the second iteration. Steps 3/4 cannot see this: correctness runs once, and the
-   graph smoke replays 3×. See `SKILL_DIR/knowledge/distributed_fusion.md` Levers 7–9 for the three
+   graph smoke replays 3×. See `SKILL_DIR/knowledge/mega/distributed_fusion.md` Levers 7–9 for the three
    failure modes (participant index outside the resident window; coordinator→worker→coordinator
    cycle; a counter cleared into the next generation).
    - Run the COMMANDMENT correctness entry under **at least two different problem sizes** — the
@@ -358,7 +358,7 @@ denominator.
      false `yes` is how a one-binary A/B closed an axis it had never measured.
    - **ON HARDWARE — the marker and the ISA hash both lie about this, so report it separately.**
      `activation_confirmed:"yes"` is satisfiable from a **host** print, and `artifact_distinct:"yes"`
-     is satisfiable from a **COMPILE_ONLY** ISA hash (see `knowledge/gfx950_lowering.md`'s lease-free
+     is satisfiable from a **COMPILE_ONLY** ISA hash (see `knowledge/mega/gfx950_lowering.md`'s lease-free
      method) — neither proves the selected path ever **traced and launched on a card**. A JIT that
      builds the ON kernel variant lazily only compiles it when the switch is set *at run time*, so its
      trace-time faults are invisible to every static screen. Therefore report `activation_on_hardware`
@@ -411,7 +411,7 @@ denominator.
    judged on it, not the geomean.**
 
 7. **Overlap, whenever the candidate fuses two or more stages into one kernel.** Read
-   `SKILL_DIR/knowledge/overlap_instrument.md` first — it exists because the fused shape blinds every
+   `SKILL_DIR/knowledge/mega/overlap_instrument.md` first — it exists because the fused shape blinds every
    instrument that would judge it. A single kernel produces a single trace record, and the per-stage
    timers can both *rise* while the operator gets faster, so **a fused kernel that is faster is not
    evidence of overlap.** Fusion also removes launch overhead and keeps data in L2; those are wins and

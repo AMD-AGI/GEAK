@@ -11,7 +11,7 @@ this file changes only what the UT fixes, everything else in your role and its m
 Read the UT however it is laid out: `meta.json` (or whatever declares the cases), `cases.py`, `unittest.py`
 and the harness it calls, its README/notes, and its own evidence under `run/` (a passing result, a
 self-noise record, the declared GPU count). Do not run it on a GPU; CPU-only probes (`--help`, imports of
-pure metadata, a dry parse) are fine. `python3 <WORKFLOW_DIR>/tools/region_ut_args.py <region_ut>` reads the
+pure metadata, a dry parse) are fine. `python3 <WORKFLOW_DIR>/scripts/mega/region_ut_args.py <region_ut>` reads the
 layouts GEAK already produces; when it prints a contract, start from it and correct whatever the UT says
 otherwise; when it prints `{"error"}`, derive every field yourself.
 

@@ -370,16 +370,16 @@ ok(/const STRUCTURAL_CONTRACT_BLOCKING/.test(src) &&
   const full = require('./mega_source').full();
   const at = full.indexOf("if (MEGA && A.region_ut) {");
   ok(at > 0 && at < full.indexOf('const POSITIVE_CONTROL =') &&
-     /You are the region UT adapter\. Read \$\{WORKFLOW_DIR\}\/knowledge\/mega_region_ut\.md/.test(full) &&
+     /You are the region UT adapter\. Read \$\{WORKFLOW_DIR\}\/knowledge\/mega\/mega_region_ut\.md/.test(full) &&
      /write its contract to \$\{UT_CONTRACT\}/.test(full) &&
      /!u\.benchmark_harness \|\| !\(u\.target_guards \|\| \[\]\)\.length/.test(full) &&
      /for \(const \[k, v\] of Object\.entries\(u\)\) if \(A\[k\] == null && k !== 'ut'\) A\[k\] = v;/.test(full),
     'a region UT is adapted by an agent and fills only the unset mega args, before any of them is read');
   ok(/const UT_CONTRACT = A\.region_ut \? `\$\{String\(A\.region_ut\)\.replace\(\/\\\/\+\$\/, ''\)\}\.mega_ut\.json` : '';/.test(full) &&
-     /region UT: then also \$\{WORKFLOW_DIR\}\/knowledge\/mega_region_ut\.md and its contract \$\{UT_CONTRACT\}/.test(full) &&
-     fs.existsSync(path.join(__dirname, '..', 'knowledge', 'mega_region_ut.md')) &&
-     fs.existsSync(path.join(__dirname, '..', 'tools', 'region_ut_args.py')),
-    'with a region UT every mode=mega role also reads knowledge/mega_region_ut.md and the contract');
+     /region UT: then also \$\{WORKFLOW_DIR\}\/knowledge\/mega\/mega_region_ut\.md and its contract \$\{UT_CONTRACT\}/.test(full) &&
+     fs.existsSync(path.join(__dirname, '..', 'knowledge', 'mega', 'mega_region_ut.md')) &&
+     fs.existsSync(path.join(__dirname, '..', 'scripts', 'mega', 'region_ut_args.py')),
+    'with a region UT every mode=mega role also reads knowledge/mega/mega_region_ut.md and the contract');
 }
 console.log(failures === 0
   ? '\nPASS: mode=mega has one lifecycle; Expert Skills are optional normative knowledge.'

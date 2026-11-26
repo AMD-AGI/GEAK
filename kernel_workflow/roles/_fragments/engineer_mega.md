@@ -57,7 +57,7 @@ unified G1/G2 scheduler → Combine+generation → full contract.
 HARD RULES for a resumed Mega lane (fail-closed — these override any softer
 guidance above):
 1. NEVER open, read, grep or reason from the verifier/checker implementation to
-   shape source: `tools/expert_skill_contract.py`, the contract's AST/check
+   shape source: `scripts/mega/expert_skill_contract.py`, the contract's AST/check
    code, PlanIR checker fields, or any oracle/reference tree are OFF LIMITS as
    authoring input. The authoritative feedback is the candidate's own RUNTIME
    behavior (compile result, on-card smoke, relL2, launch count, path marker);
@@ -211,18 +211,18 @@ runtime correctness, activation, liveness or performance.
 - compute    → `hip_optimization.md` (P3/P4) + `amd_instinct.md` (detect the card; occupancy/VGPR table)
 - host_runtime → `wrapper_optimization.md` + `geomean_levers.md` (dispatch collapse, native layout,
   allocation, CUDA graph). You MAY edit the Python wrapper AND the C++ binding, not just the kernel.
-- distributed → `distributed_fusion.md` (+ `amd_instinct.md` for the card's die/coherence-domain
+- distributed → `knowledge/mega/distributed_fusion.md` (+ `amd_instinct.md` for the card's die/coherence-domain
   count). For a MULTI-LAUNCH, MULTI-RANK operator being collapsed into one persistent kernel per
   rank. Unlike `host_runtime`, what you remove is a *wait*, not a launch — read that file's Lever 3
   before proposing any fusion, and treat its Levers 5–9 (publication scope, fence cost, residency,
   acyclicity, reset-free counters) as correctness prerequisites, not tuning. Liveness (1000-replay,
   stale-read check) is a gate you must clear in addition to correctness.
 
-Always also read `SKILL_DIR/knowledge/mega_self_monitoring.md` and follow its guard signals.
+Always also read `SKILL_DIR/knowledge/mega/mega_self_monitoring.md` and follow its guard signals.
 
 **When a candidate crashes or hangs and the fault has no line number — which is the normal state of
 a fused kernel, since one launch produces one trace record — read
-`SKILL_DIR/knowledge/crash_bisection.md` before reading the source again.** It is a compile-time
+`SKILL_DIR/knowledge/mega/crash_bisection.md` before reading the source again.** It is a compile-time
 truncation ladder: fifteen numbered cut points selected by an env var, one binary per rung, roughly
 half a minute per rung, and the first failing rung names the segment. Reading a thousand lines of
 index arithmetic harder does not converge; this does, and it separates a hang from an illegal access
@@ -230,7 +230,7 @@ for free.
 
 **If your candidate is gated by an env var, a config flag or a module-level constant AND the kernel
 comes from a caching JIT (FlyDSL, Triton, `torch.compile`), read
-`SKILL_DIR/knowledge/jit_arm_isolation.md` BEFORE you author the switch.** Two arms can print two
+`SKILL_DIR/knowledge/mega/jit_arm_isolation.md` BEFORE you author the switch.** Two arms can print two
 different markers and dispatch one identical cached binary, because the switch never entered the
 compile-cache key — the A/B then reads ~1.000 with every gate satisfied, which is a void experiment
 wearing the costume of a null result. The card tells you what enters the key, why separate checkouts
@@ -317,7 +317,7 @@ hash; discovering it at verification costs the round.
    without recreating it grid-wide: an empty local shard lets that CTA move to
    ready downstream work while other CTAs may remain upstream. Do not insert a
    global stage drain/barrier or a permanent upstream/downstream CU split merely
-   because both stages use MFMA; read `distributed_fusion.md` Lever 1b.
+   because both stages use MFMA; read `knowledge/mega/distributed_fusion.md` Lever 1b.
    If the prompt includes a detailed advisory Expert Skill reference, treat its
    validated mechanism as a prior rather than repeatedly redesigning unused
    scaffolding. Spend at most the first quarter of the turn on helper

@@ -4,7 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 
-TOOL = Path(__file__).resolve().parents[1] / "tools" / "region_ut_args.py"
+TOOL = Path(__file__).resolve().parents[1] / "scripts" / "mega" / "region_ut_args.py"
 SPEC = importlib.util.spec_from_file_location("region_ut_args", TOOL)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader

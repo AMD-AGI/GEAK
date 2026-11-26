@@ -31,8 +31,8 @@ function ok(cond, msg) {
 const lead = megaRole('tech_lead');
 const eng = megaRole('engineer');
 const deep = megaRole('deep_engineer');
-const fusion = read('knowledge/distributed_fusion.md');
-const jit = read('knowledge/jit_arm_isolation.md');
+const fusion = read('knowledge/mega/distributed_fusion.md');
+const jit = read('knowledge/mega/jit_arm_isolation.md');
 
 console.log('\n# lease economics bind where the round is planned');
 const iPlan = lead.indexOf('## PHASE=plan_round');

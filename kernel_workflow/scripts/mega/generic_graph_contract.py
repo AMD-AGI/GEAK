@@ -59,7 +59,7 @@ from pathlib import Path
 SCHEMA = "generic-graph-contract-v1"
 FROZEN_BASELINE_MISSING = "not_evaluated: missing --frozen-baseline-ms"
 ADAPTER_FUNCTIONS = ("setup", "build", "make_inputs", "forward", "reference")
-GUIDE_HINT = "generic mega runs: see MEGA_MEASUREMENT_GUIDE (knowledge/mega_measurement.md) section 4"
+GUIDE_HINT = "generic mega runs: see MEGA_MEASUREMENT_GUIDE (knowledge/mega/mega_measurement.md) section 4"
 
 
 def csv_ints(value):

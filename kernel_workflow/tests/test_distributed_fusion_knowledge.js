@@ -45,7 +45,7 @@ ok(
 
 // 3. The file exists and the consuming roles route to it.
 const KNOWLEDGE = 'distributed_fusion.md';
-ok(fs.existsSync(path.join(WF, 'knowledge', KNOWLEDGE)), `knowledge/${KNOWLEDGE} exists`);
+ok(fs.existsSync(path.join(WF, 'knowledge', 'mega', KNOWLEDGE)), `knowledge/mega/${KNOWLEDGE} exists`);
 
 const engineer = megaRole('engineer');
 ok(/`SPECIALTY`[^\n]*distributed/.test(engineer), 'engineer.md declares the specialty');
@@ -102,8 +102,8 @@ ok(/return `authored:false`/.test(author), 'a hang is a clean failure, not a sta
 
 // 4. Doctrine content. These are the load-bearing claims: each one, if absent, turns a fusion
 //    that merely underperforms into one that hangs or silently reads stale data.
-console.log(`\n# knowledge/${KNOWLEDGE} content`);
-const doc = read('knowledge', KNOWLEDGE);
+console.log(`\n# knowledge/mega/${KNOWLEDGE} content`);
+const doc = read('knowledge', 'mega', KNOWLEDGE);
 const required = [
   [/removes a \*wait\*, not[\s\S]{0,40}\*launch\*/, 'Lever 3: fusion pays for waits, not launches'],
   [/CTA-local phase pipeline/i, 'same-engine stages retain the CTA-local pipeline mechanism'],
@@ -125,7 +125,7 @@ const required = [
   [/no measured overlap change is suspicious/, 'unexplained latency wins are rejected'],
 ];
 for (const [re, what] of required) ok(re.test(doc), what);
-const partition = read('knowledge', 'resource_partition.md');
+const partition = read('knowledge', 'mega', 'resource_partition.md');
 ok(/Same engine, static split/.test(partition) &&
    /does \*\*not\*\* disprove a\s+phase-staggered CTA pipeline/i.test(partition),
    'resource-partition same-engine math is scoped to static roles');
@@ -298,8 +298,8 @@ const METHOD_CARDS = {
 };
 for (const [file, checks] of Object.entries(METHOD_CARDS)) {
   let text = '';
-  try { text = read('knowledge', file); } catch { /* reported by the first check */ }
-  ok(text.length > 0, `knowledge/${file} exists`);
+  try { text = read('knowledge', 'mega', file); } catch { /* reported by the first check */ }
+  ok(text.length > 0, `knowledge/mega/${file} exists`);
   for (const [re, what] of checks) ok(re.test(text), `knowledge/${file} ${what}`);
   // A method card that quietly re-imports the answer defeats the whole exercise.
   ok(!/876\.6|4\.71%|p2p_scatter_epilog/.test(text), `knowledge/${file} carries no operator answer`);

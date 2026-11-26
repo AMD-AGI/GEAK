@@ -47,7 +47,7 @@ Wrap every GPU command in `bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID …`. Do 
 0. **Regime map (no GPU, a minute).** Place every guard on the shape's roofline before measuring
    stages (MEGA_GENERIC_LESSONS §5.1):
    ```
-   python3 $SKILL_DIR/tools/mega_regime.py --guards <TARGET_GUARDS + REGRESSION_GUARDS>
+   python3 $SKILL_DIR/scripts/mega/mega_regime.py --guards <TARGET_GUARDS + REGRESSION_GUARDS>
      --experts-per-rank <E/world> --topk <k> --world <ranks> --hidden <model dim> --inter <inter dim>
      --weight-bits <stored bits per weight incl. scales> --dispatch-bytes <b> --combine-bytes <b>
      --hbm-tbps <achieved> --math-tflops <peak for the operand type> --link-gbps <per rank>
@@ -108,7 +108,7 @@ Wrap every GPU command in `bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID …`. Do 
 
 After fusion there is one kernel. Nothing outside the kernel can show which stage is slow or how
 long workgroups spin waiting on each other. Only an in-kernel meter can. The design and its traps
-are in `knowledge/overlap_instrument.md` (per-workgroup phase log, `s_memrealtime`, preallocated
+are in `knowledge/mega/overlap_instrument.md` (per-workgroup phase log, `s_memrealtime`, preallocated
 buffer, XCD clock skew, perturbation, rank-local clocks). This section fixes one **standard
 contract**, so every candidate is measured the same way and the numbers can be compared across rounds.
 
@@ -188,7 +188,7 @@ the measured baseline stage shares from `PROFILE_SUMMARY` and stop there.
 
 ## §4 Graph contract runner (the generic `GRAPH_CONTRACT_TOOL`)
 
-In this run `GRAPH_CONTRACT_TOOL` is `tools/generic_graph_contract.py`. The runner knows nothing
+In this run `GRAPH_CONTRACT_TOOL` is `scripts/mega/generic_graph_contract.py`. The runner knows nothing
 about the operator. It owns the measurement:
 
 - graph-captured accuracy per case (relL2, rank-max);
@@ -231,7 +231,7 @@ All operator knowledge lives in one task-owned **contract adapter**,
    - `forward` returns this rank's valid output rows. `reference` returns the same rows.
 2. **Prove it on the frozen tree, in one lease.** Use the COMMANDMENT environment and the lease
    wrapper:
-   `torchrun --standalone --nproc_per_node=<ranks> $SKILL_DIR/tools/generic_graph_contract.py --self-test
+   `torchrun --standalone --nproc_per_node=<ranks> $SKILL_DIR/scripts/mega/generic_graph_contract.py --self-test
    --candidate-tree $EVAL_DIR/baseline --runtime-file <adapter> --accuracy-cases <REQUIRED_ACCURACY_CASES>
    --routes <all guard routes> --mtpr-cases <tokens of every _mtpr guard> --target-guard <first TARGET_GUARDS entry>
    --switch-rounds 2 --control-env <baseline switch-off KEY=VALUE>

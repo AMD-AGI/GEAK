@@ -32,11 +32,11 @@ ok(Object.keys(gmi('mega', true)).length === 0, 'skill-on mega gets no measureme
      calls.every((m) => /MEGA/.test(lanePart.slice(Math.max(0, m.index - 60), m.index))),
     'non-mega modes never call the mega hooks that use these inputs');
 };
-ok(gmi('mega', false).MEGA_MEASUREMENT_GUIDE === '/wf/knowledge/mega_measurement.md',
+ok(gmi('mega', false).MEGA_MEASUREMENT_GUIDE === '/wf/knowledge/mega/mega_measurement.md',
   'generic mega gets the guide');
-ok(gmi('mega', false).MEGA_GENERIC_LESSONS === '/wf/knowledge/mega_generic_lessons.md',
+ok(gmi('mega', false).MEGA_GENERIC_LESSONS === '/wf/knowledge/mega/mega_generic_lessons.md',
   'generic mega gets the lessons');
-ok(gmi('mega', false).MEGA_AB_TOOL === '/wf/tools/mega_graph_ab.py' &&
+ok(gmi('mega', false).MEGA_AB_TOOL === '/wf/scripts/mega/mega_graph_ab.py' &&
    !('MEGA_REGIMES_GUIDE' in gmi('mega', false)),
   'generic mega gets the paired graph A/B tool, not the regime guide');
 ok(!('MEGA_KNOWLEDGE' in gmi('mega', false, { mega_knowledge: 'read /k.md' })),
@@ -58,8 +58,8 @@ ok(Object.keys(mri('mega', false, 'none', '')).length === 0, 'non-MoE mega gets 
 ok(Object.keys(mri('mega', false, 'moe_bottleneck', '')).length === 0,
   'a generic MoE mega run gets no regime guide: it names Skill designs');
 const skillOn = mri('mega', true, 'none', 'megamoe_small_mtpr_fusion');
-ok(skillOn.MEGA_AB_TOOL === '/wf/tools/mega_graph_ab.py' &&
-  skillOn.MEGA_GENERIC_LESSONS === '/wf/knowledge/mega_generic_lessons.md' &&
+ok(skillOn.MEGA_AB_TOOL === '/wf/scripts/mega/mega_graph_ab.py' &&
+  skillOn.MEGA_GENERIC_LESSONS === '/wf/knowledge/mega/mega_generic_lessons.md' &&
   skillOn.MEGA_MEASUREMENT_GUIDE === undefined, 'skill-on MoE mega gets regime inputs + lessons, no measurement guide');
 ok(Object.keys(mri('mega', true, 'moe_bottleneck', 'x', { mega_regimes: 'false' })).length === 0,
   'mega_regimes=false turns them off');
@@ -81,9 +81,9 @@ const tool = (MODE, USE_EXPERT_SKILLS, PINNED_MEGA_SKILL, A = {}) =>
   // eslint-disable-next-line no-new-func
   new Function('MODE', 'USE_EXPERT_SKILLS', 'PINNED_MEGA_SKILL', 'A', 'WORKFLOW_DIR',
     `return ${gct[1]};`)(MODE, USE_EXPERT_SKILLS, PINNED_MEGA_SKILL, A, '/wf');
-ok(tool('mega', true, true) === '/wf/tools/expert_skill_runtime.py', 'pinned skill keeps its runtime');
+ok(tool('mega', true, true) === '/wf/scripts/mega/expert_skill_runtime.py', 'pinned skill keeps its runtime');
 ok(tool('mega', true, false) === '', 'unpinned skill-on mega keeps an empty tool');
-ok(tool('mega', false, false) === '/wf/tools/generic_graph_contract.py', 'generic mega gets the runner');
+ok(tool('mega', false, false) === '/wf/scripts/mega/generic_graph_contract.py', 'generic mega gets the runner');
 ok(tool('mega', false, false, { graph_contract_tool: '/x.py' }) === '/x.py', 'explicit arg still wins');
 
 // Every use is either a spread (adds nothing when {}) or the guard of the generic-only Profile call.
@@ -95,12 +95,12 @@ ok(uses.every((l) => /\.\.\.GMI\b/.test(l) || /MEGA \? GMI\.MEGA_MEASUREMENT_GUI
 ok(/profileSummary = \{ \.\.\.profileSummary, \.\.\.mp \}/.test(src) &&
   !/mp\.__agent_timed_out/.test(src), 'a failed baseline measurement keeps the stub, never ends the wave');
 
-for (const f of ['knowledge/mega_measurement.md', 'knowledge/mega_generic_lessons.md',
-  'knowledge/mega_regimes.md', 'tools/mega_graph_ab.py',
-  'scripts/multi_rank_analysis/reduce_stage_meter.py', 'tools/generic_graph_contract.py']) {
+for (const f of ['knowledge/mega/mega_measurement.md', 'knowledge/mega/mega_generic_lessons.md',
+  'knowledge/mega/mega_regimes.md', 'scripts/mega/mega_graph_ab.py',
+  'scripts/multi_rank_analysis/reduce_stage_meter.py', 'scripts/mega/generic_graph_contract.py']) {
   ok(fs.existsSync(path.join(WF, f)), `${f} exists`);
 }
-const guide = fs.readFileSync(path.join(WF, 'knowledge/mega_measurement.md'), 'utf8');
+const guide = fs.readFileSync(path.join(WF, 'knowledge/mega/mega_measurement.md'), 'utf8');
 ok(/GEAK_MEGA_STAGE_METER=1/.test(guide) && /never produces a scored latency/.test(guide),
   'guide fixes the meter switch and keeps the meter out of scoring');
 ok(/graph_contract_adapter\.py/.test(guide) && /replaces\*\* the role's `GRAPH_CONTRACT_TOOL` command/.test(guide),

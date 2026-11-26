@@ -2154,7 +2154,7 @@ const UT_CONTRACT = A.region_ut ? `${String(A.region_ut).replace(/\/+$/, '')}.me
 const megaRoleFiles = (file) => `${WORKFLOW_DIR}/roles/${file}, then ` +
   `${WORKFLOW_DIR}/roles/_fragments/${file.replace(/\.md$/, '')}_mega.md (mode=mega: each section of the ` +
   `second file replaces the section with the same heading in the first)` + (A.region_ut ? `; KERNEL_PATH is a ` +
-  `region UT: then also ${WORKFLOW_DIR}/knowledge/mega_region_ut.md and its contract ${UT_CONTRACT}` : '');
+  `region UT: then also ${WORKFLOW_DIR}/knowledge/mega/mega_region_ut.md and its contract ${UT_CONTRACT}` : '');
 function roleAgent(role, phase, intro, inputs) {
   const base = `You are the ${role}. PHASE=${phase}.
 First Read ${MEGA ? megaRoleFiles(`${role}.md`) : `${WORKFLOW_DIR}/roles/${role}.md`} and follow its instructions for PHASE=${phase}.
@@ -2186,9 +2186,9 @@ const ANYOBJS = { type: 'array', items: ANYOBJ };
 
 // ---- mode=mega args (parsed for every mode; checked only under MEGA) ----
 // A region UT (args.region_ut, a UT task dir in any layout): an adapter agent writes its unified contract
-// (knowledge/mega_region_ut.md), whose mega args fill every arg the caller left unset.
+// (knowledge/mega/mega_region_ut.md), whose mega args fill every arg the caller left unset.
 if (MEGA && A.region_ut) {
-  const u = (await agent(`You are the region UT adapter. Read ${WORKFLOW_DIR}/knowledge/mega_region_ut.md ` +
+  const u = (await agent(`You are the region UT adapter. Read ${WORKFLOW_DIR}/knowledge/mega/mega_region_ut.md ` +
     `("Adapter"), then the UT at ${A.region_ut}; write its contract to ${UT_CONTRACT} and return that JSON.`,
     { phase: 'Setup', label: 'region_ut', schema: ANYOBJ })) || {};
   if (u.error || !u.benchmark_harness || !(u.target_guards || []).length) {
@@ -2345,8 +2345,8 @@ if (MEGA && (REQUIRE_EXPERT_SKILL_BUNDLE_IDENTITY &&
   );
 }
 const EXPERT_SKILL_CONTRACT_TOOL = PINNED_MEGA_SKILL
-  ? `${WORKFLOW_DIR}/tools/expert_skill_contract.py`
-  : String(A.expert_skill_contract_tool || `${WORKFLOW_DIR}/tools/expert_skill_contract.py`);
+  ? `${WORKFLOW_DIR}/scripts/mega/expert_skill_contract.py`
+  : String(A.expert_skill_contract_tool || `${WORKFLOW_DIR}/scripts/mega/expert_skill_contract.py`);
 const EXPERT_SKILL_REFERENCE_PATH = String(A.expert_skill_reference_path || '').replace(/\/+$/, '');
 const CHECK_EXPERT_SKILL_CONTRACT = USE_EXPERT_SKILLS &&
   !!EXPERT_SKILL_ID && !!EXPERT_SKILL_CONTRACT_FILE &&
@@ -2398,8 +2398,8 @@ if (MEGA && USE_EXPERT_SKILLS && PINNED_MEGA_SKILL) {
   }
 }
 const GRAPH_CONTRACT_TOOL = PINNED_MEGA_SKILL
-  ? `${WORKFLOW_DIR}/tools/expert_skill_runtime.py` : String(A.graph_contract_tool ||
-    (!USE_EXPERT_SKILLS ? `${WORKFLOW_DIR}/tools/generic_graph_contract.py` : ''));
+  ? `${WORKFLOW_DIR}/scripts/mega/expert_skill_runtime.py` : String(A.graph_contract_tool ||
+    (!USE_EXPERT_SKILLS ? `${WORKFLOW_DIR}/scripts/mega/generic_graph_contract.py` : ''));
 // Only the skill runtime injects arrival jitter into graph replays; generic_graph_contract.py does not,
 // so a generic finalist cannot report jittered replays and is not asked to.
 const ARRIVAL_JITTER_CONTRACT = PINNED_MEGA_SKILL;
@@ -2474,20 +2474,20 @@ const ANALYSIS_SKILL_INPUTS = ANALYSIS_SKILL_ON ? {
 if (MEGA && ANALYSIS_SKILL_ON) log(`Profile-analysis skill: ${ANALYSIS_SKILL} (analysis only; Step-3 TechLead owns directions).`);
 // Generic mega (Expert Skills off) only; skill-on and non-mega runs get {}.
 const GMI = !USE_EXPERT_SKILLS ? {
-  MEGA_MEASUREMENT_GUIDE: `${WORKFLOW_DIR}/knowledge/mega_measurement.md`,
+  MEGA_MEASUREMENT_GUIDE: `${WORKFLOW_DIR}/knowledge/mega/mega_measurement.md`,
   GENERIC_MEGA_NOTE: 'Read MEGA_MEASUREMENT_GUIDE\'s role table and MEGA_GENERIC_LESSONS before acting; they apply to your role here.',
-  MEGA_GENERIC_LESSONS: `${WORKFLOW_DIR}/knowledge/mega_generic_lessons.md`,
-  MEGA_AB_TOOL: `${WORKFLOW_DIR}/tools/mega_graph_ab.py`,
+  MEGA_GENERIC_LESSONS: `${WORKFLOW_DIR}/knowledge/mega/mega_generic_lessons.md`,
+  MEGA_AB_TOOL: `${WORKFLOW_DIR}/scripts/mega/mega_graph_ab.py`,
 } : {};
 // MoE regime guide + paired graph A/B for runs pinning a megamoe Skill (it names Skill designs, so a
 // generic run never gets it by default); args.mega_regimes='true'|'false' overrides.
 const MEGA_REGIMES_ON = A.mega_regimes != null
   ? String(A.mega_regimes) === 'true' : /^megamoe/.test(EXPERT_SKILL_ID);
 const MRI = MEGA_REGIMES_ON ? {
-  MEGA_REGIMES_GUIDE: `${WORKFLOW_DIR}/knowledge/mega_regimes.md`,
-  MEGA_AB_TOOL: `${WORKFLOW_DIR}/tools/mega_graph_ab.py`,
+  MEGA_REGIMES_GUIDE: `${WORKFLOW_DIR}/knowledge/mega/mega_regimes.md`,
+  MEGA_AB_TOOL: `${WORKFLOW_DIR}/scripts/mega/mega_graph_ab.py`,
   MEGA_REGIME_NOTE: 'Read MEGA_REGIMES_GUIDE for the target size\'s regime before choosing a direction; use MEGA_AB_TOOL for fast paired graph A/B while iterating.',
-  ...(USE_EXPERT_SKILLS ? { MEGA_GENERIC_LESSONS: `${WORKFLOW_DIR}/knowledge/mega_generic_lessons.md` } : {}),
+  ...(USE_EXPERT_SKILLS ? { MEGA_GENERIC_LESSONS: `${WORKFLOW_DIR}/knowledge/mega/mega_generic_lessons.md` } : {}),
 } : {};
 
 const MEGA_RESUME_STATE = !!STATE_DIR &&
@@ -3010,7 +3010,7 @@ const MEGA_PLAN_BASE_SCHEMA = obj({
       focus_files: STRS,
       expected_speedup: NUM, prompt: STR,
       kk_refs: STRS, // optional: perf_knowledge card paths for THIS direction (REFERENCE ONLY)
-      // Binds the direction to Analyze's pipe table (knowledge/pipe_occupancy.md).
+      // Binds the direction to Analyze's pipe table (knowledge/mega/pipe_occupancy.md).
       fills_pipe: STR,
       pipe_util_pct: NUM,
       headroom_basis: STR,
@@ -3135,7 +3135,7 @@ const MEGA_VERIFY_SCHEMA = obj({
   artifact_hash_base: STR,
   artifact_hash_candidate: STR,
   touched_files: STRS,
-  // Overlap (see knowledge/overlap_instrument.md).
+  // Overlap (see knowledge/mega/overlap_instrument.md).
   overlap: obj({
     measured: { type: 'string', enum: ['yes', 'no', 'unknown'] },
     fraction: NUM,        // wall-clock, >=2 distinct roles active
@@ -3149,7 +3149,7 @@ const MEGA_VERIFY_SCHEMA = obj({
     meter_overhead_pct: NUM,
     note: STR,
   }, ['measured']),
-  // Attribution (knowledge/fusion_preconditions.md) for a patch that changes the launch count.
+  // Attribution (knowledge/mega/fusion_preconditions.md) for a patch that changes the launch count.
   attribution: obj({
     changed_us: NUM,
     replaced_sum_us: NUM,
@@ -6343,7 +6343,7 @@ async function megaAfterSetup() {
   // A grown registry (~120 KB after 18 rounds) does not fit in the director's setup reply: read it in chunks.
   if (MEGA_RESUME_STATE && setup.resumed && setup.prior_state) {
     const stateFile = `${STATE_DIR}/STATE.json`;
-    const chunkTool = `python3 ${WORKFLOW_DIR}/tools/state_chunks.py ${stateFile}`;
+    const chunkTool = `python3 ${WORKFLOW_DIR}/scripts/mega/state_chunks.py ${stateFile}`;
     const runChunk = (cmd, label, props) => agent(
       `Run exactly: ${cmd}\nIt prints one JSON object. Return its fields verbatim. If the command ` +
       `fails, return error with its last output lines. Do nothing else.`,
@@ -6614,7 +6614,7 @@ async function megaCalibrate() {
     const got = Number(pc.measured_pct);
     // The bounds are asymmetric: below lo the instrument cannot see the effect (abort); above hi it
     // over-reads (pass with overshoot); absurd or wrong sign measures something else (abort).
-    // <<REPLAY:pc_gate>>  scripts/replay_runs.js lifts this region verbatim; keep it pure (reads only
+    // <<REPLAY:pc_gate>>  scripts/mega/replay_runs.js lifts this region verbatim; keep it pure (reads only
     // lo, hi, got, pc, POSITIVE_CONTROL; no log, throw or outside state).
     const mLo = Math.min(Math.abs(lo), Math.abs(hi));       // smallest effect the loop must resolve
     const mHi = Math.max(Math.abs(lo), Math.abs(hi));
@@ -6727,7 +6727,7 @@ async function megaCalibrate() {
               : mGot < mLo * UNDERSHOOT_FRAC
                 ? `It read under half the target (${(mLo * UNDERSHOOT_FRAC).toFixed(2)}%), which is the ` +
                   `signature of an injection that never took effect — arms sharing a JIT cache entry ` +
-                  `(knowledge/jit_arm_isolation.md), the env var unread, the gated code not on the hot ` +
+                  `(knowledge/mega/jit_arm_isolation.md), the env var unread, the gated code not on the hot ` +
                   `path. Verify the two arms have distinct disk_keys before blaming the loop. `
                 : !signUnanimous
                   ? `Its ${ctrlPairs.length} pair(s) do not all agree in sign, so the median is coming out ` +

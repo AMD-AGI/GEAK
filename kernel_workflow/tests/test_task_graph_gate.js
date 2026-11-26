@@ -6,7 +6,7 @@
 // passes just as happily on a comment as on working code, and it goes green the moment someone
 // writes the words while the logic says something else. So this file LIFTS the gate verbatim out of
 // kernel_lane.js between its `<<REPLAY:task_graph_gate>>` markers and runs it, exactly as
-// scripts/replay_runs.js does for the positive-control gate. If the shipped function changes, this
+// scripts/mega/replay_runs.js does for the positive-control gate. If the shipped function changes, this
 // test runs the changed function.
 //
 // WHAT THE GATE IS FOR. The failure it catches is an Analyze phase that asserts "the stages are

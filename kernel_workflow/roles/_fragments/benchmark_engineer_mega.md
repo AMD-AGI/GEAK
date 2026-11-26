@@ -186,7 +186,7 @@ effect, in either direction — a real win reads as a regression as often as not
   the METRIC section so verify and the integrator compute the same thing.
 - This matters most for multi-rank / `distributed` work, where the whole available gain is often
   single-digit percent and the drift is largest at small problem sizes. See
-  `SKILL_DIR/knowledge/distributed_fusion.md` → "Measurement discipline".
+  `SKILL_DIR/knowledge/mega/distributed_fusion.md` → "Measurement discipline".
 - **Multi-rank harnesses: record RANK-MAX, not rank-mean.** A collective is gated by its slowest
   rank, so rank-mean can improve while the operator gets slower. If the harness prints both, the
   COMMANDMENT's METRIC is the rank-max; note in `notes` that rank-mean is diagnostic only.
@@ -217,7 +217,7 @@ This reuse scope is exact: the current `EVAL_DIR` only. Do not scan/copy a sibli
 directory under `EXP_ROOT`, a prior wave, or a path found in prior state.
 
 **`setup_ab_*.json` has a required shape, because it outlives the run.** These files are the corpus
-`SKILL_DIR/scripts/replay_runs.js` re-decides finished runs from, on no GPU — which is how a change to
+`SKILL_DIR/scripts/mega/replay_runs.js` re-decides finished runs from, on no GPU — which is how a change to
 the gate arithmetic is validated without spending another lease. Every record needs, at minimum:
 
 ```json
@@ -336,7 +336,7 @@ Cheapest constructions, in order of preference:
 
 Whatever you build, it is subject to every rule above: same interleave, ≥5 pairs, a null arm beside
 it, and — if it is env- or config-gated on a caching JIT — the artifact-distinctness proof from
-`SKILL_DIR/knowledge/jit_arm_isolation.md`. A synthetic control that silently compiled to one binary
+`SKILL_DIR/knowledge/mega/jit_arm_isolation.md`. A synthetic control that silently compiled to one binary
 "proves" the harness is blind and aborts the run for the wrong reason. Two failure modes there are
 NOT optional to guard, and both sank an earlier MegaMoE control: **(1)** run **every dose and
 every A/B arm as its own fresh process** — an import-time env read and the kernel's in-memory compile

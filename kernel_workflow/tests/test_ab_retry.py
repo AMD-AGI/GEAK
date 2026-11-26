@@ -15,7 +15,7 @@ import tempfile
 import pytest
 
 TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                    "tools", "ab_retry.py")
+                    "scripts", "mega", "ab_retry.py")
 
 
 def _load():

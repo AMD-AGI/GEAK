@@ -201,7 +201,7 @@ three of them, so a single design rarely wins everywhere.
      that must be read once (weights), the math, and the cross-rank bytes.
    - Each gives a lower bound on time. The largest is the *binding* resource. A measured baseline far
      above every bound means fixed costs (launches, syncs, handshakes, start latency) dominate.
-   - `tools/mega_regime.py` does this from explicit inputs (MEGA_MEASUREMENT_GUIDE §1 step 0). The
+   - `scripts/mega/mega_regime.py` does this from explicit inputs (MEGA_MEASUREMENT_GUIDE §1 step 0). The
      profile writes it to `EVAL_DIR/regime.json` and `PROFILE_SUMMARY.key_metrics.regime_by_guard`.
    - Guards with the same regime form a bucket. A bucket is a hypothesis; the paired A/B decides.
 2. **Choose the lever family from the regime, not from the largest guard.**

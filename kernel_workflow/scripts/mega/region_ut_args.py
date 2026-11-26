@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A starting contract for the region UT adapter (knowledge/mega_region_ut.md) on the UT layouts GEAK produces.
+"""A starting contract for the region UT adapter (knowledge/mega/mega_region_ut.md) on the UT layouts GEAK produces.
 
 The adapter agent owns the contract: it starts from this output when the layout is known, corrects it from
 the UT, and derives every field itself for any other layout ({"error"} here).
@@ -87,7 +87,7 @@ def region_ut_args(task_dir):
         "positive_control": {
             "name": "synthetic slowdown inside the seam", "guard": target,
             "how": "a calibrated device-side delay inside a kernel_src/ copy of the seam, measured with the "
-                   "UT's own unittest.py (knowledge/mega_region_ut.md)",
+                   "UT's own unittest.py (knowledge/mega/mega_region_ut.md)",
             "expected_pct_lo": -9.0, "expected_pct_hi": -4.0, "magnitude": "constructed",
             "abort_on_fail": False, "required_control_pairs": 5, "required_null_pairs": 8,
         },

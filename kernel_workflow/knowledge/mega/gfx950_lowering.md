@@ -114,7 +114,7 @@ If an operator-specific candidate recipe was explicitly supplied to your lane, f
 substrate fix; do not search the skill index for an unassigned recipe. The converging diagnostic is
 an ISA diff of the faulting cut against the clean canary (which base/predicate register moved) plus
 reducing substrate SGPR pressure so the publish stops perturbing the allocation at all. See
-`knowledge/crash_bisection.md` (the CORRECTION note — this is NOT a `wait_until` counter
+`knowledge/mega/crash_bisection.md` (the CORRECTION note — this is NOT a `wait_until` counter
 target-unreachable).
 
 ### Price the release before you place it

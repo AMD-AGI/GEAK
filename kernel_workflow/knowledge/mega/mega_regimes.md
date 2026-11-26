@@ -106,7 +106,7 @@ Any other size: **measure the frozen baseline at that size first** (official ben
 
 ## §4 Measuring a candidate fast (`MEGA_AB_TOOL`)
 
-`MEGA_AB_TOOL` (`tools/mega_graph_ab.py`) runs a paired, rotated CUDA-graph A/B: one torchrun job
+`MEGA_AB_TOOL` (`scripts/mega/mega_graph_ab.py`) runs a paired, rotated CUDA-graph A/B: one torchrun job
 per arm per pass, rank-max graph time, per-pass paired deltas vs the first arm, output relL2 /
 bit-exactness vs the first arm, `[megamoe] path=` marker counts, retries and dropped-leg records.
 

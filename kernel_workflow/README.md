@@ -232,7 +232,7 @@ Workflow({ scriptPath: "<WF_DIR>/kernel_workflow.js", args: {
 
 All other args (time budgets, final top-k, Expert Skill pinning, gates) are read in the
 "mode=mega args" part of `kernel_lane.js` with their defaults. Launching `kernel_lane.js` directly (with
-`mode: "mega"`) runs the same worker and shows its phases individually. `scripts/replay_runs.js` re-decides finished runs
+`mode: "mega"`) runs the same worker and shows its phases individually. `scripts/mega/replay_runs.js` re-decides finished runs
 with the current gate arithmetic, on no GPU, before a gate change is committed.
 
 ### Deep Research Agent / Research phase (NEW, opt-in)
@@ -388,8 +388,9 @@ kernel_workflow.js     ENTRY POINT / dispatcher (mode=optimize|author|mega -> ke
 kernel_lane.js         WORKER: the deterministic optimize/author pipeline (called per lane), and its mode=mega
                        backend (multi-rank whole-kernel candidate search, hooks on the same phases)
 roles/_fragments/*_mega.md  what mode=mega changes in each role (sections replace the role's same-named ones)
-tools/                 mega_graph_ab, mega_regime, generic_graph_contract, expert_skill_contract/runtime,
-                       ab_retry, rebase_commandment (mode=mega helpers)
+scripts/mega/          mode=mega helpers: mega_graph_ab, mega_regime, generic_graph_contract,
+                       expert_skill_contract/runtime, ab_retry, rebase_commandment, state_chunks,
+                       region_ut_args, replay_runs.js
 tests/                 mode=mega regression tests (`node tests/<t>.js`, `python -m pytest tests/`)
 kernel_workflow_bmk.js batch orchestrator (runs kernel_lane on a list of kernels, one batch per GPU)
 roles/               director, tech_lead, engineer, deep_engineer (deep_explore),
@@ -399,10 +400,10 @@ roles/               director, tech_lead, engineer, deep_engineer (deep_explore)
                      researcher (DRA, opt-in)
 knowledge/           optimization_strategies, hip/triton/wrapper, profiling_guide,
                      amd_instinct (CDNA gfx942/gfx950), amd_rdna4 (RDNA4 gfx1201),
-                     self_monitoring, geomean_levers; for mode=mega also distributed_fusion,
+                     self_monitoring, geomean_levers; for mode=mega also mega/ (distributed_fusion,
                      fusion_preconditions, tile_task_graph, overlap_instrument, pipe_occupancy,
                      resource_partition, gfx950_lowering, crash_bisection, jit_arm_isolation,
-                     mega_* (measurement, regimes, generic lessons), collectors/, analysis_skills/
+                     mega_*), collectors/, analysis_skills/
 knowledge/learned/   distilled experience cards (ADVISORY priors; each card self-describing via its
                      discovery header, INDEX.md GENERATED from them; written by the
                      TechLead update_experience step at the end of EVERY run). This sink is
@@ -417,7 +418,7 @@ scripts/             gpu_lock.sh (single-GPU, pool and multi-GPU group leases), 
                      test_mode_dispatch.js (regression guard: mode dispatch + bake-off lane
                      routing; stubs the runtime, no GPU/agent — `node scripts/test_mode_dispatch.js`)
                      multi_rank_analysis/ (per-rank trace/counter aggregation for mode=mega),
-                     replay_runs.js (re-decide finished mega runs with today's gates, no GPU)
+                     mega/replay_runs.js (re-decide finished mega runs with today's gates, no GPU)
 ```
 The bake-off references e2e's `op_benchmarker` role + `harness_lib.py` **in place** at
 `../e2e_workflow/` (single source, no copy).

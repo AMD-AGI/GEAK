@@ -1,11 +1,11 @@
-"""Unit tests for tools/mega_regime.py (shape -> regime map)."""
+"""Unit tests for scripts/mega/mega_regime.py (shape -> regime map)."""
 
 import os
 import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+sys.path.insert(0, os.path.join(ROOT, "scripts", "mega"))
 
 import mega_regime as mr  # noqa: E402
 

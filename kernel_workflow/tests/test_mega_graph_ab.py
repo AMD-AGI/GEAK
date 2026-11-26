@@ -10,7 +10,7 @@ import sys
 import textwrap
 
 TOOL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                    "tools", "mega_graph_ab.py")
+                    "scripts", "mega", "mega_graph_ab.py")
 
 
 def _load():

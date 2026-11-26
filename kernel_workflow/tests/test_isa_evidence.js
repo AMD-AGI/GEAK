@@ -29,7 +29,7 @@ const ok = (cond, msg) => {
 };
 
 const hip = read('knowledge', 'hip_optimization.md');
-const jit = read('knowledge', 'jit_arm_isolation.md');
+const jit = read('knowledge', 'mega', 'jit_arm_isolation.md');
 
 console.log('\n# 1. the hoist that costs more than the recompute');
 {

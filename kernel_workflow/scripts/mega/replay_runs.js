@@ -9,7 +9,7 @@
  * `<<REPLAY:pc_gate>>` markers. The output is a deterministic snapshot: record it, change the
  * workflow, re-run with --check and diff.
  *
- *   node scripts/replay_runs.js --runs <dir> [--runs <dir> ...] [--json] \
+ *   node scripts/mega/replay_runs.js --runs <dir> [--runs <dir> ...] [--json] \
  *        [--snapshot <file>] [--check <file>]
  *
  * Exit codes: 0 ok / snapshot matches, 1 usage or corpus error, 4 --check found a difference.
@@ -22,7 +22,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const ROOT = path.resolve(__dirname, '..');
+const ROOT = path.resolve(__dirname, '..', '..');
 const WF = path.join(ROOT, 'kernel_lane.js');
 
 // ---------------------------------------------------------------- args

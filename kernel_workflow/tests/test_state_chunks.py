@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 
-TOOL = Path(__file__).resolve().parents[1] / "tools" / "state_chunks.py"
+TOOL = Path(__file__).resolve().parents[1] / "scripts" / "mega" / "state_chunks.py"
 SPEC = importlib.util.spec_from_file_location("state_chunks", TOOL)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader

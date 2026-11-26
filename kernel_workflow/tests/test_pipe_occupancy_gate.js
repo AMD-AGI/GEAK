@@ -207,7 +207,7 @@ const DIR = (o) => Object.assign({ id: 'D1', fills_pipe: 'mfma', pipe_util_pct: 
 
 console.log('\n# the knowledge and the roles actually route to it');
 {
-  const card = fs.readFileSync(path.join(WF, 'knowledge/pipe_occupancy.md'), 'utf8');
+  const card = fs.readFileSync(path.join(WF, 'knowledge/mega/pipe_occupancy.md'), 'utf8');
   const lead = megaRole('tech_lead');
   ok(/Raising occupancy can buy out the fix/.test(card),
      'the card states the counter-intuitive harm, not just that occupancy "may not help"');

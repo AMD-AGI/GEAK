@@ -4,7 +4,7 @@
 //
 // Every other suite here asserts that a sentence is present in a role file or that a regex matches
 // the workflow source. That catches a deletion and nothing else: a change to the gate arithmetic
-// that silently re-decides finished runs passes all of them. `scripts/replay_runs.js` exists to
+// that silently re-decides finished runs passes all of them. `scripts/mega/replay_runs.js` exists to
 // close that hole by re-deciding recorded runs on no GPU. This file proves it can:
 //
 //   1. it computes the paired effect the way the discipline requires (within-rep, rank-max, VOID
@@ -24,7 +24,7 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..');
-const REPLAY = path.join(ROOT, 'scripts', 'replay_runs.js');
+const REPLAY = path.join(ROOT, 'scripts', 'mega', 'replay_runs.js');
 const WF = path.join(ROOT, 'kernel_lane.js');
 
 let failures = 0;
