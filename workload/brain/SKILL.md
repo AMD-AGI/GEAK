@@ -154,16 +154,19 @@ Drive inspections from recorded deadlines, independently of module messages or c
 Check current allocation authority alongside exact handles and bounded native progress;
 reserve full-history scans for decision audits. Keep incomplete observations as unknown
 and the next inspection/report due; recheck authoritative state before control actions.
-An observation failure is not a worker return. A cached lease deadline or live worker
-does not establish continued resource access.
+When a handoff depends on a resource becoming free, retain the actual observation and
+retry while the wait is permitted. Resume from the last accepted delivery once ready.
+A failed observation leaves the worker's outcome unknown.
+Check current resource authority even when the worker or its cached lease appears live.
 
 At the user's cadence, otherwise `report.interval_sec`, send **Plan / Finish**: running
 and next work, blockers and verified completions with evidence. Say when nothing new has
 finished. Record the next inspection/report times; background logs are not conversation
 updates. A status reply is an interim update, not a handoff: keep the controlling
 conversation active unless a verified mechanism will resume Brain for the next decision.
-Queued worker messages do not prove wake-up support. Inspect completion, failure and
-deadline reports and dispatch the next permitted work without waiting for a user prompt.
+Verify that a failed return reaches the controlling agent as well as a successful one.
+If either return would only be logged, stay with the handle through its return and act on it.
+Dispatch the next permitted work on completion, failure or deadline without waiting for a user prompt.
 
 On allocation loss or expiry, preserve continuations and ask Setup to inspect the
 authorized resource pool. While budget remains and permitted capacity may arrive, keep
