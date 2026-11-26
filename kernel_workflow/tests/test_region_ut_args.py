@@ -46,7 +46,7 @@ def test_the_ut_fixes_benchmark_guards_accuracy_and_module(tmp_path):
     assert (a["accuracy_metric"], a["accuracy_threshold"]) == ("ut_max_err", 0.1)
     assert a["required_replays"] == 50 and "region_ut_warning" not in a
     assert a["positive_control"]["guard"] == "verify_r240" and a["positive_control"]["abort_on_fail"] is False
-    assert a["require_graph_capture"] == "false"
+    assert a["require_graph_capture"] == "false" and a["region_ut_format"] == "fusion_contract"
 
 
 def test_a_noisy_case_gets_a_wider_floor(tmp_path):
@@ -54,14 +54,14 @@ def test_a_noisy_case_gets_a_wider_floor(tmp_path):
     assert a["regression_floor_by_guard"] == {"pre_r77": 0.89, "draft_r40": 0.98}
 
 
-def test_no_graph_case_or_short_replay_gives_no_liveness(tmp_path):
+def test_the_replay_count_is_the_uts_own_and_no_graph_case_gives_none(tmp_path):
     a = MODULE.region_ut_args(_task(tmp_path, unittest=UNITTEST.replace("default=50", "default=10")))
-    assert a["required_replays"] == 30 and "region_ut_warning" in a
+    assert a["required_replays"] == 10 and "region_ut_warning" not in a
     b = MODULE.region_ut_args(_task(tmp_path, cases=[{"sig": "pre_r77", "regime": "eager", "weight": 1}]))
     assert b["target_guards"] == ["pre_r77"] and b["regression_guards"] == [] and "region_ut_warning" in b
 
 
-def test_a_ut_outside_the_fusion_contract_is_refused(tmp_path, capsys):
+def test_a_ut_without_cases_binds_or_tolerance_is_refused(tmp_path, capsys):
     assert MODULE.main([str(_task(tmp_path, cases=[]))]) == 1
     assert "no cases" in json.loads(capsys.readouterr().out)["error"]
     assert MODULE.main([str(_task(tmp_path, candidate_bind=None))]) == 1
@@ -69,3 +69,18 @@ def test_a_ut_outside_the_fusion_contract_is_refused(tmp_path, capsys):
     assert MODULE.main([str(_task(tmp_path, acceptance={}))]) == 1
     assert "acceptance.tol" in json.loads(capsys.readouterr().out)["error"]
     assert MODULE.main([str(tmp_path / "missing")]) == 1
+
+
+def test_an_e2e_kernel_ut_reads_its_workload_cases_and_tol(tmp_path):
+    meta = {"target_callable": "pkg.ops.attn:decode", "tol": 0.001, "regime": {"cuda_graph": True},
+            "candidate_bind": {"kind": "module", "module": "pkg.ops.attn", "file": "kernel_src/attn.py"},
+            "phase_regimes": {"decode": {"cuda_graph": True}, "prefill": {"cuda_graph": False}},
+            "workload": {"kind": "agentx_trace_replay", "cases": [
+                {"sig": "dec_r96", "regime": "decode", "effective_calls": 2500},
+                {"sig": "pre_r4096", "regime": "prefill", "effective_calls": 80}]}}
+    (tmp_path / "meta.json").write_text(json.dumps(meta))
+    (tmp_path / "unittest.py").write_text("print('{\"UT\": \"pass\"}')\n")
+    a = MODULE.region_ut_args(tmp_path)
+    assert a["region_ut_format"] == "kernel_ut" and a["candidate_import_modules"] == ["pkg.ops.attn"]
+    assert (a["target_guards"], a["regression_guards"]) == (["dec_r96"], ["pre_r4096"])
+    assert a["accuracy_threshold"] == 0.001 and a["required_replays"] == 1 and "region_ut_warning" not in a

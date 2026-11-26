@@ -6136,7 +6136,7 @@ function megaEngineerTurn(currentRound, d) {
               launchTarget: LAUNCH_TARGET, promotionMetric: PROMOTION_METRIC,
               accuracyMetric: ACCURACY_METRIC, accuracyThreshold: ACCURACY_THRESHOLD,
               requiredAccuracyCases: REQUIRED_ACCURACY_CASES,
-              requiredReplays: 30, requiredPairs: REQUIRED_PAIRS,
+              requiredReplays: Math.min(30, REQUIRED_REPLAYS), requiredPairs: REQUIRED_PAIRS,
               allowPartialFusion: ALLOW_PARTIAL_FUSION, frozenBaseline: BASELINE_PER_CASE,
             });
             record.attempts = attempts;
