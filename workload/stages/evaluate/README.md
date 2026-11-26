@@ -12,6 +12,25 @@ Choose its scope for a decision, not to complete an inherited list of tests. Kee
 conditioning and active instrumentation comparable even for a screen; extra repetitions
 cannot repair a systematic mismatch.
 
+## Model correctness
+
+Use paired GSM8K final-answer exact match for model correctness. Score the unchanged
+reference and the deployed candidate against gold answers on the same test questions.
+Token IDs, generated text and conditioning-prompt hashes are diagnostic only. A
+throughput-only screen leaves correctness unevaluated.
+
+Use the merged config's `gsm8k` policy or the [workload defaults](../../config/default.json)
+for a direct call. Use `screen_questions` for a quality screen and `finalist_questions`
+for the adoption decision. Record any task-specific overrides before measuring.
+Report correct/total and accuracy for each arm, then compute the signed change in
+percentage points as `100 × (candidate_correct − reference_correct) / total`.
+Quality passes when this change is at least `−max_drop_pp`. A larger drop is an
+accuracy regression. A missing, incomplete or unmatched pair leaves quality unevaluated
+and blocks adoption. Carry the quality decision and both receipts alongside the native
+performance verdict.
+
+## Performance comparison
+
 Resolve each arm's repeats, required quality and deployment reuse from its native owner.
 The finalizer's `repeats` applies to the candidate; a fresh stock control has its own
 admission requirements. Do not mirror one arm's count onto another. Reuse compatible

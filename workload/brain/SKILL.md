@@ -144,6 +144,8 @@ no-search return before repeating it. A local limit returns to Reasoning, includ
 verification and delivery in the next budget.
 
 Only native evidence under the task's comparison and quality criteria admits a replacement.
+For serving adoption, read both GSM8K accuracies and the [Evaluate quality decision](../stages/evaluate/README.md#model-correctness)
+alongside the native performance verdict.
 Adoption updates the verified candidate; rejection keeps the reference. Neither ends the
 campaign: reason again about the remaining objective, coverage, budget and usable work.
 A kernel win or completed call does not establish serving improvement.
