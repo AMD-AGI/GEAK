@@ -47,7 +47,7 @@
 # Exit codes: 0 ok | 124 TIMED OUT, incl. a KILL after the grace period (degraded, never a zero) |
 #             2 usage / not under gpu_lock | 3 unavailable dependency/locus | 4 no usable matching
 #             artifacts | 5 partial artifacts | 7 llvm_dual_load (environment, see
-#             profiling-dependencies.md "Known abort") | other = rocprofv3's (134 / signal = abort ->
+#             gluon_authoring/scripts/q.py llvm_dual_load) | other = rocprofv3's (134 / signal = abort ->
 #             bisect the group)
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -127,7 +127,7 @@ rocprofv3_safe.sh --kernel <regex> --out <dir> (--pmc "A B" | --kernel-trace | -
 Runs rocprofv3 under gpu_lock.sh with a kernel filter, a timeout and artifact checks; writes
 <out>/rocprofv3_safe.json (state, reason, rc) and <out>/rocprofv3.log.
 Exit: 0 ok | 124 timed out | 2 usage/lock | 3 dependency/locus | 4 no matching artifacts |
-      5 partial | 7 llvm_dual_load (profiling-dependencies.md "Known abort") | 134 abort -> split the group
+      5 partial | 7 llvm_dual_load (gluon_authoring/scripts/q.py llvm_dual_load) | 134 abort -> split the group
 --att: code.json "code": null after the wide retry = no wave on the traced CU (small grid);
        launch >= 1 WG per CU or set KT_ATT_TARGET_CU.
 USAGE
@@ -256,8 +256,8 @@ if dual == '1':
     state, rc = 'llvm_dual_load', 7
     report.update(reason='llvm_dual_load',
                   hint='two libamd_comgr.so.3 copies loaded (torch _rocm_sdk_core + rocprofv3 '
-                       '_rocm_sdk_devel); fix the image: kernel_tools/profiling-dependencies.md '
-                       '"Known abort"')
+                       '_rocm_sdk_devel); fix the image: python3 '
+                       'perf_knowledge/expert_skills/skills/gluon_authoring/scripts/q.py llvm_dual_load')
 elif rc:
     # timeout -k sends KILL when TERM is ignored: 137 after a timeout is still a timeout.
     if rc == 124 or (rc == 137 and timeout > 0):
@@ -276,7 +276,7 @@ PY_STATE
 rc="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["rc"])' "$OUT/rocprofv3_safe.json")"
 if [ "$rc" = 7 ]; then
   echo "[rocprofv3_safe] LLVM dual-load abort (two libamd_comgr.so.3 copies): an image problem, not the" \
-       "kernel or the counter list. Fix: kernel_tools/profiling-dependencies.md \"Known abort\"." >&2
+       "kernel or the counter list. Fix: python3 perf_knowledge/expert_skills/skills/gluon_authoring/scripts/q.py llvm_dual_load." >&2
 elif [ "$rc" != 0 ]; then
   echo "[rocprofv3_safe] collection incomplete; see $OUT/rocprofv3_safe.json" >&2
 fi

@@ -754,7 +754,7 @@ def lds_per_cu(arch):
 
 def lds_alloc_granule(arch):
     """Per-workgroup LDS allocation granule in bytes (hw_constants `lds_alloc_granule_bytes`), or
-    None. gfx950: 1280 B, measured (occupancy sweep, one MI350X node, 2026-11); gfx942: 512 B."""
+    None. gfx950: 1280 B, measured (occupancy sweep, MI350X); gfx942: 512 B."""
     g = (_arch_facts(arch) or {}).get("lds_alloc_granule_bytes")
     return int(g) if g else None
 

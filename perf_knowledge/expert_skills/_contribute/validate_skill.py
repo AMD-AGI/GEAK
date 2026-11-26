@@ -32,6 +32,11 @@ MEGA_TOOLS_DIR = os.path.join(ROOT, "expert_workflows", "mega_fusion", "tools")
 CAP_INDEX = os.path.normpath(os.path.join(ROOT, "..", "index", "capability_index.yaml"))
 GEAK = os.path.normpath(os.path.join(ROOT, "..", ".."))
 REQUIRED_SECTIONS = ["When to use", "Mechanism", "Procedure", "Do-no-harm notes", "Sources"]
+# A reference fact store (`role: reference_fact_store`) is queried, not reproduced: it has no
+# Procedure. Its knowledge lives in facts.jsonl beside skill.md, read through scripts/q.py.
+REFERENCE_FACT_STORE_ROLE = "reference_fact_store"
+REFERENCE_SECTIONS = ["When to use", "Evidence and scope", "How to query", "Sources"]
+REFERENCE_FILES = ("facts.jsonl", "INDEX.md", "scripts/q.py", "scripts/lint_facts.py")
 FM_RE = re.compile(r"^---\n(.*?)\n---\n(.*)$", re.S)
 EMBEDDED_TAGS = {
     "planner_extension": "expert-skill-planner-extension",
@@ -635,7 +640,15 @@ def static_check(skill_path, fm, body):
         errs.append("kernel scope needs expects.isolated_speedup_min")
     if fm.get("scope") == "e2e" and "e2e_delta_min_pct" not in exp:
         errs.append("e2e scope needs expects.e2e_delta_min_pct")
-    for sec in REQUIRED_SECTIONS:
+    is_reference = fm.get("role") == REFERENCE_FACT_STORE_ROLE
+    if is_reference:
+        if fm.get("playbook_file"):
+            errs.append("a reference_fact_store skill has no playbook_file (its cards are the content)")
+        base = os.path.dirname(skill_path)
+        for rel in REFERENCE_FILES:
+            if not os.path.isfile(os.path.join(base, rel)):
+                errs.append(f"reference_fact_store skill is missing {rel}")
+    for sec in (REFERENCE_SECTIONS if is_reference else REQUIRED_SECTIONS):
         if f"## {sec}" not in body:
             errs.append(f"missing body section: ## {sec}")
         elif not _section_filled(body, sec):

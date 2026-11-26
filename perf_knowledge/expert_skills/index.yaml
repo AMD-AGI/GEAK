@@ -296,8 +296,8 @@ skills:
 - id: gluon_authoring
   file: skills/gluon_authoring/skill.md
   scope: kernel
-  revision: '2026-11-21'
-  playbook_file: skills/gluon_authoring/playbook.md
+  revision: '2026-11-26'
+  playbook_file: skills/gluon_authoring/skill.md
   planner_extension_file: ''
   contract_file: ''
   validation_file: skills/gluon_authoring/skill.md
@@ -322,10 +322,10 @@ skills:
   expects:
     isolated_speedup_min: 1.1
     parity: required
-  validation_status: validated
+  validation_status: draft
   reference_evidence_status: ''
   constraint_validation_status: ''
-  auto_apply: true
+  auto_apply: false
   explicit_pin_modes: []
 - id: megamoe_ep_mega_fusion
   file: skills/megamoe_ep_mega_fusion/skill.md

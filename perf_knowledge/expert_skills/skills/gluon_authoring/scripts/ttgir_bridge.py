@@ -1293,7 +1293,7 @@ def report(rec: Recovery, verbose: bool = False) -> str:
             lines.append("     anchor lands there, the whole residual is the pipeline and no")
             lines.append("     layout work will move it. Those passes are absent from the default")
             lines.append("     lowering, NOT from libtriton -- re-inject them before hand-building")
-            lines.append("     (references/tile-programming/pipeline.md).")
+            lines.append("     (scripts/q.py \"re-inject pipeline passes\").")
         elif mns == 1:
             lines.append("  => plain is NOT pipelined: num_stages=1 (dump attribute or compile metadata). No")
             lines.append("     pipeline to lose, so a faithful anchor should land at ~1.00 and")

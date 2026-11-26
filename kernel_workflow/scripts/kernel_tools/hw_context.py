@@ -22,4 +22,7 @@ if __name__ == "__main__":
     if not os.path.isfile(TARGET):
         sys.exit(f"hw_context.py: {TARGET} is missing from this checkout")
     sys.argv[0] = TARGET
+    # hardware_context.py imports its sibling gpu_identity.py: run it with its own directory first on
+    # sys.path, as `python3 scripts/hardware_context.py` would.
+    sys.path.insert(0, os.path.dirname(TARGET))
     runpy.run_path(TARGET, run_name="__main__")

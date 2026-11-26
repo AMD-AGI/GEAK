@@ -63,23 +63,23 @@ def test_roofline_tool_selftest(tool):
     assert "SELFTEST PASS" in out, out[-3000:]
 
 
-def test_hw_budget_reading_route_page_check_actually_runs():
-    """workload_models.json reading_route.page is pack-relative and must resolve via
-    _hwdata.pack_dir(); the 13-archetype / precheck-heading assertions must RUN, not skip."""
-    path = KT / "hw_budget.py"
-    out = run(sys.executable, path, "--selftest").stdout
-    assert "reading-route page checked" in out and "13 archetype sections" in out, out[-2000:]
-    assert "SKIPPED" not in out
-
-
-def test_reading_route_page_resolves_via_pack_dir():
+def test_hw_budget_reading_route_is_an_honest_no_index_skip():
+    """The Gluon pack is a fact store now: it ships no per-archetype workload index, so the
+    pack-relative workload_models.json reading_route.page does not resolve. hw_budget must say so
+    (the no-index note) and route nothing, rather than fail or hand back a page nobody can open."""
     sys.path.insert(0, str(KT))
     try:
         import _hwdata  # noqa: PLC0415
     finally:
         sys.path.remove(str(KT))
     page = json.loads((HW_DATA / "workload_models.json").read_text())["reading_route"]["page"]
-    assert (_hwdata.pack_dir() / page).is_file(), page
+    assert _hwdata.pack_dir() is not None
+    assert not (_hwdata.pack_dir() / os.path.dirname(page)).is_dir(), page
+    out = run(sys.executable, KT / "hw_budget.py", "--selftest").stdout
+    assert "no workload index in this pack" in out and "SELFTEST PASS" in out, out[-2000:]
+    hb = _load("hw_budget_route_under_test", KT / "hw_budget.py")
+    models = json.loads((HW_DATA / "workload_models.json").read_text())
+    assert hb._reading_route(models, "gemm") is None
 
 
 def test_pack_carries_no_shims_of_shared_tools():
@@ -186,12 +186,11 @@ def test_kt_hw_context_shim_runs_the_shared_cli():
 # --------------------------------------------------------------------------- derived docs
 
 def test_generated_doc_blocks_are_current(extract_sku):
+    # The Gluon pack's prose SKU pages (the only generated blocks) were replaced by fact cards that
+    # point at extract_sku.py itself; any generated block that remains anywhere must be current.
     files = list(extract_sku.doc_files())
     rel = {str(Path(f).relative_to(REPO)) for f in files}
-    for must in ("perf_knowledge/expert_skills/skills/gluon_authoring/references/hardware/amd-cdna4-skus.md",
-                 "perf_knowledge/expert_skills/skills/gluon_authoring/references/hardware/amd-cdna3-skus.md",
-                 "perf_knowledge/expert_skills/skills/gluon_authoring/references/hardware/atlas.md"):
-        assert must in rel, must
+    assert not any("gluon_authoring" in r for r in rel), rel
     assert extract_sku.check_docs(extract_sku.load()) == []
 
 

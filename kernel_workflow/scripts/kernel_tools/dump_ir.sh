@@ -5,7 +5,7 @@
 #
 # Use for: (a) recovering plain-Triton inferred layouts before transcription
 # (the .ttgir shows #blocked/#mma/#shared + num_stages), and (b) verifying each
-# Gluon layer landed (compiler-contract.md acceptance signals).
+# Gluon layer landed (q.py --kind tool dump_ir).
 #
 # Lives in kernel_workflow/scripts/kernel_tools/ (GEAK shared kernel tool).
 #
@@ -238,7 +238,7 @@ PYCLEAN
 trap _dump_ir_cleanup EXIT
 
 # Optional compiler knobs, upstream-only. Everything here is a real upstream 3.8.0 control;
-# see compiler-contract.md ## What upstream 3.8.0 actually gives you.
+# see q.py "upstream env knobs".
 #   COEXEC   -- the stock matrix/VALU co-execution scheduler strategy
 #   AGPR     -- pin matrix accumulators in AGPR (LLVM function attributes, 3.8.0 only)
 #   PLUGIN   -- load an LLVM pass plugin you built; set LLVM_PLUGIN=/abs/path/lib*.so
@@ -377,7 +377,7 @@ fi
 python3 "$(dirname "$SELF")/collect_ir.py" "$CACHE" "$DEST" "$VARIANT" --kernel-name "$KERNEL_NAME"
 
 # Echo the config the dumped IR was compiled with, so it can be confirmed to match
-# the pinned autotune-winning config (see isa_tools.md: pin one compilation configuration).
+# the pinned autotune-winning config (see the dump_ir tool card: pin one compilation configuration).
 if [ -f "$DEST/$VARIANT.ttgir" ]; then
   NW="$(grep -oE '"ttg.num-warps"[^,}]*' "$DEST/$VARIANT.ttgir" | grep -oE '[0-9]+' | head -1 || true)"
   NS="$(grep -oE 'num_stages[^,}]*[0-9]+' "$DEST/$VARIANT.ttgir" | grep -oE '[0-9]+' | head -1 || true)"

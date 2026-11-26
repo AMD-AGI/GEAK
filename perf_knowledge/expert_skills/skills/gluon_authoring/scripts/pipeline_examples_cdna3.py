@@ -1,15 +1,14 @@
 """Runnable authored-overlap examples for CDNA3 (gfx942), with their own numerics check.
 
-These are the code blocks in `references/gluon/pipeline-reference.md ## Authored overlap`,
-kept executable so the claims there can be re-checked on your own box instead of trusted.
-Run it and compare the printed op counts with the ones quoted in that section.
+These are the authored-overlap examples (query: `scripts/q.py "authored overlap"`), kept
+executable so the related cards can be re-checked on your own box instead of trusted.
+Run it and compare the printed op counts with the ones the cards quote.
 
 The async multi-buffer path is deliberately absent here, but NOT because it is unavailable.
 `cdna4.async_copy` does lower on gfx942 -- at 32 bits per thread, not the 128 this file's
 layouts are built for. An earlier version of this docstring recorded it as "does not lower",
-from a probe whose layout was at fault rather than the arch; see
-`references/gluon/pipeline-reference.md ## Authored overlap (no compiler patch)` for the
-correction and the width table. What belongs here is the sync staging plus the
+from a probe whose layout was at fault rather than the arch; query
+`scripts/q.py "async_copy width gfx942"` for the correction and the width table. What belongs here is the sync staging plus the
 `warp_pipeline_stage` hint; for the async forms at their own width, run
 `pipeline_examples_cdna4.py`.
 
@@ -139,7 +138,7 @@ def b1_warp_pipeline_stage(out, inp, M: gl.constexpr, N: gl.constexpr, ITERS: gl
     warp-pipeline kernel gives the MEMORY stage the higher value, because both clusters issue
     VALU and a compute stage that outranks memory starves the other group's address updates.
     This probe is kept as measured (it has a published census); copy the rule from
-    references/tile-programming/warp-pipeline.md instead.
+    the warp-pipeline cards instead (scripts/q.py "warp_pipeline_stage priority").
     """
     o = (gl.arange(0, M, layout=gl.SliceLayout(1, BLK))[:, None] * N
          + gl.arange(0, N, layout=gl.SliceLayout(0, BLK))[None, :])

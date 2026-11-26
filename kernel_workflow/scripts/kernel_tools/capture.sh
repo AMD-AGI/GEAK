@@ -31,7 +31,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Shared host<->container ownership: never write root-owned .pyc into the bind-mounted skill dir,
 # and make artifacts group-writable so the host uid can edit what the (root) container wrote. See
-# kernel_tools/profiling-dependencies.md.
+# the profiler tool cards: gluon_authoring/scripts/q.py --kind tool profiler.
 export PYTHONDONTWRITEBYTECODE=1
 umask 0002
 # Profiler runs WHERE the kernel runs: when TILE_KERNEL_CONTAINER is set, locus_run wraps the
@@ -53,7 +53,7 @@ Usage:
 Run it under GEAK's gpu_lock.sh, or pass --dev <id> and it locks itself (it refuses with neither).
 Under an external lock, GEAK_GPU_LOCK_HELD must hold the GPU id (== HIP_VISIBLE_DEVICES), not 1.
 Exit 7: rocprofv3 hit the LLVM dual-load abort (two libamd_comgr.so.3 copies); the static IR layer
-still runs; fix the image per kernel_tools/profiling-dependencies.md "Known abort".
+still runs; fix the image per `python3 perf_knowledge/expert_skills/skills/gluon_authoring/scripts/q.py llvm_dual_load`.
 
 The source file is verified and hashed in the execution locus. Its identity and the requested
 device-kernel substring are recorded in capture.json; callers must recapture after changing source.
@@ -149,7 +149,7 @@ done
 PREFLIGHT_MODE=profile
 [ "$ISA_ONLY" = yes ] && PREFLIGHT_MODE=compile-only
 if ! locus_preflight "$PREFLIGHT_MODE"; then
-  echo "[capture] LOCUS PREFLIGHT FAILED (${LOCUS_DEGRADE_CAUSE:-?}): the task specifies a container but the profiler cannot run in it -> FIX the locus or escalate (kernel_tools/profiling-dependencies.md)." >&2
+  echo "[capture] LOCUS PREFLIGHT FAILED (${LOCUS_DEGRADE_CAUSE:-?}): the task specifies a container but the profiler cannot run in it -> FIX the locus or escalate (python3 perf_knowledge/expert_skills/skills/gluon_authoring/scripts/q.py \"execution locus\")." >&2
   # Fail CLOSED (exit 4). Continuing would run every layer below on the HOST and write the results
   # into the same capture.json the container round reads -- host evidence filed under a container
   # kernel, which is worse than no evidence because nothing downstream can tell the difference.
@@ -245,7 +245,7 @@ PY_CANDIDATES
       exit 2
     fi
   elif [ "$TRACE_STATE" = llvm_dual_load ]; then
-    echo "[capture] rocprofv3 aborted on two LLVM copies (libamd_comgr.so.3) -- an image problem, not the kernel. No profiler layer can run here; fix: kernel_tools/profiling-dependencies.md \"Known abort\". Static IR layer follows; exit 7." | tee -a "$OUT/preflight.txt" >&2
+    echo "[capture] rocprofv3 aborted on two LLVM copies (libamd_comgr.so.3) -- an image problem, not the kernel. No profiler layer can run here; fix: python3 perf_knowledge/expert_skills/skills/gluon_authoring/scripts/q.py llvm_dual_load. Static IR layer follows; exit 7." | tee -a "$OUT/preflight.txt" >&2
   else
     echo "[capture] trace $TRACE_STATE (rc=$trace_rc); see kt_probe.log. Counter availability remains unknown." | tee -a "$OUT/preflight.txt"
   fi
@@ -397,7 +397,7 @@ def sol_state():
                                 or "Traceback (most recent call last)" in txt):
             crashed = (f"{os.path.basename(p)} holds a failure, not a report. On a box that ships "
                        f"rocprof-compute this is a wiring issue to investigate; see "
-                       f"kernel_tools/profiling-dependencies.md")
+                       f"python3 perf_knowledge/expert_skills/skills/gluon_authoring/scripts/q.py --kind tool rocprof-compute")
     if crashed:
         return "crashed", crashed
     if seen:

@@ -1,6 +1,6 @@
 {
-  "_doc": "Machine-readable arch FACTS - mirror of planning-constants.md. Reference facts: read directly, or by a rule engine where one is shipped. Keyed by arch (SKU peaks/ridge live in sku.json). Every value is calibratable; recalibrate from trace per roofline-models.md ## Calibration.",
-  "_source": "references/hardware/planning-constants.md + isa-mechanisms.md",
+  "_doc": "Machine-readable arch FACTS - mirror of the hw/isa/occ fact cards (q.py). Reference facts: read directly, or by a rule engine where one is shipped. Keyed by arch (SKU peaks/ridge live in sku.json). Every value is calibratable; recalibrate from a trace (hw_budget.py --help-full, calibration).",
+  "_source": "fact cards isa.*, occ.*, hw.* (q.py) + the CDNA3/CDNA4 ISA documents",
   "arch": {
     "gfx942": {
       "family": "CDNA3",
@@ -62,7 +62,8 @@
         "fp8": 32,
         "bf8": 32
       },
-      "mfma_write_read_latency_cyc": 10,
+      "mfma_write_read_wait_states": {"2_pass": 5, "4_pass": 7, "8_pass": 11, "16_pass": 19},
+      "_mfma_write_read_note": "Independent wait states (s_nop or other instructions; 1 pass = 4 cycles) from an XDL MFMA writing vDst to a VALU read/write or VM/LDS/FLAT read of it (and to SrcA/B of the next MFMA). Not a latency in cycles and not one value: it scales with the MFMA pass count. Source: LLVM GCNHazardRecognizer for gfx940/942 (s_nop count emitted by hipcc, ROCm 7.15). Not measured on gfx942 silicon.",
       "exp_rate_vs_valu": 0.25,
       "matrix_layout_family": "AMDMFMALayout(version=3)",
       "direct_to_lds_bit_widths": [
@@ -86,7 +87,7 @@
         "MFMA"
       ],
       "scaled_mfma": false,
-      "_ref": "cdna3-gfx942.md"
+      "_ref": "fact cards mfma.gfx942-shapes, async.gfx942-via-cdna4 (q.py)"
     },
     "gfx950": {
       "family": "CDNA4",
@@ -97,17 +98,17 @@
       "lds_bytes_per_clk": 256,
       "lds_align_bytes": 1280,
       "lds_alloc_granule_bytes": 1280,
-      "_lds_alloc_granule_note": "measured gfx950 (occupancy sweep over 37 LDS sizes, one MI350X node, 2026-11): WG/CU by LDS = floor(163840 / roundup(metadata.shared, 1280)); 32768 B fits 4 WG/CU, 54272 B fits 2. Occupancy follows metadata.shared, not the descriptor's group_segment_fixed_size (0 for Triton).",
+      "_lds_alloc_granule_note": "measured gfx950 (occupancy sweep over 37 LDS sizes, MI350X): WG/CU by LDS = floor(163840 / roundup(metadata.shared, 1280)); 32768 B fits 4 WG/CU, 54272 B fits 2. Occupancy follows metadata.shared, not the descriptor's group_segment_fixed_size (0 for Triton).",
       "ds_read_b128_conflict_free_cyc": 16,
       "ds_read_b128_full_conflict_stride_bytes": 256,
       "ds_read_b128_2way_stride_bytes": 32,
       "ds_read_b64_conflict_free_cyc": 8,
       "buffer_load_issue_cyc": 64,
       "lds_sp_fifo_entries_per_simd_pair": null,
-      "_lds_sp_fifo_note": "Refuted as an 8-entry limit (ATT trace, one MI350X node, 2026-11): one wave issues 16 ds_read_b128 (32 ds_read_b32) back to back and stalls at the 17th; two waves on paired SIMDs 10-14 each; four streaming SIMDs stall on bandwidth. Outstanding LDS-DMA (global_load_lds) does not block ds_read issue. No FIFO depth is recorded.",
+      "_lds_sp_fifo_note": "Refuted as an 8-entry limit (ATT trace, MI350X): one wave issues 16 ds_read_b128 (32 ds_read_b32) back to back and stalls at the 17th; two waves on paired SIMDs 10-14 each; four streaming SIMDs stall on bandwidth. Outstanding LDS-DMA (global_load_lds) does not block ds_read issue. No FIFO depth is recorded.",
       "ds_read_b128_queued_per_wave_before_stall": 16,
-      "_ds_read_stride_note": "Strides here are the lane-to-lane byte stride of one ds_read_b128. measured gfx950 (timing microbenchmark, 4 waves/CU, one per SIMD, one MI350X node, 2026-11): stride 16 B 16.3 cyc (conflict-free), 32 B 32.3 (2-way), 64 B 64.2 (4-way), 128 B 128 (8-way). With 1 wave/CU the intervals halve and a 2-way conflict is hidden; the absolute interval also depends on how many SIMDs read at once (ATT trace, same node), so compare against a conflict-free baseline under the same load. Same-address broadcast is conflict-free (timing microbenchmark, same node).",
-      "_sched_interval_note": "buffer_load_issue_cyc = sustained per-wave buffer_load_dwordx4 interval when all 4 SIMDs of a CU stream (measured gfx950 ~58 cyc, timing microbenchmark, one MI350X node, 2026-11; the limit is shared per CU, ~15 cyc per load). One wave alone issues a load every ~5 cyc until ~16 are outstanding, then 12-16 cyc. Only dwordx4 measured; gfx942 value not measured. MFMA-per-load ratio = buffer_load_issue_cyc / mfma_cadence_cyc[shape].",
+      "_ds_read_stride_note": "Strides here are the lane-to-lane byte stride of one ds_read_b128. measured gfx950 (timing microbenchmark, 4 waves/CU, one per SIMD, MI350X): stride 16 B 16.3 cyc (conflict-free), 32 B 32.3 (2-way), 64 B 64.2 (4-way), 128 B 128 (8-way). With 1 wave/CU the intervals halve and a 2-way conflict is hidden; the absolute interval also depends on how many SIMDs read at once (ATT trace, same node), so compare against a conflict-free baseline under the same load. Same-address broadcast is conflict-free (timing microbenchmark, same node).",
+      "_sched_interval_note": "buffer_load_issue_cyc = sustained per-wave buffer_load_dwordx4 interval when all 4 SIMDs of a CU stream (measured gfx950 ~58 cyc, timing microbenchmark, MI350X; the limit is shared per CU, ~15 cyc per load). One wave alone issues a load every ~5 cyc until ~16 are outstanding, then 12-16 cyc. Only dwordx4 measured; gfx942 value not measured. MFMA-per-load ratio = buffer_load_issue_cyc / mfma_cadence_cyc[shape].",
       "vgpr_per_simd": 512,
       "vgpr_file_per_simd": 512,
       "vgpr_per_wave": 512,
@@ -147,15 +148,16 @@
       "tcp_inflight_cap_kib": 32,
       "simds_per_cu": 4,
       "xcd_count": 8,
-      "l2_fabric_latency_high_cyc": 300,
-      "_l2_fabric_latency_note": "Boundary between mostly-L2-hit and L2-miss average read latency, not the L2-miss latency itself. measured gfx950 (1-wave pointer chase at 2.2 GHz, one MI350X node, 2026-11): L2 hit 201-209 cyc, MALL hit 524-554 cyc, HBM 864-899 cyc (~880). An average above 300 cyc means a material share of misses. gfx942/gfx1250: not calibrated.",
+      "pointer_chase_latency_cyc": {"l2_hit": [215, 232], "mall_hit": [498, 551], "hbm": [860, 900]},
+      "_pointer_chase_latency_note": "measured gfx950 (1-wave dependent-load pointer chase over 128 B lines, s_memtime at 2.2 GHz effective clock; level set by footprint and flush: L2 hit, MALL hit, HBM). Cycles per load, [low, high]. The rocprof-compute L2-Fabric read latency (TCC_EA0_RDREQ_LEVEL_sum / TCC_EA0_RDREQ_sum) averages only requests that already missed L2, including queueing, so it reads at or above the MALL latency and grows with load: it is not an L2 hit/miss mix and no hit/miss boundary is defined from it. gfx942/gfx1250: not calibrated.",
       "mfma_cadence_cyc": {
         "32x32x16_bf16": 32,
         "16x16x32_bf16": 16,
         "32x32x64_f8": 64,
         "16x16x128_f8": 32
       },
-      "mfma_write_read_latency_cyc": 10,
+      "mfma_write_read_wait_states": {"2_pass": 5, "4_pass": 8, "8_pass": 12, "16_pass": 20},
+      "_mfma_write_read_note": "Independent wait states (s_nop or other instructions; 1 pass = 4 cycles) from an XDL MFMA writing vDst to a VALU read/write or VM/LDS/FLAT read of it (and to SrcA/B of the next MFMA). Not a latency in cycles and not one value: it scales with the MFMA pass count. Source: CDNA4 ISA sec.7.6 Table 38 (the same values LLVM emits for gfx950). gpu-measured (gfx950 stale-read sweep, inline-asm MFMA then s_nop W then v_mov of vDst): the LAST vDst register is stale below 5/7-8/11-12/19 wait states for 2/4/8/16-pass XDL ops and the first register is ready earlier, so the table is a tight bound; f32 MFMAs follow the same last-register window. SrcC exactly equal to the previous vDst needs 2/0/0/0, overlapping SrcC 4/6/10/18 (Table 38).",
       "exp_rate_vs_valu": 0.25,
       "matrix_layout_family": "AMDMFMALayout(version=4)",
       "direct_to_lds_bit_widths": [
@@ -177,7 +179,7 @@
         "32x32x64_f8": 12,
         "16x16x128_f8": 5
       },
-      "_mfma_coexec_measured_note": "measured gfx950 (timing microbenchmark, 1 wave/SIMD, one MI350X node, 2026-11): plain VALU 4 cyc each, TRANS and v_permlane16/32_swap 8 cyc each, packed f32 (v_pk_*_f32) 0 fit and the first adds ~16 cyc; packed f16 co-issues like VALU. f8f6f4 shapes have a ~13 cyc head. 16x16x32 bf16: 16.7 cyc interval, 2 VALU fit.",
+      "_mfma_coexec_measured_note": "measured gfx950 (timing microbenchmark, 1 wave/SIMD, MI350X): plain VALU 4 cyc each, TRANS and v_permlane16/32_swap 8 cyc each, packed f32 (v_pk_*_f32) 0 fit and the first adds ~16 cyc; packed f16 co-issues like VALU. f8f6f4 shapes have a ~13 cyc head. 16x16x32 bf16: 16.7 cyc interval, 2 VALU fit.",
       "mfma_coexec_head_nonoverlap_cyc": 8,
       "coexec_issue_cost_cyc": {
         "valu": 4,

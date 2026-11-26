@@ -107,7 +107,7 @@ def llvm_dual_load():
             same = os.stat(core).st_ino == os.stat(devel).st_ino
             return {'status': 'single_inode' if same else 'duplicate_inode',
                     'core': str(core), 'devel': str(devel),
-                    'fix': None if same else 'kernel_tools/profiling-dependencies.md "Known abort"'}
+                    'fix': None if same else 'python3 perf_knowledge/expert_skills/skills/gluon_authoring/scripts/q.py llvm_dual_load'}
     return {'status': 'not_applicable', 'core': None, 'devel': None, 'fix': None}
 
 

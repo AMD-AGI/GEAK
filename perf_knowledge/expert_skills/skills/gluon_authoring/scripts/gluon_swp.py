@@ -64,21 +64,14 @@ THREE CONDITIONS THE KERNEL MUST MEET, or this changes nothing at all:
      `tt.load -> ttg.local_alloc` chain, whereas `allocate_shared_memory` yields a MUTABLE
      `ttg.local_alloc` that it refuses with
      `'ttg.local_alloc' op pipeliner doesn't know how to predicate this op`.
-     Read that as "the hand staging is still there", NOT as a language limit -- a transcription
-     concluded the latter and had to retract it. Partial removal does not count: one
+     That error means the hand staging is still there, not a language limit. Partial removal
+     does not count: one
      `ttg.barrier` left in the loop makes the pass skip it entirely and in silence. Remove the
      allocation, the barriers and the sliced loads together.
 
-De-staging is NOT free, and the injection does not always pay it back: removing hand staging
-is a large regression on its own, and the net can stay NEGATIVE on some toolchain versions
-even though the injection itself is worth a consistent speedup everywhere. Judge it on the
-same-window per-rep ratio of armed-and-de-staged over the original anchor; differencing two
-percentages against a noisy shipped baseline cannot resolve an effect this small. A cheap
-pre-check tells you whether to attempt it at all: compare the PLAIN kernel's own
-`num_stages=1` against its `num_stages=2` -- where plain itself gains nothing from pipelining
-on a version, recovering the pipeline for a transcription did not pay off there either.
-`references/gluon/pipeline-reference.md` has the measured 2x2; the trial report has the
-per-kernel numbers.
+Removing hand staging changes the kernel by itself; compare the armed-and-de-staged kernel with
+the original anchor in one interleaved window (scripts/q.py "num_stages pipeline recovery" lists
+the related cards and checks).
 """
 from __future__ import annotations
 
@@ -197,7 +190,7 @@ def _post_pipeline_tail(C, pm, recipe, ns, pingpong, arch, async_copy=False):
     # pipeline rather than with the tail.
     #
     # Why this was invisible until CDNA4: `ac` defaults to `is_async_copy_enabled(arch)`, and
-    # that is False on gfx942 (`hardware/cdna3-gfx942.md`), so the pipeliner never took the
+    # that is False on gfx942 (q.py --id async.gfx942-via-cdna4), so the pipeliner never took the
     # async path there and the missing pass had nothing to omit. On gfx950 it is the backend's
     # own default. The byte-identical-TTGIR verification this module carries was run across
     # Triton MINORS, not across arch generations.

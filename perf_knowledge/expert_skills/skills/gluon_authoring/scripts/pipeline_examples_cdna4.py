@@ -31,7 +31,7 @@ BOTH entry points then lower on stock `gluon_to_ttgir` with no pass spliced in. 
 *split across repetitions*: a `BlockedLayout` covering `[64, 16]` on a `[32, 32]` tile repeats
 twice in N, so every lane makes two accesses instead of one. That failure was once misread as
 the architecture refusing async copy. `BLK` below covers the tile exactly; the trap is written
-up in `references/pitfalls/platform-known-issues.md`.
+up as a card (`scripts/q.py "async_copy split across repetitions"`).
 
 `add_coalesce_async_copy` is what rescues the *non-native* patterns -- that is what a coalescing
 pass is for, and it is NOT what makes async copy work at all. On this pack it is reached through
@@ -206,7 +206,7 @@ def c5_warp_pipeline(out, inp, M: gl.constexpr, N: gl.constexpr, ITERS: gl.const
     memory stage runs under the other's compute stage.
 
     Read it for the things that are easy to get wrong, all of which are structural rather
-    than arithmetic (`../references/tile-programming/warp-pipeline.md`):
+    than arithmetic (`scripts/q.py --kind trap warp_pipeline`):
 
       1. the memory stage carries the HIGHER priority (1 vs 0) -- backwards collapses the overlap,
          because a compute stage that outranks memory starves the other group's address updates;

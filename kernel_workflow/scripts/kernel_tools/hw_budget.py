@@ -130,7 +130,7 @@ def _load(rel):
 
 
 # Stop/continue cut-offs on measured_ms / floor: one source, thresholds.json `hw_budget`, read here
-# and quoted by --help (and by kernel_workflow/scripts/kernel_tools/CARD.md). Heuristic, uncalibrated.
+# and quoted by --help (and by the hw_budget tool card, gluon_authoring q.py --kind tool). Heuristic, uncalibrated.
 def _room_thresholds():
     t = (_load("thresholds.json").get("hw_budget") or {})
     return float(t.get("little_room_below", 1.25)), float(t.get("large_room_from", 2.0))
@@ -911,7 +911,7 @@ def budget(sku_name, workload=None, shapes=None, dtype="bf16", measured_ms=None,
                      "add --workload to take the FLOPs from a named model.")
         model_bytes = model_hi
 
-        # --- CALIBRATION (roofline-models.md ## Calibration) -----------------------------------
+        # --- CALIBRATION ---------------------------------- -----------------------------------
         # Both terms of a roofline are calibratable, and both default to the OPTIMISTIC datasheet
         # reading: the analytic byte model for the numerator, the datasheet HBM peak for the
         # denominator. The datasheet peak is unreachable at ANY real access shape, so a gap
@@ -1246,7 +1246,7 @@ def budget(sku_name, workload=None, shapes=None, dtype="bf16", measured_ms=None,
             "hbm_bytes_range": [b_lo, b_hi], "bytes_source": bytes_src,
             "bytes_clamped_by_physics": bytes_clamped,
             "hbm_ceiling_tb_s": [bw_lo, bw_hi], "hbm_ceiling_source": bw_src,
-            # THE ROOFLINE BASIS PAIR (gluon_authoring references/hardware/roofline-models.md, "Every % of roofline"):
+            # THE ROOFLINE BASIS PAIR (gluon_authoring q.py "roofline basis"):
             # every %-of-roofline names what its numerator and denominator rest on. A datasheet
             # denominator may RANK only; a measured numerator over a probed/calibrated denominator
             # is the only combination that may gate or close.
@@ -1738,7 +1738,7 @@ def _print_human(b):
                 if w.get("at_ceiling_possible"):
                     for i, line in enumerate(textwrap.wrap(w["at_ceiling_possible"], 88)):
                         print(f"      {'! ' if i == 0 else '  '}{line}")
-                print("      that gap is a RATE gap. Only a floor probe (Gluon pack references/method/profile.md) says "
+                print("      that gap is a RATE gap. Only a floor probe (gluon_authoring q.py \"floor probe\") says "
                       "whether any of it is\n      removable BYTES -- if the non-stream floor "
                       "exceeds the memory ideal, memory is not binding\n      and none of it is.")
         elif w["binding_floor"].startswith("NONE"):
@@ -1751,7 +1751,7 @@ def _print_human(b):
                 for i, line in enumerate(textwrap.wrap(t, 86)):
                     print(f"      {'- ' if i == 0 else '  '}{line}")
             print("      and confirm memory is binding AT ALL with a floor probe "
-                  "(Gluon pack references/method/profile.md).")
+                  "(gluon_authoring q.py \"floor probe\").")
     else:
         print("\n  (pass --workload + --shapes to get the FLOP/byte model + the MFMA-only floor)")
     print()

@@ -2506,11 +2506,15 @@ function expertSkillsBlock(role) {
     `from_backend->to_backend for migration skills), whose \`scope\` is \`kernel\` (\`tuning\` entries ` +
     `belong to the e2e tuning phase and match every operator), and whose validation_status is ` +
     `\`validated\`, and ` +
-    `treat each as a HIGH-PRIOR candidate to reproduce — advisory only, never overriding your isolated ` +
-    `A/B vs the oracle, never reducing a result below the measured baseline.`;
+    `treat each recipe/migration skill as a HIGH-PRIOR candidate to reproduce — advisory only, never ` +
+    `overriding your isolated A/B vs the oracle, never reducing a result below the measured baseline. ` +
+    `A skill whose skill.md says \`role: reference_fact_store\` (gluon_authoring; index status draft, ` +
+    `auto_apply false: consult it when its match gens/backends fit, whatever its status) is not a recipe: ` +
+    `query it with its scripts/q.py and judge each card by its evidence and scope (unverified ranks last).`;
 }
 
-// Shared kernel tools (kernel_workflow/scripts/kernel_tools): a pointer to the signal->tool table for the
+// Shared kernel tools (kernel_workflow/scripts/kernel_tools): a pointer to the kind:tool cards of the Gluon
+// fact store (gluon_authoring/scripts/q.py --kind tool) for the
 // roles that measure or change code. Part of the expert-skills opt-in: only when use_expert_skills is on
 // (use_kernel_tools=false turns it off even then); otherwise prompts and profiling are byte-identical to
 // the build without it.
@@ -2522,7 +2526,9 @@ function kernelToolsBlock(role) {
   if (!USE_EXPERT_SKILLS || !KERNEL_TOOLS_REQUESTED || !KERNEL_TOOL_ROLES.has(role)) return '';
   return `\n\n## Kernel tools\n` +
     `Evidence tools for the compiled kernel and its counters live in ${WORKFLOW_DIR}/scripts/kernel_tools ` +
-    `(KT); ${WORKFLOW_DIR}/scripts/kernel_tools/CARD.md maps each signal to its tool and command. Read it when ` +
+    `(KT); \`python3 ${EXPERT_SKILLS_DIR}/skills/gluon_authoring/scripts/q.py --kind tool\` lists one line per ` +
+    `tool; add words (e.g. \`--kind tool occupancy\`) for purpose, command, outputs and refusal codes (a ` +
+    `tool's --help is its detailed doc). Query it when ` +
     `a decision needs one of these signals: registers/spills/occupancy (dump_ir.sh --all + probe.py measure), ` +
     `hot-loop waits and MFMA mix (asm_loop_audit.py), distance to the hardware floor (hw_budget.py), ` +
     `counters (rocprofv3_safe.sh + parse_pmc.py, or KERNEL_TOOLS_PROFILE=1 on profile_kernel.sh when you ` +

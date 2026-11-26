@@ -356,7 +356,7 @@ def probe_version_knobs(arch=None):
 def probe_llir_declarative_schedule(arch=None):
     """llir_declarative_schedule card: can this host LOAD an out-of-tree LLVM pass plugin?
 
-    Four gates, three of which fail QUIETLY (llir-codesign.md ## The plugin tier). This probes
+    Four gates, three of which fail QUIETLY (q.py --id compiler.pass-plugin-gated). This probes
     the host-side ones structurally, with no GPU and no plugin binary. It CANNOT tell you the
     pass bites -- that is the IR's job -- and it deliberately reports `available: None` unless
     every gate it can see is green, because a partially-satisfied host is the state that

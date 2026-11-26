@@ -27,7 +27,7 @@ HW_DATA = REPO / "perf_knowledge" / "hardware" / "data"
 PY_TOOLS = ["asm_loop_audit", "amd_isa", "amd_occupancy", "probe"]
 SH_TOOLS = ["dump_ir.sh"]
 KT_BENCH = ["ab_bench", "create_harness", "parse_correctness"]
-PACK_BENCH = ["check_term_index", "ttgir_bridge", "probe_levers"]
+PACK_BENCH = ["ttgir_bridge", "probe_levers"]
 
 
 def run(*args, env=None, cwd=None, timeout=300):
@@ -181,10 +181,6 @@ def test_no_rm_in_moved_shell_tools():
 @pytest.mark.parametrize("script", PACK_BENCH)
 def test_pack_script_selftest(script):
     _ok(run(sys.executable, PACK_SCRIPTS / f"{script}.py", "--selftest"))
-
-
-def test_check_term_index_resolves_pack():
-    _ok(run(sys.executable, PACK_SCRIPTS / "check_term_index.py", "--pack", PACK_SCRIPTS.parent))
 
 
 def test_ab_bench_times_through_harness_lib():

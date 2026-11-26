@@ -6,7 +6,7 @@ seed/cache XML overrides. Layouts are instruction-relative hardware facts,
 not compiler layout objects or allocated registers. Source citations and
 verification limits travel with answers; sparse A/B use source tables only.
 Full source/grid regression and evidence live in scripts/tests; --selftest
-checks runtime data integrity. See isa_tools.md for coverage and maintenance.
+checks runtime data integrity. Coverage and maintenance: gluon_authoring/scripts/q.py --kind tool amd_isa.
 """
 import argparse
 import json
@@ -60,7 +60,7 @@ _CMD_DB = {
 _ALTERNATIVE = {
     "layout": ("the AMD Matrix Instruction Calculator generates this arch's layout exactly -- "
                "run `kernel_workflow/scripts/kernel_tools/amd_isa.py --arch {arch} layout <instr> -A` with the calculator installed ("
-               "kernel_workflow/scripts/kernel_tools/isa_tools.md). No layout DB is shipped for {arch} "
+               "python3 perf_knowledge/expert_skills/skills/gluon_authoring/scripts/q.py --kind tool amd_isa). No layout DB is shipped for {arch} "
                "because that tool already derives it."),
     "facts": ("ISA chapters 1-6 and 8-11 are not extracted for {arch} yet -- this is missing "
               "KNOWLEDGE, not an absent hardware feature. Read the vendor ISA PDF "
@@ -109,7 +109,7 @@ ARCHES = {"cdna4", "gfx950"}
 
 
 def gap(msg):
-    """Scoped tool-gap, per isa_tools.md: record it and fall back; never fabricate."""
+    """Scoped tool-gap (the amd_isa tool card): record it and fall back; never fabricate."""
     print(f"SCOPED TOOL-GAP: {msg}", file=sys.stderr)
     print("  -> fall back to distilled perf_knowledge/hardware/ with explicit source and uncertainty; "
           "never fabricate", file=sys.stderr)
@@ -873,26 +873,26 @@ def cmd_errata(db, args):
 # Facts MEASURED on gfx950 hardware (MI350X), not stated by the ISA guide. Printed beside the PDF
 # records and labelled as measurements; never written into the page-cited databases.
 _MEASURED_ISSUE_CYC = {
-    "V_MFMA_F32_32X32X64_F8F6F4": (64.3, "fp8 operands, 1 wave/SIMD; measured gfx950 (timing microbenchmark, one MI350X node, 2026-11)"),
-    "V_MFMA_F32_16X16X128_F8F6F4": (32.6, "fp8 operands, 1 wave/SIMD; measured gfx950 (timing microbenchmark, one MI350X node, 2026-11)"),
-    "V_MFMA_SCALE_F32_32X32X64_F8F6F4": (64, "f8 operands; measured gfx950 (ATT trace, one MI350X node, 2026-11)"),
-    "V_MFMA_SCALE_F32_16X16X128_F8F6F4": (32, "f8 operands, 1 wave/SIMD; measured gfx950 (ATT trace, one MI350X node, 2026-11)"),
+    "V_MFMA_F32_32X32X64_F8F6F4": (64.3, "fp8 operands, 1 wave/SIMD; measured gfx950 (timing microbenchmark, MI350X)"),
+    "V_MFMA_F32_16X16X128_F8F6F4": (32.6, "fp8 operands, 1 wave/SIMD; measured gfx950 (timing microbenchmark, MI350X)"),
+    "V_MFMA_SCALE_F32_32X32X64_F8F6F4": (64, "f8 operands; measured gfx950 (ATT trace, MI350X)"),
+    "V_MFMA_SCALE_F32_16X16X128_F8F6F4": (32, "f8 operands, 1 wave/SIMD; measured gfx950 (ATT trace, MI350X)"),
 }
 _MEASURED_RECORDS = {
     "lds_facts": [
         {"id": "measured.lds-alloc-granule", "topic": "LDS allocation granule",
          "statement": "LDS is allocated per workgroup in 1280-byte (320-dword) granules: WG/CU by LDS = "
                       "floor(163840 / roundup(metadata.shared, 1280)); 32768 B fits 4 WG/CU, not 5.",
-         "notes": "measured gfx950 (occupancy sweep over 37 LDS sizes, one MI350X node, 2026-11); the ISA guide does not state it."},
+         "notes": "measured gfx950 (occupancy sweep over 37 LDS sizes, MI350X); the ISA guide does not state it."},
         {"id": "measured.lds-broadcast", "topic": "same-address broadcast",
          "statement": "Lanes reading the same LDS address are conflict-free: stride-0 ds_read_b32/b64/b128 "
                       "time the same as a conflict-free stride.",
-         "notes": "measured gfx950 (timing microbenchmark at 1 and 4 waves/CU, one MI350X node, 2026-11); the ISA guide does not state it."},
+         "notes": "measured gfx950 (timing microbenchmark at 1 and 4 waves/CU, MI350X); the ISA guide does not state it."},
     ],
     "resources": [
         {"id": "measured.lds-alloc-granule", "name": "LDS allocation granularity per workgroup",
          "value": 1280, "unit": "bytes", "granularity": 1280, "scope": "workgroup",
-         "notes": "measured gfx950 (occupancy sweep, one MI350X node, 2026-11): occupancy follows metadata.shared rounded up to 1280 B."},
+         "notes": "measured gfx950 (occupancy sweep, MI350X): occupancy follows metadata.shared rounded up to 1280 B."},
     ],
 }
 
@@ -1199,7 +1199,7 @@ def main(argv):
                     "Matrix Instruction Calculator instead, which supports them and not gfx950.",
         epilog="arch={}, databases present: {}.  Every arch's coverage and the named alternative "
                "for a missing one: `--arch <a> <cmd>` tells you in place. See "
-               "kernel_workflow/scripts/kernel_tools/isa_tools.md.".format(ARCH, ", ".join(have) or "none"))
+               "`python3 perf_knowledge/expert_skills/skills/gluon_authoring/scripts/q.py --kind tool amd_isa`.".format(ARCH, ", ".join(have) or "none"))
     p.add_argument("--arch", default=ARCH, metavar="A",
                    help="gfx950 (default) | cdna3 | rdna3 | rdna4; aliases cdna4/gfx942/mi300/"
                         "mi325/gfx1100/gfx1200")

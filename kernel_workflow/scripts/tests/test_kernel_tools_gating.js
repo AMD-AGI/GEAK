@@ -11,22 +11,27 @@ const end = src.indexOf('\n}\n', fn) + 3;
 assert(start > 0 && fn > start && end > fn, 'kernelToolsBlock region not found');
 const region = src.slice(start, end);
 function block(useExpert, args, role) {
-  const f = new Function('A', 'USE_EXPERT_SKILLS', 'WORKFLOW_DIR', 'role',
+  const f = new Function('A', 'USE_EXPERT_SKILLS', 'WORKFLOW_DIR', 'EXPERT_SKILLS_DIR', 'role',
                          region + '\nreturn kernelToolsBlock(role);');
-  return f(args, useExpert, '/wf', role);
+  return f(args, useExpert, '/wf', '/x/expert_skills', role);
 }
 assert.strictEqual(block(false, {}, 'engineer'), '', 'default run must not inject kernel tools');
 assert.strictEqual(block(false, { use_kernel_tools: 'true' }, 'engineer'), '');
 assert.strictEqual(block(true, { use_kernel_tools: 'false' }, 'engineer'), '');
 assert.strictEqual(block(true, {}, 'verify_engineer'), '');
 const on = block(true, {}, 'engineer');
-assert(on.includes('## Kernel tools') && on.includes('/wf/scripts/kernel_tools/CARD.md'));
-// The card lives outside every knowledge/ directory: default roles are told to read
-// ${WORKFLOW_DIR}/knowledge/ (e.g. deep_explore), so a card there would reach the default path.
+assert(on.includes('## Kernel tools') &&
+       on.includes('/x/expert_skills/skills/gluon_authoring/scripts/q.py --kind tool'));
+assert(!on.includes('CARD.md'), 'the kernel-tools block still points at the removed CARD.md');
+// The tool cards live in the Gluon fact store, outside every knowledge/ directory: default roles are
+// told to read ${WORKFLOW_DIR}/knowledge/ (e.g. deep_explore), so a card there would reach the default path.
 const REPO = path.join(__dirname, '..', '..', '..');
-const CARD = path.join(REPO, 'kernel_workflow', 'scripts', 'kernel_tools', 'CARD.md');
-assert(fs.existsSync(CARD), 'kernel-tools card missing');
-const cardHead = fs.readFileSync(CARD, 'utf8').split('\n')[0];
+const PACK = path.join(REPO, 'perf_knowledge', 'expert_skills', 'skills', 'gluon_authoring');
+assert(fs.existsSync(path.join(PACK, 'facts.jsonl')), 'fact store (kind:tool cards) missing');
+assert(fs.existsSync(path.join(PACK, 'scripts', 'q.py')), 'q.py missing');
+assert(!fs.existsSync(path.join(REPO, 'kernel_workflow', 'scripts', 'kernel_tools', 'CARD.md')),
+       'kernel_tools/CARD.md is superseded by the kind:tool cards');
+assert(!PACK.split(path.sep).includes('knowledge'), 'the fact store must not sit under a knowledge/ dir');
 function walk(dir, out) {
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
     if (e.name === '.git' || e.name === 'node_modules') continue;
@@ -38,9 +43,9 @@ function walk(dir, out) {
 const inKnowledge = walk(REPO, []).filter((p) => p.split(path.sep).includes('knowledge'));
 assert(inKnowledge.length > 0, 'no knowledge/ directory found');
 for (const p of inKnowledge) {
-  assert(!/kernel_tools\.md$|CARD\.md$/.test(p), `kernel-tools card under a default knowledge dir: ${p}`);
+  assert(!/kernel_tools\.md$|CARD\.md$|facts\.jsonl$/.test(p), `kernel-tools card under a default knowledge dir: ${p}`);
   if (/\.(md|txt)$/.test(p)) {
-    assert(!fs.readFileSync(p, 'utf8').includes(cardHead), `kernel-tools card text under a knowledge dir: ${p}`);
+    assert(!fs.readFileSync(p, 'utf8').includes('q.py --kind tool'), `kernel-tools card pointer under a knowledge dir: ${p}`);
   }
 }
 for (const absolute of ['Run every profile_kernel.sh', 'do not recall', 'within ~3%']) {

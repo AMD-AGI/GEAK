@@ -110,7 +110,7 @@ def test_llvm_dual_load_abort_stops_early_with_its_own_state(tmp_path):
     assert r.returncode == 7, (r.returncode, data, r.stderr[-800:])
     assert data["state"] == "llvm_dual_load" and data["reason"] == "llvm_dual_load", data
     assert elapsed < 7, elapsed
-    assert "profiling-dependencies.md" in r.stderr
+    assert "q.py llvm_dual_load" in r.stderr  # the fix pointer: the fact store card for this abort
 
 
 TERM_IGNORED = """#!/usr/bin/env bash

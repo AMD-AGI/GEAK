@@ -141,7 +141,7 @@ kt_att_prepare() {
       dir="$(printf '%s' "$data" | python3 -c 'import json,sys; print(json.load(sys.stdin)["att"]["directory"])')" || return 1
       KT_ATT_ARGS=(--att-library-path "$dir") ;;
     sdk_managed_unverified) ;;
-    *) echo "[ATT] $KT_ATT_STATUS; see kernel_tools/profiling-dependencies.md" >&2; return 1 ;;
+    *) echo "[ATT] $KT_ATT_STATUS; see: python3 perf_knowledge/expert_skills/skills/gluon_authoring/scripts/q.py --kind tool ATT" >&2; return 1 ;;
   esac
 }
 

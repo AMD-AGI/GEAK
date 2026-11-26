@@ -542,7 +542,7 @@ def main():
         default="",
         metavar="SUBSTR",
         help="Kernel name substring for CSV metadata lookup "
-        "(e.g. 'pa_mqa_logits_fp4_kernel_0'). "
+        "(e.g. 'my_kernel_0'). "
         "Required when the dispatch dir name does not encode the kernel name, "
         "as with rocprofv3 ui_output_agent_*_dispatch_<id> directories. "
         "Combined with the dispatch id from the dir name when a Dispatch_Id "

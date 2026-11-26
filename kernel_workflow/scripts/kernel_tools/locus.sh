@@ -11,7 +11,7 @@
 # Root cause this closes: the candidate JIT-dlopens inside a container while the profiler
 # script runs host-side -> the host cannot see the in-container kernel -> every profiler
 # silently degrades (no kernel rows in the counter CSV, ATT code:null). See the gluon_authoring
-# pack's references/method/profile.md ### Execution locus. This is a FIXABLE mis-config, NOT a
+# pack's q.py "execution locus". This is a FIXABLE mis-config, NOT a
 # blind mode.
 #
 # Contract (generic; nothing container-specific is baked): the container id comes from the

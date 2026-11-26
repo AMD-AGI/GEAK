@@ -11,7 +11,7 @@
       "bound_direction": "upper (min-bytes assumes each element read once / all-cached)",
       "default_regime": "crossover",
       "note": "large K -> AI hundreds -> compute; small -> memory. AI vs ridge is the crossover. MX operand scales are counted via scale_overhead. Output defaults to 16-bit for low-precision operands, otherwise the operand width; use --tensors for other output types.",
-      "source": "roofline-models.md; ridge = Cpeak/BW (MI300X~247, MI350X~287, MI308X~65)"
+      "source": "ridge = Cpeak/BW (MI300X~247, MI350X~287, MI308X~65)"
     },
     "attention": {
       "flops": "(2 if causal else 4)*BH*S*S*D",

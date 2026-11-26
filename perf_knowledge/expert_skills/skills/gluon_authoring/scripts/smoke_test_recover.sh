@@ -66,9 +66,8 @@ for t in asm_loop_audit amd_isa mfma_efficiency deep_mfma_analysis; do
 done
 bash "$KT_DIR/dump_ir.sh" --selftest | tail -1
 
-echo "== 1f. lever index and harness/bench self-tests =="
-python3 "$SCRIPT_DIR/check_term_index.py" --selftest
-python3 "$SCRIPT_DIR/check_term_index.py" --pack "$SCRIPT_DIR/.."
+echo "== 1f. fact store lint and harness/bench self-tests =="
+python3 "$SCRIPT_DIR/lint_facts.py" --pack
 python3 "$KT_DIR/ab_bench.py" --selftest
 python3 "$KT_DIR/create_harness.py" --selftest
 python3 "$KT_DIR/parse_correctness.py" --selftest

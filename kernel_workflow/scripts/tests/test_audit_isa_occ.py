@@ -1,7 +1,7 @@
 """Regression tests for the tool-audit fixes F1, F9, F10, F14 (ISA / occupancy / audit / ab_bench).
 
 CPU-only. Ground truth comes from gfx950 measurements (occupancy-by-LDS sweep
-and MFMA co-issue microbenchmarks, one MI350X node, 2026-11) and LLVM metadata of Triton 3.8 kernels compiled for gfx950.
+and MFMA co-issue microbenchmarks on MI350X) and LLVM metadata of Triton 3.8 kernels compiled for gfx950.
 """
 import gzip
 import json
@@ -188,7 +188,14 @@ def test_f10_16x16x32_window_is_recorded():
 
 def test_f10_notes_state_measured_scope():
     g = _gfx950()
-    assert "L2 hit" in g["_l2_fabric_latency_note"] and "880" in g["_l2_fabric_latency_note"]
+    # The L2-Fabric read-latency counter averages only L2 misses (+ queueing): no hit/miss boundary.
+    assert "l2_fabric_latency_high_cyc" not in g
+    lat = g["pointer_chase_latency_cyc"]
+    assert lat["l2_hit"][1] < lat["mall_hit"][0] < lat["hbm"][0]
+    assert "missed L2" in g["_pointer_chase_latency_note"]
+    # MFMA write->read is a per-pass-count wait-state table (CDNA4 ISA Table 38), not one latency.
+    assert "mfma_write_read_latency_cyc" not in g
+    assert g["mfma_write_read_wait_states"] == {"2_pass": 5, "4_pass": 8, "8_pass": 12, "16_pass": 20}
     assert "lane-to-lane" in g["_ds_read_stride_note"]
     assert g["ds_read_b128_2way_stride_bytes"] == 32
     assert "4 SIMDs" in g["_sched_interval_note"] and "gfx942" in g["_sched_interval_note"]

@@ -1827,7 +1827,10 @@ function expertSkillsBlock(role, phase) {
     `from_backend->to_backend for migration skills) and whose validation_status is \`validated\` and ` +
     `auto_apply is true, and ` +
     `treat each as a HIGH-PRIOR candidate to reproduce — advisory only, never overriding your isolated ` +
-    `A/B vs the oracle, never reducing a result below the measured baseline.` +
+    `A/B vs the oracle, never reducing a result below the measured baseline. A skill whose skill.md says ` +
+    `\`role: reference_fact_store\` (gluon_authoring; index status draft, auto_apply false: consult it when ` +
+    `its match gens/backends fit, whatever its status) is not a recipe and never a HIGH-PRIOR candidate: ` +
+    `query it with its scripts/q.py and judge each card by its evidence and scope (unverified ranks last).` +
     // Capability evaluation may use mechanisms, never reference addresses.
     (CAPABILITY_EVAL
       ? ` **Capability eval: use a skill's MECHANISM and MEASUREMENTS, never its addresses.** Its ` +

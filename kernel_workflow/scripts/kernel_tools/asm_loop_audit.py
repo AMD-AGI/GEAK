@@ -691,7 +691,7 @@ def audit(lines: list[str], start: int, end: int, max_stream: int,
     print("dependencies; for barrier counts, inspect the synchronization protocol.")
     print("Correlate these observations with runtime evidence before attributing a cause")
     print("or choosing a change. Interpret s_nop with the target ISA and dependency context. See")
-    print("compiler-contract.md ## Auditing the hot-loop schedule.")
+    print("q.py \"asm loop audit s_waitcnt s_nop\" for the related cards.")
 
 
 def _selftest() -> int:

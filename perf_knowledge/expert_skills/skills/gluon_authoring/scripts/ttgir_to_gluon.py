@@ -4,14 +4,14 @@
 Pure-text parser + emitter that turns the compiler-inferred layouts (and,
 optionally, the auto-pipeline) in a plain-Triton ``.ttgir`` into explicit Gluon
 source. This is the automation of the manual recovery map documented in
-``references/tile-programming/layout-recipes.md ## TTGIR -> Gluon recovery map``.
+the TTGIR -> Gluon recovery cards (``scripts/q.py "ttgir gluon recovery"``).
 
-Scope / boundaries (see references/tile-programming/compiler-contract.md):
+Scope / boundaries (query: scripts/q.py "compiler contract"):
 - Recovers LAYOUTS (coalesce/MMA/shared/dot-operand) -- they are explicit TTGIR
   attributes, so the mapping is deterministic and 1:1.
 - Recovers the async double-buffer PIPELINE STRUCTURE (opt-in) -- it is physically
   present in the post-pipeliner ``.ttgir`` (``local_alloc`` multi-buffer +
-  ``async_copy``/``commit``/``wait``) and Gluon can express it (see pipeline.md).
+  ``async_copy``/``commit``/``wait``) and Gluon can express it (q.py "pipeline recovery").
 - Does NOT recover register allocation / spills: that happens in LLVM AFTER
   ``make_ttgir`` and is not present in TTGIR at all. Pressure is governed by the
   recovered layouts + slicing; never inferred here.
@@ -156,7 +156,7 @@ class Layout:
         # exposes no rotating-shared constructor, so this is a LANGUAGE-SURFACE gap, not an unfinished
         # converter -- do not read it as a tool TODO to fill. A faithful transcription of a kernel the
         # plain backend lowered with such a layout is not fully expressible in Gluon today. (See
-        # references/pitfalls/negative-patterns.md.) Other unknown kinds land here too.
+        # scripts/q.py "rotating shared layout".) Other unknown kinds land here too.
         return (f"None  # UNSUPPORTED: layout kind {self.kind!r} has no gluon.language constructor "
                 f"(language-surface gap, not a tool TODO)")
 
@@ -315,7 +315,7 @@ def emit_layout_factory(layouts: list[Layout], source: str = "") -> str:
 # prefetch / manual interleave). So this emitter is the standard pipeline-layer
 # start (recover_gluon.py --with-pipeline), not a discouraged opt-in -- just keep it
 # out of the transcription step so gains stay attributable.
-# See references/tile-programming/pipeline.md ## Recovering the structure, then improving on it.
+# See scripts/q.py "recover pipeline structure".
 
 
 @dataclass
@@ -374,7 +374,7 @@ def parse_pipeline(ttgir: str) -> PipelinePlan:
     if plan.n_buffers <= 1:
         plan.notes.append("single-buffer (no double buffering); emit a 1-stage prefetch scaffold")
     if plan.n_buffers > 2:
-        plan.notes.append(f"nBuffers={plan.n_buffers}: re-check l_idx / wait_group(N) per pipeline.md")
+        plan.notes.append(f"nBuffers={plan.n_buffers}: re-check l_idx / wait_group(N) (scripts/q.py \"hand-built buffering\")")
     return plan
 
 
@@ -405,7 +405,7 @@ def emit_pipeline_skeleton(plan: PipelinePlan, layouts: Optional[list[Layout]] =
         "# Mechanical staging is filled; replace every TODO with the kernel's base/offset/mask",
         "# expressions (they come from the algorithm skeleton, not the pipeline structure).",
         "# Buffer indices are compile-time literals so the scheduler can prove overwrite-safety",
-        "# (see references/tile-programming/pipeline.md ## Hand-built buffering rules).",
+        "# (see scripts/q.py \"hand-built buffering\").",
     ]
     for n in plan.notes:
         L.append(f"# NOTE: {n}")

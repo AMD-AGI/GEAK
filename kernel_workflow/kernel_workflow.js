@@ -365,8 +365,11 @@ function expertSkillsBlock(role) {
   return `\n\n## Expert skills (ADVISORY — opt-in, enabled this run)\n` +
     `Also query ${EXPERT_SKILLS_DIR}/index.yaml for skills whose \`match\` fits this op, whose \`scope\` ` +
     `is \`kernel\` (\`tuning\` entries belong to the e2e tuning phase and match every operator), and whose ` +
-    `validation_status is \`validated\`, and treat each as a HIGH-PRIOR candidate — advisory only, never ` +
-    `overriding your isolated A/B vs the oracle, never reducing a result below the measured baseline.`;
+    `validation_status is \`validated\`, and treat each recipe/migration skill as a HIGH-PRIOR candidate — ` +
+    `advisory only, never overriding your isolated A/B vs the oracle, never reducing a result below the ` +
+    `measured baseline. A skill whose skill.md says \`role: reference_fact_store\` (gluon_authoring; index ` +
+    `status draft, auto_apply false: consult it when its match gens/backends fit, whatever its status) is ` +
+    `not a recipe: query it with its scripts/q.py and judge each card by its evidence and scope.`;
 }
 
 // Read a role file from an arbitrary roles/ dir (used for e2e's op_benchmarker referenced in place).

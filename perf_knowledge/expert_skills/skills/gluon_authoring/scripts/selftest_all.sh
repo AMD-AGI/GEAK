@@ -8,7 +8,7 @@
 #                                                                          pack's pages call)
 #   3. the core selftests by name (harness_stub_env) -- asserted present, so a deleted core tool
 #      FAILS here instead of silently dropping out of the discovered set
-#   4. check_term_index.py --pack G and check_pack_refs.py (every pointer in the pack resolves)
+#   4. lint_facts.py --pack (facts.jsonl schema, ids, see[] links, INDEX.md up to date)
 #
 # Usage: bash scripts/selftest_all.sh [--list] [--keep-going] [-k <substring>]
 #   --list        print what would run, run nothing
@@ -76,9 +76,8 @@ for f in "$KT"/*.py "$KT"/*.sh; do
   add "kt:$b" "$(runner_for "$b") '$f' --selftest"
 done
 
-# 4. pointer checks
-add "refs:check_term_index" "python3 '$HERE/check_term_index.py' --pack '$PACK'"
-add "refs:check_pack_refs" "python3 '$HERE/check_pack_refs.py' --pack '$PACK'"
+# 4. the fact store: schema, unique ids, see[] resolve, leak patterns, INDEX.md current
+add "facts:lint_facts" "python3 '$HERE/lint_facts.py' --pack"
 
 # Checks that mostly SLEEP start in the background first and are collected last, so they overlap
 # the rest. None at present.

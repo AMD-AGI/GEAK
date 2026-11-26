@@ -456,8 +456,8 @@ def preload(seconds: float, fn, sync) -> None:
 
     Cheap insurance against an idle card's first timed window running on a different clock than
     later ones; that excess lands on whichever arm holds the early slot. On MI350X the first-cell
-    excess measured a few percent at most and was not reproduced as a large effect (timing check,
-    one MI350X node, 2026-11), so no magnitude is claimed. Distinct from `--warmup`, which warms each variant's caches
+    excess measured a few percent at most and was not reproduced as a large effect (timing check on
+    MI350X), so no magnitude is claimed. Distinct from `--warmup`, which warms each variant's caches
     and compilation; this warms the CARD."""
     if seconds <= 0:
         return
