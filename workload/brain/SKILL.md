@@ -99,10 +99,12 @@ admission does not prove cutoff or failure handling.
 
 ## Starting route and adoption
 
-When evidence does not support a better plan, use the scenario's configured starting
-route and declared module scopes.
-Reuse compatible work and combine calls where one implementation covers both capabilities.
-The [sequential driver](../engine/core/README.md) still supports the configured route.
+The basic plan follows the configured route. Establish or reuse a Baseline, Profile the
+workload, qualify representative UTs, Optimize, then Apply back and Evaluate. Retain
+configured calls such as Roofline. With budget and headroom left, use the report to
+re-profile the best verified version or continue a promising search.
+Use [serving evidence and permitted experience](initial-plan.md) to adapt this plan.
+The [sequential driver](../engine/core/README.md) supports the configured route.
 
 Preserve task coverage, parallelism, selected method, required search credit, cold checks
 and a verified floor with recovery artifacts. A scoped alternative does not complete the

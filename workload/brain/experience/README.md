@@ -6,6 +6,11 @@ The index exposes origins and search tags, not scores or recommendations. Filter
 before opening cases/routes and their linked raw evidence. Keep information exclusions
 separate from permitted changes.
 
+For a transfer test, give a fresh planner an origin-filtered index or packet before
+it reads history. Filter derived summaries, mixed collections and worker inputs too.
+The target supplies its original inputs and this run's observations. Record the sources
+and freeze the first plan before revealing held-out outcomes to the evaluator.
+
 For a moving performance target, refresh the permitted source and select a point with the
 same external workload, resources and metric definitions. Pin its date and reuse it until
 the target or operating conditions change. Differences in engine, parallel layout or

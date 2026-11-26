@@ -17,6 +17,7 @@ Search tags describe mechanisms, not priorities. Cases hold outcomes and conditi
 | deepseek-v41-flash | indexer/workspace/capacity | public/source | [indexer budget](cases/deepseek-v41-flash/indexer-budget.md) |
 | deepseek-v41-flash | persistent chains/speculation | local GPU pair | [deepseek-v41-flash-4fab-mono-single-pair-20261114](cases/deepseek-v41-flash/gpu-deepseek-v41-flash-4fab-mono-single-pair-20261114.md) |
 | deepseek-v41-flash | representation/boundary fusion | public/source | [producer consumer layout](cases/deepseek-v41-flash/producer-consumer-layout.md) |
+| deepseek-v41-flash | wide verify, KV reuse, expert dispatch | public release and serving logs | [wide verify batches](cases/deepseek-v41-flash/wide-verify.md) |
 | deepseek-v41-flash | runtime/effective configuration | public/source | [effective defaults](cases/deepseek-v41-flash/effective-defaults.md) |
 | deepseek-v41-flash | sampling/launch fusion | public/source | [sampler fusion count](cases/deepseek-v41-flash/sampler-fusion-count.md) |
 | deepseek-v41-flash | schedule/admission | public/source | [admission before kernel](cases/deepseek-v41-flash/admission-before-kernel.md) |
