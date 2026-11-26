@@ -31,7 +31,7 @@ The revised answer omitted an explicit throughput tradeoff in the eight-rank
 packet. The checklist rewards explicit decisions, and the revision reused the
 initial five packets. A further replay withheld Kimi history, supplied only its
 C32 reference, and proposed isolating prefill cadence at fixed admission and draft
-depth. That proposed serving intervention has no new measured speedup. The eight
+depth. Its serving effect was unknown when the plan was frozen. The subsequent local screen appears below. The eight
 public send windows were clipped by native client timestamps and analyzed per
 emitting lane. Those periodic samples cannot identify individual tail requests.
 
@@ -46,9 +46,36 @@ from worker handoffs. Instruction examples and suggested numerical thresholds al
 need provenance review. This is an experiment-specific holdout. The reusable
 starting plan and its decision criteria apply to any workload.
 
-A tool-less planner received a source-hashed packet with 37 case cards from the five
+Before the live scheduling comparison, a tool-less planner received a source-hashed packet with 37 case cards from the five
 donor origins and only the anonymized original launch fields. It selected Baseline
 and Profile before choosing a path. An independent UT worker, given no validated
 oracle or tolerance, requested the current validation owner's contract. These
 experiments cover the text inputs actually supplied. The final GPU campaign must
 bind its own implementation inputs from the same permitted sources.
+
+## A live high-concurrency decision
+
+The Kimi-held-out planner proposed changing the prefill interval from 16 to 8
+with admission 32 and six verify tokens fixed. Its original-image reference
+could not initialize the host cache on the experimental node. The eight ranks
+requested approximately 1,526 GB against a shared GTT limit of 1,477 GB. A
+common change to the recurrent-state host ratio gave both arms 1,227 GB of
+host cache. Both ran on the same eight MI355X GPUs with TP8/EP1 and DCP8.
+
+| Prefill interval | Total output (tok/s) | Full-response P90 (tok/s/user) | P90 TTFT (s) | Scored requests |
+| ---: | ---: | ---: | ---: | ---: |
+| 16 | 836.70 | 34.75 | 7.51 | 1,265 |
+| 8 | 850.98 | 32.42 | 3.60 | 1,287 |
+
+Each AgentX screen sent for 1,200 seconds. Shortening the interval improved output
+by 1.71% and reduced P90 TTFT by 52.07%, while full-response P90 fell by 6.72%.
+All 1,251 shared requests produced the same output lengths. Returning the measurements
+to a planner that still had no access to Kimi history led it to retain 16 and
+prioritize a profile of prefill interruptions and the slow requests. This is one
+ordered performance comparison using synthetic acceptance. No new model-quality
+test was run. [Native evidence](../brain/experience/raw/agentx-kimi-c32-initial-plan-20261126.json).
+
+The final transfer packet also includes this Kimi donor result. A fresh planner
+received 38 permitted case cards and the anonymized original launch. The 44 input
+files were verified against the actual request. No prior target optimization
+records were supplied. The final target's E2E campaign is still a separate experiment.

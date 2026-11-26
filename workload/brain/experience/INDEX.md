@@ -33,6 +33,7 @@ Search tags describe mechanisms, not priorities. Cases hold outcomes and conditi
 | kimi-k31-pro | measurement/replication | public/source | [local ci disagreement](cases/kimi-k31-pro/local-ci-disagreement.md) |
 | kimi-k31-pro | prefill/replicated work/sharding | public/source | [sharded fc](cases/kimi-k31-pro/sharded-fc.md) |
 | kimi-k31-pro | schedule/objective tradeoffs | public/source | [p90 ttft trade](cases/kimi-k31-pro/p90-ttft-trade.md) |
+| kimi-k31-pro | prefill cadence, waiting time, shared host capacity | local GPU pair | [prefill interval at C32](cases/kimi-k31-pro/prefill-interval-c32.md) |
 | kimi-k31-pro | topology/device and host memory | public/source | [communicator memory](cases/kimi-k31-pro/communicator-memory.md) |
 | kimi-k31-pro | transport/runtime activation | public/source | [rdma provider discovery](cases/kimi-k31-pro/rdma-provider-discovery.md) |
 | minimax-m31-flash | CPU/tokenization/prefix reuse | public/source | [cpu prefix reuse](cases/minimax-m31-flash/cpu-prefix-reuse.md) |

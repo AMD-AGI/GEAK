@@ -369,5 +369,41 @@
     }
   },
   "limits": "One sample per policy, masked workloads, one synthetic stress case and one missing-data packet. The revision was informed by the first pass. The judge was blind to labels and evaluated explicit actions. These are planning checks, not proof of new serving performance or of generalization on every workload.",
-  "window_limits": "Sample counts and quantiles are per named emitting lane in the strictly interior UTC seconds of native sends. Source SHA-256s refer to uncompressed public logs. No summing worker widths into an inferred global batch."
+  "window_limits": "Sample counts and quantiles are per named emitting lane in the strictly interior UTC seconds of native sends. Source SHA-256s refer to uncompressed public logs. No summing worker widths into an inferred global batch.",
+  "live_followup": {
+    "origin": "kimi-k31-pro",
+    "image": "lmsysorg/sglang@sha256:346a6d832bbfcb5776d8d938154870682a891278a8adc264ed996ccf3d3b6762",
+    "local_protocol": "Single synthetic-acceptance screen per variant. MI355X x8, C32 TP8/EP1 DCP8, recurrent-state host ratio 7, same native client, model and draft. Original ratio 10 failed before traffic on the local GTT budget.",
+    "arms": {
+      "gtt7-base": {
+        "start": "2026-11-26T12:00:31.792000+00:00",
+        "end": "2026-11-26T12:20:31.793000+00:00",
+        "output": 836.69972,
+        "p90_full_response": 34.75015,
+        "ttft_s": 7.51207,
+        "requests": 1265,
+        "sending_seconds": 1200.000270691,
+        "record_sha256": "94675f6d947f51ccb907edad92167697f591ee26f401a8334bdc4e7daa5c1a37"
+      },
+      "gtt7-treatment": {
+        "start": "2026-11-26T12:41:04.079000+00:00",
+        "end": "2026-11-26T13:01:04.080000+00:00",
+        "output": 850.98309,
+        "p90_full_response": 32.4165,
+        "ttft_s": 3.60054,
+        "requests": 1287,
+        "sending_seconds": 1200.001171479,
+        "record_sha256": "2870bb322f2f6e902bfb6888629a7866583317b5719b579e3bc557b503464754"
+      }
+    },
+    "change_pct": {
+      "output": 1.7071082562331918,
+      "p90": -6.71551058052986,
+      "ttft": -52.06993545054826
+    },
+    "unique_matched": 1251,
+    "equal_output_lengths": 1251,
+    "next_plan": "Retain **gtt7-base: interval16, admission32, DCP8, draft6**. Interval8 raises output 1.71% but lowers P90 full-response speed 6.72%, failing the equal-priority adoption criterion. TTFT improves 52.07% (7.51→3.60s); queue-positive samples fall 52.6%→30.3%; matched median ITL worsens 3.17%. One pair cannot establish repeatability. Synthetic acceptance, equal matched output lengths and zero recorded errors do not establish model quality. Scheduling competition is plausible; isolated GPU benefit is unproven.\n\nWith budget, choose a **bounded Profile** of the retained configuration: prefill/decode/verify costs, all-worker widths, rank stalls and cache/queue waits. Missing cost evidence prevents confidently ranking system tuning against operator search. Compute-dominated results favor parallel attention/KV and GEMM/routing UTs on disjoint GPUs; wait-dominated results favor a one-variable system probe. Collectives and serving comparisons need exclusive eight-GPU windows.\n",
+    "native_receipt": "../brain/experience/raw/agentx-kimi-c32-initial-plan-20261126.json"
+  }
 }

@@ -30,3 +30,6 @@ in-window serving logs and native 20-minute MI355X comparisons.
 
 [Day-zero source ports](agentx-muse-day0-ports-20261126.json) records original-image
 backports, request-level outcomes and a source-matched historical numerical rejection.
+
+[Kimi C32 scheduling experiment](agentx-kimi-c32-initial-plan-20261126.json) retains
+the fixed-image interval comparison, startup rejections and host-pool observations.

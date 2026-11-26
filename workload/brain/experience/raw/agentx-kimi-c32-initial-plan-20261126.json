@@ -1,0 +1,21 @@
+{
+  "collection_id": "agentx-kimi-c32-initial-plan-20261126",
+  "directory": "collections/agentx-kimi-c32-initial-plan-20261126",
+  "checksum_file": "agentx-kimi-c32-initial-plan-20261126.sha256",
+  "checksum_scope": "Hashes of native input, startup, measured and comparison inventories. Each inventory identifies individual retained files.",
+  "origin": "kimi-k31-pro",
+  "image": "lmsysorg/sglang@sha256:346a6d832bbfcb5776d8d938154870682a891278a8adc264ed996ccf3d3b6762",
+  "reference_point": 447679,
+  "local_protocol": "8 MI355X, SGLang TP8/EP1 DCP8 C32, 393-trace AgentX 1.0.13, seed 42, 1200 seconds per arm, shared recurrent-state host ratio 7.",
+  "measurement_receipts": [
+    "runs/gtt7-base",
+    "runs/gtt7-treatment"
+  ],
+  "startup_without_scores": [
+    "runs/interval16",
+    "runs/gtt7-interval16"
+  ],
+  "comparison": "derived/window-comparison.json",
+  "limits": "Single ordered pair, synthetic acceptance. No real-generation quality score. The shared host-pool budget is lower than the published reference. Target revision was unspecified in the original launch; both local roles used the same read-only target.",
+  "next_decision": "derived/next-plan.md"
+}
