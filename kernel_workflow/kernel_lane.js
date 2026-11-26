@@ -5371,6 +5371,7 @@ function bindMegaDirectionToWip(currentRound, direction) {
   };
 }
 
+// mode=mega inputs of the lane's tech_lead plan_round call.
 function megaPlanPrompt(currentRound, remaining, pool) {
   const searchHistory = megaHistoryForSearch(history, megaCandidateRegistry);
   return roleAgent('tech_lead', 'plan_round',

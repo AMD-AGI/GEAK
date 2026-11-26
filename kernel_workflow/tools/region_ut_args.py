@@ -1,19 +1,31 @@
 #!/usr/bin/env python3
 """mode=mega args from a region UT task dir (args.region_ut): what the UT fixes, so a caller passes only the UT.
 
-A region UT (e.g. a KernelFusion L3 MegaKernel region) is a GEAK task dir: meta.json, cases.py, unittest.py
-and kernel_src/ (knowledge/mega_region_ut.md). Its own unittest.py is the benchmark; its case sigs are the
-guards; its tolerances are the accuracy threshold; its bound modules are what a candidate may replace.
-kernel_lane.js fills every arg the caller left unset from this JSON (an arg the caller passed wins).
-The heaviest case (served weight) is the target; every other case is a regression guard with a 2% noise
-floor, so an implementation may keep the stock path there (a declared refusal). The UT's graph-replay
-stress (meta.graph_replays) is the liveness evidence the finalist gate counts.
+A region UT is the task dir KernelFusion builds for a fusion region (e2e_workflow fusion_ut_contract.md):
+meta.json (`cases` with served `weight`, `candidate_bind`, `acceptance` {tol, noise_bound, min_speedup}),
+unittest.py, kernel_src/, run/self_noise.json. kernel_lane.js fills every arg the caller left unset from
+this JSON (an arg the caller passed wins); knowledge/mega_region_ut.md says how each role uses the UT.
+
+- benchmark: the UT's own unittest.py; accuracy: its CORRECTNESS gate at acceptance.tol (the UT's units).
+- guards: the heaviest served case is the target; every other case is a regression guard whose floor is
+  widened by the UT's measured self-noise for that case (run/self_noise.json, 2x the |1 - ratio|), never
+  above 0.98, so a noisy small case cannot veto a candidate on noise alone.
+- liveness: graph-regime cases are captured once and replayed `--iters` times per leg in the UT's served
+  mode without a hang; that count is the replay evidence (required_replays).
 
 Usage: region_ut_args.py <task_dir>   -> prints one JSON object (and exits 1 with {"error"} on a bad UT)
 """
 import json
 import os
+import re
 import sys
+
+
+def _ut_iters(unittest_py):
+    """The UT's default timed replays per case (`--iters`), or None when it declares none."""
+    with open(unittest_py) as fh:
+        m = re.search(r"""add_argument\(\s*["']--iters["'][^)]*default\s*=\s*(\d+)""", fh.read())
+    return int(m.group(1)) if m else None
 
 
 def region_ut_args(task_dir):
@@ -23,31 +35,44 @@ def region_ut_args(task_dir):
     cases = [c for c in meta.get("cases") or [] if isinstance(c, dict) and c.get("sig")]
     if not cases:
         raise ValueError("meta.json has no cases with a sig")
-    if not os.path.isfile(os.path.join(task, "unittest.py")):
+    ut = os.path.join(task, "unittest.py")
+    if not os.path.isfile(ut):
         raise ValueError("the task dir has no unittest.py")
-    binds = meta.get("candidate_bind") or []
-    binds = binds if isinstance(binds, list) else [binds]
-    modules = [b.get("module") or b.get("impl_module") for b in binds if isinstance(b, dict)]
+    bind = meta.get("candidate_bind")
+    binds = bind if isinstance(bind, list) else [bind]
+    modules = [b.get("impl_module") or b.get("module") for b in binds if isinstance(b, dict)]
     if not [m for m in modules if m]:
         raise ValueError("meta.json binds no module (candidate_bind)")
+    acc = meta.get("acceptance") if isinstance(meta.get("acceptance"), dict) else {}
+    if acc.get("tol") is None:
+        raise ValueError("meta.json has no acceptance.tol (not a fusion-contract UT)")
+
     sigs = [c["sig"] for c in cases]
-    tols = [float(c.get("tol") or meta.get("tol") or 0) for c in cases]
-    rel = meta.get("correct_metric") == "rel_l2"
-    weights = [float(c.get("weight") or 0) for c in cases]
+    weights = [float(c.get("weight") or c.get("effective_calls") or 0) for c in cases]
     target = sigs[weights.index(max(weights))] if any(weights) else sigs[0]
     others = [s for s in sigs if s != target]
-    replays = int(meta.get("graph_replays") or 0)
-    return {
-        "benchmark_harness": os.path.join(task, "unittest.py"),
+    noise = {}
+    try:
+        with open(os.path.join(task, "run", "self_noise.json")) as fh:
+            noise = {c["sig"]: abs(1 - float(c["ratio"])) for c in json.load(fh).get("per_case") or []
+                     if c.get("sig") and c.get("ratio")}
+    except (OSError, ValueError, TypeError, KeyError):
+        pass
+    floor = {s: round(min(0.98, 1 - 2 * noise.get(s, 0.0)), 3) for s in others}
+
+    graph = any(c.get("regime") == "graph" for c in cases)
+    iters = _ut_iters(ut) if graph else None
+    out = {
+        "benchmark_harness": ut,
         "candidate_import_modules": [m for m in modules if m],
         "target_guards": [target],
         "regression_guards": others,
-        "regression_floor_by_guard": {s: 0.98 for s in others},
-        "required_replays": max(30, replays),
+        "regression_floor_by_guard": floor,
+        "required_replays": max(30, iters or 0),
         "required_accuracy_cases": sigs,
-        "accuracy_metric": "relL2" if rel else "elementwise",
-        "accuracy_threshold": max(tols) if any(tols) else 0.02,
-        # The UT replays every case under one captured graph itself.
+        "accuracy_metric": "ut_max_err",
+        "accuracy_threshold": float(acc["tol"]),
+        # The UT captures and replays its graph cases itself.
         "require_graph_capture": "false",
         "positive_control": {
             "name": "synthetic slowdown inside the seam", "guard": target,
@@ -56,10 +81,11 @@ def region_ut_args(task_dir):
             "expected_pct_lo": -9.0, "expected_pct_hi": -4.0, "magnitude": "constructed",
             "abort_on_fail": False, "required_control_pairs": 5, "required_null_pairs": 8,
         },
-        "region_ut_world_size": int(meta.get("world_size") or 1),
-        **({} if replays >= 30 else {"region_ut_warning": "meta.graph_replays < 30: the UT gives no liveness "
-                                                           "evidence, so no finalist can pass mode=mega's gate"}),
     }
+    if not graph or not iters or iters < 30:
+        out["region_ut_warning"] = ("the UT replays no graph case --iters >= 30 times: it gives no liveness "
+                                    "evidence, so no finalist can pass mode=mega's gate")
+    return out
 
 
 def main(argv=None):

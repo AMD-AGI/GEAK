@@ -1531,30 +1531,12 @@ def _kill_process_group(proc, grace=5.0):
             continue
 
 
-def world_size(task_dir):
-    """meta.world_size of a task (1 when absent): how many ranks one leg runs on."""
-    try:
-        with open(os.path.join(task_dir, "meta.json")) as fh:
-            return max(1, int(json.load(fh).get("world_size") or 1))
-    except (OSError, ValueError, TypeError):
-        return 1
-
-
 def _run_leg(task_dir, overlay, mode, *, bucket="", out="", seed=0, draws=0, timeout=3600,
-             target_callable="", sigs=None, ref="", tol=0.0):
+             target_callable="", sigs=None):
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join([overlay] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
-    world = world_size(task_dir) if mode in ("time", "oracle", "check") else 1
-    # A multi-rank leg runs every rank of the operator under torchrun on the GPUs this process was leased
-    # (HIP_VISIBLE_DEVICES); list (metadata only) and resolve (imports only) stay single-process.
-    launcher = [sys.executable] if world <= 1 else [
-        sys.executable, "-m", "torch.distributed.run", "--standalone", f"--nproc-per-node={world}"]
-    cmd = launcher + [os.path.join(task_dir, "leg_runner.py"),
-                      "--task", task_dir, "--mode", mode, "--seed", str(int(seed))]
-    if ref:
-        cmd += ["--ref", ref]
-    if tol:
-        cmd += ["--tol", str(float(tol))]
+    cmd = [sys.executable, os.path.join(task_dir, "leg_runner.py"),
+           "--task", task_dir, "--mode", mode, "--seed", str(int(seed))]
     if bucket:
         cmd += ["--bucket", bucket]
     if out:
@@ -1571,9 +1553,8 @@ def _run_leg(task_dir, overlay, mode, *, bucket="", out="", seed=0, draws=0, tim
     # helpers, and killing only the direct child leaves those holding the GPU allocation. The NEXT leg
     # then times against a busy device and reads as a slowdown attributable to nothing.
     started = time.monotonic()
-    # torchrun imports torch with the CWD first on sys.path; a task dir there shadows stdlib `unittest`.
     p = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                         start_new_session=True, **({"cwd": "/"} if world > 1 else {}))
+                         start_new_session=True)
     try:
         stdout, stderr = p.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -1601,28 +1582,23 @@ def build_candidate_overlay(task_dir, meta):
     base = os.path.join(task, "baseline_overlay")
     cand = os.path.join(task, "_cand_overlay")
     shutil.rmtree(cand, ignore_errors=True)
-    binds = meta.get("candidate_bind") or {}
-    # A list binds several modules of one region (e.g. every file of a MegaKernel package); each entry is
-    # added in order on top of the previous, so the candidate leg is still "the live stack + kernel_src".
-    binds = binds if isinstance(binds, list) else [binds]
+    b = meta.get("candidate_bind") or {}
+    src = os.path.join(task, b.get("file", "") or "")
+    if not b.get("file") or not os.path.exists(src):
+        raise RuntimeError("meta.candidate_bind missing or its file is absent — cannot build the candidate leg")
     tool = [sys.executable, os.path.join(task, "overlay_setup.py")]
-    for i, b in enumerate(binds):
-        src = os.path.join(task, (b or {}).get("file", "") or "")
-        if not (b or {}).get("file") or not os.path.exists(src):
-            raise RuntimeError("meta.candidate_bind missing or its file is absent — cannot build the candidate leg")
-        if b.get("kind") == "rebind":
-            args = ["add-rebind", "--target", b["target"], "--impl-module", b["impl_module"],
-                    "--impl-attr", b["impl_attr"], "--impl-file", src]
-        else:
-            args = ["add-module", "--module", b["module"], "--patched-file", src]
-            # kernel_src/ was seeded from baseline_overlay's copy of the module, if it has one.
-            seed = os.path.join(base, "_patched", b["module"] + ".py")
-            if os.path.isfile(seed):
-                args += ["--src-file", seed]
-        r = subprocess.run(tool + args + ["--overlay", cand] + (["--from", base] if i == 0 else []),
-                           capture_output=True, text=True)
-        if r.returncode != 0:
-            raise RuntimeError(f"candidate overlay build failed: {r.stderr[-800:]}")
+    if b.get("kind") == "rebind":
+        args = ["add-rebind", "--target", b["target"], "--impl-module", b["impl_module"],
+                "--impl-attr", b["impl_attr"], "--impl-file", src]
+    else:
+        args = ["add-module", "--module", b["module"], "--patched-file", src]
+        # kernel_src/ was seeded from baseline_overlay's copy of the module, if it has one.
+        seed = os.path.join(base, "_patched", b["module"] + ".py")
+        if os.path.isfile(seed):
+            args += ["--src-file", seed]
+    r = subprocess.run(tool + args + ["--overlay", cand, "--from", base], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"candidate overlay build failed: {r.stderr[-800:]}")
     return base, cand
 
 
@@ -1705,8 +1681,7 @@ def measure_legs(task_dir, meta, *, timeout=3600, max_reps=3, undecided=(0.95, 1
         rows = {s: _measure_bucket(task, base, cand, s, timeout, max_reps, undecided) for s in sigs}
     else:
         rows = _measure_sweep(task, base, cand, sigs, timeout, max_reps, undecided)
-    ranks = {"world_size": world_size(task)} if world_size(task) > 1 else {}
-    return [dict(rows[s], process_mode=process_mode, **ranks) for s in sigs if rows.get(s)]
+    return [dict(rows[s], process_mode=process_mode) for s in sigs if rows.get(s)]
 
 
 def _measure_sweep(task, base, cand, sigs, timeout, max_reps, undecided):
@@ -1791,20 +1766,6 @@ def _summarize_pairs(sig, brows, orows):
                                          for r in brows],
                             "candidate": [dict(r.get("diagnostics") or {}, process=r["process"])
                                           for r in orows]}}
-
-
-def run_correctness_ranks(task_dir, meta, *, tol=None, seed=0, draws=0, timeout=3600, overlay=None):
-    """Correctness of a MULTI-RANK task (meta.world_size > 1): the baseline leg records every rank's outputs
-    on the seeded draws, then the candidate leg (or `overlay`, e.g. the baseline itself for a noise check)
-    recomputes them on every rank, eager and through one captured graph per shape, and compares rank by
-    rank. Returns {"pass", "worst", "per_rank": [...], "world_size", "tol"}; every rank must pass."""
-    task = os.path.abspath(task_dir)
-    base, cand = build_candidate_overlay(task, meta)
-    ref = os.path.join(task, "_baseline_ranks.pt")
-    _run_leg(task, base, "oracle", out=ref, seed=seed, draws=draws, timeout=timeout)
-    # tol=None: each case's own tolerance, else meta.tol (leg_runner); a number overrides both.
-    return _run_leg(task, overlay or cand, "check", ref=ref, seed=seed, draws=draws, timeout=timeout,
-                    tol=float(tol) if tol is not None else 0.0)
 
 
 def baseline_random_outputs(task_dir, meta, *, seed=0, draws=0, timeout=3600):
