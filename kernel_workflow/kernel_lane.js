@@ -2175,9 +2175,13 @@ Return ONLY the structured JSON the role file specifies (a StructuredOutput tool
 // around them. Hooks that can end the run early return {exit: result}.
 // ===========================================================================
 
-const STR = { type: 'string' }, NUM = { type: 'number' }, BOOL = { type: 'boolean' };
-const STR_N = { type: ['string', 'null'] }, NUM_N = { type: ['number', 'null'] };
-const STRS = { type: 'array', items: STR }, ANYOBJ = { type: 'object', additionalProperties: true };
+const STR = { type: 'string' };
+const NUM = { type: 'number' };
+const BOOL = { type: 'boolean' };
+const STR_N = { type: ['string', 'null'] };
+const NUM_N = { type: ['number', 'null'] };
+const STRS = { type: 'array', items: STR };
+const ANYOBJ = { type: 'object', additionalProperties: true };
 const ANYOBJS = { type: 'array', items: ANYOBJ };
 
 // ---- mode=mega args (parsed for every mode; checked only under MEGA) ----
