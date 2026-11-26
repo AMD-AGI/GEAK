@@ -1,4 +1,4 @@
-"""A region UT (args.region_ut, a KernelFusion fusion-contract task dir) supplies the mode=mega args."""
+"""A region UT (args.region_ut, a GEAK UT task dir) supplies the mode=mega args."""
 
 import importlib.util
 import json
@@ -18,8 +18,7 @@ ap.add_argument("--iters", type=int, default=50)
 
 
 def _task(tmp_path, noise=None, unittest=UNITTEST, **meta_extra):
-    meta = {"target_callable": "pkg.models.m:MoE.forward", "fusion_contract": True, "level": "L3",
-            "required_gpu_count": 4,
+    meta = {"target_callable": "pkg.models.m:MoE.forward", "required_gpu_count": 4,
             "candidate_bind": {"kind": "rebind", "target": "pkg.models.m:MoE.forward", "impl_module": "moe_ar",
                                "impl_attr": "forward", "file": "kernel_src/moe_ar.py"},
             "acceptance": {"min_speedup": 1.0, "exact_outputs": [], "noise_bound": 0.01, "tol": 0.1},
@@ -46,7 +45,7 @@ def test_the_ut_fixes_benchmark_guards_accuracy_and_module(tmp_path):
     assert (a["accuracy_metric"], a["accuracy_threshold"]) == ("ut_max_err", 0.1)
     assert a["required_replays"] == 50 and "region_ut_warning" not in a
     assert a["positive_control"]["guard"] == "verify_r240" and a["positive_control"]["abort_on_fail"] is False
-    assert a["require_graph_capture"] == "false" and a["region_ut_format"] == "fusion_contract"
+    assert a["require_graph_capture"] == "false" and a["region_ut_format"] == "acceptance"
 
 
 def test_a_noisy_case_gets_a_wider_floor(tmp_path):

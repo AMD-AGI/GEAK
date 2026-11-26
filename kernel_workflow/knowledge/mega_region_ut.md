@@ -1,9 +1,9 @@
 # mode=mega on a region UT (args.region_ut)
 
-A pipeline (the e2e kernel track, or KernelFusion for an L3 MegaKernel region) can hand mode=mega an
-operator as a GEAK UT task dir. The caller passes only `region_ut` (= KERNEL_PATH) and the GPU set;
-`tools/region_ut_args.py` turns the UT into the mega args the caller left unset (benchmark, guards and their
-noise floors, accuracy, replay count, bound module, positive control). This file changes only what the UT
+A pipeline (e.g. the e2e kernel track) can hand mode=mega an operator as a GEAK UT task dir. The caller
+passes only `region_ut` (= KERNEL_PATH) and the GPU set; `tools/region_ut_args.py` turns the UT into the
+mega args the caller left unset (benchmark, guards and their noise floors, accuracy, replay count, bound
+module, positive control). This file changes only what the UT
 fixes; everything else in your role and its mode=mega fragment holds.
 
 ## The two UT formats
@@ -20,9 +20,8 @@ installed stack; the candidate leg binds the seam (`meta.target_callable`) to `k
   times both legs; it prints `GEAK_WEIGHTED_SPEEDUP=` and a final `{"UT": "pass"|"fail", ...}` line, and
   writes the per-case times to `run/ut_result.json` (`gates.timing.per_case`: `sig`, `baseline_ms`,
   `optimized_ms`). If its argparse has `--validation-mode`, run it with `--validation-mode performance`.
-- **fusion_contract** (KernelFusion, `fusion_ut_contract.md`): cases in `meta.cases` (`sig`, `step_type`,
-  `width`, served `weight`, `regime` eager|graph); `meta.acceptance` (`tol` with `tol_units`, `noise_bound`,
-  `min_speedup`). `unittest.py` runs every rank and prints `IDENTITY_RESOLVE`, one gate line per mode
+- **acceptance**: cases in `meta.cases` (`sig`, `step_type`, `width`, served `weight`, `regime`
+  eager|graph); `meta.acceptance` (`tol` with `tol_units`, `noise_bound`, `min_speedup`). `unittest.py` runs every rank and prints `IDENTITY_RESOLVE`, one gate line per mode
   (`ORACLE`/`RANDOM`/`SERVED`, `SELF` with `--self-noise`: `<MODE>: PASS|FAIL max_err=... tol=...`), one line
   per case (`case <sig>: <baseline> ms / <candidate> ms / <speedup>x`, slowest rank),
   `CORRECTNESS: PASS|FAIL max_err=... tol=... per_rank=[...]` and `GEAK_WEIGHTED_SPEEDUP=`; per case also in

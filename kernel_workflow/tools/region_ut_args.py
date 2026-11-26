@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """mode=mega args from a region UT task dir (args.region_ut): what the UT fixes, so a caller passes only the UT.
 
-A region UT is a GEAK task dir in either of the two formats GEAK produces:
+A region UT is a GEAK UT task dir (unittest.py, cases.py, meta.json, kernel_src/, run/):
 - kernel_ut: the e2e kernel-extraction UT (e2e_workflow kernel-ut skill): meta.workload.cases (sig, regime,
-  effective_calls), meta.tol, unittest.py, kernel_src/, run/;
-- fusion_contract: the KernelFusion region UT (fusion_ut_contract.md), which adds meta.cases (served
-  `weight`) and meta.acceptance {tol, noise_bound, min_speedup}, and times every case in unittest.py.
+  effective_calls), meta.tol;
+- acceptance: a UT that also declares meta.cases (served `weight`) and meta.acceptance {tol, noise_bound,
+  min_speedup}, and times every case in unittest.py.
 kernel_lane.js fills every arg the caller left unset from this JSON (an arg the caller passed wins);
 knowledge/mega_region_ut.md says how each role runs and reads the UT.
 
@@ -13,7 +13,7 @@ knowledge/mega_region_ut.md says how each role runs and reads the UT.
 - guards: the heaviest case (weight, else effective_calls) is the target; every other case is a regression
   guard whose floor is widened by the UT's measured self-noise for that case (run/self_noise.json, 2x the
   |1 - ratio|), never above 0.98, so a noisy small case cannot veto a candidate on noise alone.
-- liveness: a UT with a `--iters` option (the fusion_contract runner) replays each graph-regime case that many
+- liveness: a UT with a `--iters` option (an acceptance UT runner) replays each graph-regime case that many
   times per leg; otherwise it checks one refreshed-input graph replay per graph case. That count is the
   replay evidence.
 
@@ -90,7 +90,7 @@ def region_ut_args(task_dir):
             "expected_pct_lo": -9.0, "expected_pct_hi": -4.0, "magnitude": "constructed",
             "abort_on_fail": False, "required_control_pairs": 5, "required_null_pairs": 8,
         },
-        "region_ut_format": "fusion_contract" if fusion else "kernel_ut",
+        "region_ut_format": "acceptance" if fusion else "kernel_ut",
     }
     if not replays:
         out["region_ut_warning"] = ("the UT replays no captured graph: it gives no liveness evidence, so no "

@@ -2180,7 +2180,7 @@ const STRS = { type: 'array', items: STR }, ANYOBJ = { type: 'object', additiona
 const ANYOBJS = { type: 'array', items: ANYOBJ };
 
 // ---- mode=mega args (parsed for every mode; checked only under MEGA) ----
-// A region UT (args.region_ut, e.g. from KernelFusion) supplies every mega arg the caller left unset.
+// A region UT (args.region_ut, a GEAK UT task dir) supplies every mega arg the caller left unset.
 if (MEGA && A.region_ut) {
   const u = (await agent(`Run exactly: python3 ${WORKFLOW_DIR}/tools/region_ut_args.py ${A.region_ut}\n` +
     'It prints one JSON object. Return it verbatim. Do nothing else.',
