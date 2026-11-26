@@ -54,9 +54,14 @@ a correctness verdict and a time for both legs at all.
 ## Roles
 
 - **benchmark_engineer** (setup): the COMMANDMENT is `ut.run.command` from the candidate tree under one lease
-  of `ut.run.gpus` GPUs. The baseline per case is the UT's baseline time on the unchanged editable files;
-  TARGET_GUARDS are the contract's case sigs. The null arm is `ut.null_arm`. The positive control is the
-  contract's `positive_control`, measured with the same command.
+  of `ut.run.gpus` GPUs. First prove the contract on that first run, on the unchanged editable files: the
+  verdict reads PASS (on every rank), every case in `required_accuracy_cases` gets a baseline and a candidate
+  time from `ut.per_case`, the headline reads where `ut.headline` says, and the replay evidence is there with
+  at least `required_replays` replays. If any of these does not hold, return no baseline and say which
+  (the run stops in Setup: a search on a wrong contract measures nothing); a contract field you corrected
+  from the run goes into your report. Then the baseline per case is the UT's baseline time on the unchanged
+  editable files; TARGET_GUARDS are the contract's case sigs. The null arm is `ut.null_arm`. The positive
+  control is the contract's `positive_control`, measured with the same command.
 - **engineer**: the candidate tree is the task dir; change only `ut.editable`, and keep what `ut.notes` says a
   candidate must keep. Before you return, also write `_handback/support.json` inside the editable dir
   (`{"phases": [...], "widths" or "m_range": ..., "dtypes": [...], "refusals": [...]}`: where the
@@ -68,6 +73,9 @@ a correctness verdict and a time for both legs at all.
   Liveness is the UT's own graph replay (`ut.replay`): when the UT passes, report `liveness:"pass"` and
   `replay_count` = the contract's `required_replays`. The UT captures the seam itself, so `graph_safe` is
   never "n/a" here, not even for a config-only change: `"pass"` when the UT passes, else `"fail"`.
+- **director** (validate): when `benchmark_harness` is a wrapper the adapter wrote, also run the UT's own
+  command (its `unittest.py` or equivalent, without the wrapper) on the final patch; its verdict and
+  headline are the ones that count, and a disagreement with the wrapper rejects the patch.
 - **director / tech_lead**: the final patch is the diff of `ut.editable` (plus `_handback/`). That is the whole
   result: the caller applies it to the UT, re-runs the same command, and binds the editable files into the
   server the way the UT binds its candidate leg.
