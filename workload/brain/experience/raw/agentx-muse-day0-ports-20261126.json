@@ -5,7 +5,7 @@
   "original_point": 445331,
   "base": "lmsysorg/sglang-rocm@sha256:72065dfc0b87818ab415f96c0fc08848233d25f22b002ac8f28c33fad6ec82a4",
   "checksum_file": "agentx-muse-day0-ports-20261126.sha256",
-  "checksum_scope": "Native run and historical diagnostic inventories, with per-artifact hashes and source identity checks.",
+  "checksum_scope": "Native serving runs and historical diagnostics, including per-artifact hashes for the earlier operator timings and their derived width comparisons.",
   "measurement_receipts": [
     "runs/stock",
     "runs/joint",
@@ -17,5 +17,11 @@
   "local_protocol": "Eight MI355X, native AgentX 1.0.13, 393-trace source, C8, 1200-second sending windows, full-response P90.",
   "historical_diagnostics": [
     "sources/nov14-width32-diagnostic"
+  ],
+  "prior_operator_records": [
+    "sources/historical-ordinary-attention"
+  ],
+  "derived_width_comparisons": [
+    "derived/historical-ordinary-attention"
   ]
 }

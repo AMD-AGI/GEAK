@@ -33,8 +33,8 @@ change with it. An intermediate can distinguish which phase merits development.
 State the outcome that changes priority. If a promising route must wait, identify
 which report or observation will reopen it. Pass the relevant evidence by reference.
 
-On a new Report, update the opportunity and cost basis, then choose the next action;
-repeat retrieval when the bottleneck, applicability or important uncertainty changes.
+On a new Report, re-rank the work that still executes, including ordinary fallback
+paths. Revisit history when the bottleneck, applicability or uncertainty changes.
 Historical gains/costs are priors, not current measurements or stopping criteria.
 Source changes, actual activation, bundled observations and local toggle pairs stay distinct.
 Retrospective case summaries are not verified predecision reasoning. Preserve exact metric

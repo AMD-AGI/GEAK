@@ -22,3 +22,11 @@ A prior 32-row diagnostic exceeded the implementation's numerical bounds on 112 
 1,488 layer checks. The 28 target/common compute sources match this port byte for
 byte. The earlier run used a different surrounding runtime. An advertised width
 still needs numerical qualification on the proposed stack. [Native evidence and source comparison](../../raw/agentx-muse-day0-ports-20261126.json).
+
+An older six-kernel screen on the same node and protocol, on another day, shared
+447 requests with matching output lengths. Relative to that screen, median token
+interval fell 32.22% for the 38 requests observed only at B1/B2 in both windows,
+and rose 22.67% for the 85 observed only above B2. For B5–B8, the older ordinary
+attention source reduced weighted operator time by factors of 2.66 and 2.68 in two
+cold tests. This prioritizes a paired test of narrow fusion plus that fallback
+at fixed admission. The combination's serving effect is open. [Paired requests and cold receipts](../../raw/agentx-muse-day0-ports-20261126.json).
