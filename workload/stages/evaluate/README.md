@@ -12,30 +12,12 @@ Choose its scope for a decision, not to complete an inherited list of tests. Kee
 conditioning and active instrumentation comparable even for a screen; extra repetitions
 cannot repair a systematic mismatch.
 
-## Model correctness
-
-Use paired GSM8K final-answer exact match for model correctness. Score the unchanged
-reference and the deployed candidate against gold answers on the same test questions.
-A throughput-only screen leaves correctness unevaluated.
-
-Use the question count and maximum acceptable accuracy drop (in percentage points)
-from the call's `PLAN.md`. Honor values specified by the user or scenario. Brain
-chooses any unspecified tolerance from the task's quality requirements and any
-unspecified sample size from the precision needed and the evaluation budget.
-Record the rationale before scoring. One net correct answer moves the measured gap
-by `100 / N` percentage points on `N` paired questions. Prior runs can also show how
-often the arms differ on which questions they answer correctly. If using a staged
-sample, state when to expand it and keep the tolerance fixed across stages.
-
-Report correct/total and accuracy for each arm, then compute the signed change in
-percentage points as `100 × (candidate_correct − reference_correct) / total`.
-A drop exceeding the planned tolerance is an accuracy regression. If sampling
-uncertainty leaves the decision unresolved, report it as inconclusive and keep the
-reference. A missing, incomplete or unmatched pair leaves quality unevaluated and
-blocks adoption. Carry the quality decision and both receipts alongside the native
-performance verdict.
-
-## Performance comparison
+For model correctness, run the [GSM8K client](../../../e2e_workflow/scripts/gsm8k_eval.py)
+on both arms with the same questions and decoding settings, outside timed traffic.
+Before scoring, Brain sets the question count (`--limit`) and maximum acceptable drop
+in percentage points in `PLAN.md`, honoring user or scenario requirements. For adoption,
+report both final-answer exact-match accuracies (correct/total) and compare the change
+(candidate minus reference) with the planned tolerance.
 
 Resolve each arm's repeats, required quality and deployment reuse from its native owner.
 The finalizer's `repeats` applies to the candidate; a fresh stock control has its own

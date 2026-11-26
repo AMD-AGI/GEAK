@@ -53,9 +53,7 @@ preserve the inputs and evidence of in-flight calls.
    a generated plan does not make diagnostic completeness an acceptance requirement.
    Additional validation must address a concrete correctness or measurement risk.
 2. Write `PLAN.md` under the [module contract](../stages/CONTRACT.md); each module's
-   README states the inputs its call needs, and Brain writes them. For a GSM8K comparison,
-   set the question count and acceptable accuracy drop before scoring, following
-   [Evaluate's quality criterion](../stages/evaluate/README.md#model-correctness). Reuse qualified
+   README states the inputs its call needs, and Brain writes them. Reuse qualified
    inputs; investigate missing prerequisites or observed defects within the affected call,
    rather than adding a separate readiness stage to every route.
 3. Bind invocation options to their native prerequisites and actual receipts. Adapter
@@ -146,8 +144,6 @@ no-search return before repeating it. A local limit returns to Reasoning, includ
 verification and delivery in the next budget.
 
 Only native evidence under the task's comparison and quality criteria admits a replacement.
-For serving adoption, read both GSM8K accuracies and the [Evaluate quality decision](../stages/evaluate/README.md#model-correctness)
-alongside the native performance verdict.
 Adoption updates the verified candidate; rejection keeps the reference. Neither ends the
 campaign: reason again about the remaining objective, coverage, budget and usable work.
 A kernel win or completed call does not establish serving improvement.
