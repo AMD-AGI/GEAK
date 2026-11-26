@@ -7,9 +7,12 @@ before opening cases/routes and their linked raw evidence. Keep information excl
 separate from permitted changes.
 
 For a transfer test, give a fresh planner an origin-filtered index or packet before
-it reads history. Filter derived summaries, mixed collections and worker inputs too.
-The target supplies its original inputs and this run's observations. Record the sources
-and freeze the first plan before revealing held-out outcomes to the evaluator.
+it reads history. The target contributes its original inputs and this run's observations.
+Filter derived summaries, mixed collections and worker inputs too.
+Check worked examples and template defaults in module handoffs, including suggested
+matches and tolerances. Use the current computation and its native validation owner
+to justify the contract. Record the sources and freeze the first plan before revealing
+held-out outcomes to the evaluator.
 
 For a moving performance target, refresh the permitted source and select a point with the
 same external workload, resources and metric definitions. Pin its date and reuse it until

@@ -36,3 +36,19 @@ public send windows were clipped by native client timestamps and analyzed per
 emitting lane. Those periodic samples cannot identify individual tail requests.
 
 [Packets, planner answers, rubric, window counts and source hashes](initial-plan-replay.json)
+
+## Final transfer protocol
+
+Reserve Muse Spark for the final transfer run. Give a fresh planner the original CI
+inputs, fresh target observations and allowlisted donor cases. Exclude prior target
+PRs, plans, candidate patches, results and derived summaries from retrieval and
+from worker handoffs. Instruction examples and suggested numerical thresholds also
+need provenance review. This is an experiment-specific holdout. The reusable
+starting plan and its decision criteria apply to any workload.
+
+A tool-less planner received a source-hashed packet with 37 case cards from the five
+donor origins and only the anonymized original launch fields. It selected Baseline
+and Profile before choosing a path. An independent UT worker, given no validated
+oracle or tolerance, requested the current validation owner's contract. These
+experiments cover the text inputs actually supplied. The final GPU campaign must
+bind its own implementation inputs from the same permitted sources.
