@@ -133,7 +133,10 @@ adapter_launch() {
   if [ -n "${PROFILE_DIR:-}" ]; then
     mkdir -p "$PROFILE_DIR"
     _prof=(--torch-profiler-dir "$PROFILE_DIR")
-    _prof_env=(ATOM_PROFILER_MORE="${ATOM_PROFILER_MORE:-1}")
+    # Shapes yes, Python stacks / memory no -- what sglang.sh and vllm.sh ask for: stacks are most
+    # of the events and slow the profiled steps. An ATOM without the split flags falls back to MORE.
+    _prof_env=(ATOM_PROFILER_MORE="${ATOM_PROFILER_MORE:-1}" ATOM_PROFILER_RECORD_SHAPES="${ATOM_PROFILER_RECORD_SHAPES:-1}"
+               ATOM_PROFILER_WITH_STACK="${ATOM_PROFILER_WITH_STACK:-0}" ATOM_PROFILER_PROFILE_MEMORY="${ATOM_PROFILER_PROFILE_MEMORY:-0}")
   fi
 
   _atom_server_argv "${EXTRA_SERVER_ARGS:-}" || return 2

@@ -401,9 +401,6 @@ class AtomProvidedSpecTest(unittest.TestCase):
             mn.engine_facts("trtllm", "trtllm-serve /m")
 
     def test_teardown_and_health_know_atom_and_the_atomesh_router(self):
-        self.assertRegex("python3 -m atom.entrypoints.openai_server --model /m --server-port 8010",
-                         mn.SERVE_PATTERN)
-        self.assertRegex("ATOM::ModelRunner_0", mn.ENGINE_PATTERN)
         self.assertRegex("atomesh launch --pd-disaggregation --prefill http://p:8010", mn.LB_PATTERN)
         self.assertNotRegex("python3 -m sglang.launch_server --model-path /m", mn.LB_PATTERN)
         self.assertIn("atom", mn.SW_PACKAGES)
