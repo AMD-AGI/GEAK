@@ -47,6 +47,7 @@ Search tags describe mechanisms, not priorities. Cases hold outcomes and conditi
 | muse-spark | measurement/workload identity | public/source | [benchmark reset](cases/muse-spark/benchmark-reset.md) |
 | muse-spark | memory/cache capacity | public/source | [cache regime](cases/muse-spark/cache-regime.md) |
 | muse-spark | persistent chains/fusion/memory | local GPU pair | [muse-1027-mono-single-pair-20261113](cases/muse-spark/gpu-muse-1027-mono-single-pair-20261113.md) |
+| muse-spark | source backport, tail-latency cohort, dispatch width | local GPU comparisons | [day-zero source ports](cases/muse-spark/day0-source-ports.md) |
 | muse-spark | persistent chains, active batch/admission, draft coverage, KV capacity | public/source + local GPU comparisons | [large fusion memory](cases/muse-spark/large-fusion-memory.md) |
 | muse-spark | serving/output granularity | public/source | [communication granularity](cases/muse-spark/communication-granularity.md) |
 

@@ -11,9 +11,15 @@ same external workload, resources and metric definitions. Pin its date and reuse
 the target or operating conditions change. Differences in engine, parallel layout or
 scheduling are hypotheses for the observed gap.
 
+When improving a supplied image, pin it as the candidate's base. Trace a later
+release to the changed call sites, activation conditions and dependencies. Port a
+measurable change onto the supplied stack and compare it there. Keep the published
+release score as a reference for the remaining gap.
+
 Retrieve by the cause of cost. Match the hardware, layout and operator semantics.
-Use actual shapes and phases to estimate how often the mechanism can run. Where
-outcomes differ, use a losing case to identify a transfer condition. An unavailable
+Estimate coverage in the requests and phases that drive each objective. A common
+batch shape can be rare among slow requests. Where outcomes differ, use a losing
+case to identify a transfer condition. An unavailable
 implementation can still suggest a compatible probe or a scoped port.
 
 Combine current Profile hotspots with relevant mechanisms, retaining hotspots without a
@@ -37,5 +43,6 @@ and protocol identities; native validation remains with its owner.
 Keep meaningful new observations with their campaign. Add a source-linked case or evidence
 version when reusable: **conditions → mechanism → observed result/cost → limits → next
 discriminator**. Preserve failures, negative results and unknowns. [Raw](raw/README.md)
-collections remain unchanged; revise derived notes instead. Compare planning policies
-under the same starting state and resource budget before claiming better performance.
+collections remain unchanged; revise derived notes instead. Compare planners from
+the same starting artifact, permitted knowledge and budget. Track time to a verified
+serving gain alongside the final result.

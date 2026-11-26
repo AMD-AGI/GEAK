@@ -10,7 +10,8 @@ parent identity, native launch/build path and permitted resources named in the p
 Keep the accepted system and its recovery artifacts intact. Apply source, build or
 configuration changes to a separate runtime; use the selected engine's own mechanisms.
 
-Record the actual image/build, effective settings and changed code paths. Exercise the
+For a derived image, retain its base digest, build inputs and resulting image identity.
+Record the effective settings and changed code paths of the actual runtime. Exercise the
 relevant serving paths before measured traffic; requested flags or a coordinator import
 alone do not prove that workers used the change. Retain the native proof and define its
 required values for Evaluate's `native_validation` when that format supports them.
