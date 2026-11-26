@@ -7,7 +7,7 @@ is not Instinct CDNA. Do **not** apply
 `amd_instinct.md` §2–3 (wave64, MFMA tiles, FNUZ/MX, 512-VGPR combined formula) to this box.
 
 Numeric occupancy / LDS constants below are copied from the Gluon skill
-`perf_knowledge/expert_skills/skills/gluon_authoring/references/hardware/hw_constants.json`
+`perf_knowledge/hardware/data/hw_constants.json`
 (`gfx1201`). Peak TFLOPS and memory bandwidth for roofline math come from the public
 R9700 datasheet in `e2e_workflow/knowledge/analysis_skills/roofline/peaks.md`.
 
@@ -67,7 +67,7 @@ products remain `unknown-device-not-r9700`.
 
 Regenerated on 2026-09-21 with AMD clang 23.0.0git from the pinned ROCm 10
 R9700 image using
-`perf_knowledge/expert_skills/skills/gluon_authoring/scripts/amd_occupancy.py
+`kernel_workflow/scripts/kernel_tools/amd_occupancy.py
 --compiler-sweep --arch gfx1201`. The breakpoints matched the prior LLVM 22
 sweep.
 
@@ -85,7 +85,7 @@ sweep.
 | 256        | 5              |
 
 Re-derive on a new ROCm with
-`perf_knowledge/expert_skills/skills/gluon_authoring/scripts/amd_occupancy.py
+`kernel_workflow/scripts/kernel_tools/amd_occupancy.py
 --compiler-sweep --arch gfx1201`.
 Dividing 256 by a kernel's VGPR count (the old CDNA-style file budget) **under-reports** RDNA
 occupancy 2–3×.

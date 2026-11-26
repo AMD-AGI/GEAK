@@ -381,7 +381,7 @@ skills:
 - id: gluon_authoring
   file: skills/gluon_authoring/skill.md
   scope: kernel
-  revision: ''
+  revision: '2026-11-26'
   playbook_file: skills/gluon_authoring/skill.md
   planner_extension_file: ''
   contract_file: ''
@@ -394,13 +394,10 @@ skills:
     arch_class:
     - '*'
     gens:
-    - gfx942
     - gfx950
+    - gfx942
     dtypes:
-    - bf16
-    - fp16
-    - fp8_e4m3_fnuz
-    - fp8_e4m3
+    - '*'
     regimes:
     - '*'
     from_backend:

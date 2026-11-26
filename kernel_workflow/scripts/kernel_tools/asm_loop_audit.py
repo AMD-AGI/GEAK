@@ -1,0 +1,1002 @@
+#!/usr/bin/env python3
+"""Hot-loop schedule audit for AMDGCN (.s / .amdgcn from dump_ir.sh, or llvm-objdump -d). No GPU.
+
+Prints signals, not a verdict: the hot loop's op-class stream and histogram (MFMA/WMMA, LDS,
+global, scratch spill traffic, VALU, scalar, waits, barriers), the per-mnemonic histogram, memory
+waits split into relaxed (every counter > 0) and full drains (some counter == 0, counted per
+counter), barriers per iteration, MFMA<->VALU interleave, s_nop encodings, and the register / LDS
+occupancy limiters. Line numbers are file line numbers.
+
+  python3 asm_loop_audit.py <file.s> --arch gfx950 [--meta <ir dir>] [--kernel NAME]
+                            [--loop-label .LBB0_5] [--diff <previous audit.txt>]
+
+The loop is picked innermost-first, then most matrix instructions, then shortest body; pass
+--loop-label for an objdump of a whole prebuilt function. With no back-edge the whole kernel body
+is audited and labelled as a per-thread total.
+"""
+
+# Design notes (moved out of --help):
+# * Two wait spellings: gfx9 `s_waitcnt vmcnt(N) lgkmcnt(M)` (counter named, value in parens) and
+#   gfx11/12 `s_wait_dscnt 0x1` (counter in the mnemonic). `s_wait_alu` / `s_delay_alu` are
+#   register-dependency waits and stay out of the drain ratio.
+# * A wait with ANY counter at 0 fully drains that counter (`vmcnt(7) lgkmcnt(0)` drains all LDS
+#   ops), so it is a full drain even when another counter stays pipelined.
+# * scratch_load/store in the loop is spill traffic; it is its own class, not global memory.
+# * The structural-vs-schedulable judgement needs dependency context and stays with the reader.
+from __future__ import annotations
+
+import argparse
+import importlib
+import json
+import os
+import re
+import sys
+from collections import Counter
+from pathlib import Path
+
+
+def _load_amd_occupancy():
+    """The occupancy model is a vendor/amd shared helper: a sibling in every composed pack,
+    one layer up in the source tree. Returns None only when neither is reachable."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    d = here
+    for _ in range(7):
+        try:
+            return importlib.import_module("amd_occupancy")
+        except ImportError:
+            pass
+        d = os.path.dirname(d)
+        cand = os.path.join(d, "vendor", "amd", "scripts")
+        if os.path.isfile(os.path.join(cand, "amd_occupancy.py")):
+            sys.path.insert(0, cand)
+    return None
+
+
+_OCC = _load_amd_occupancy()
+
+# Op-class -> single-char symbol. Order matters: first match wins.
+# (regex on the mnemonic = first whitespace-delimited token of the instruction)
+# Matrix engines: CDNA MFMA (v_mfma / v_smfmac) AND RDNA WMMA (v_wmma) are both
+# classified as "mfma" — the audit's bound-class logic treats any matrix-multiply
+# instruction the same way. RDNA3/4 (gfx11*/gfx120*) use v_wmma_* exclusively.
+_CLASSES = [
+    ("mfma",      "M", re.compile(r"^v_mfma|^v_smfmac|^v_wmma")),
+    ("exp",       "e", re.compile(r"^v_(exp|log|rcp|rsq|sqrt|sin|cos)")),
+    # scratch_* in a hot loop is register spill traffic: its own class, not global memory.
+    ("scratch",   "x", re.compile(r"^scratch_(load|store)")),
+    ("atomic",    "A", re.compile(r"^(global|buffer|flat|ds|scratch)_atomic")),
+    ("lds_read",  "R", re.compile(r"^ds_read|^ds_load")),
+    ("lds_write", "W", re.compile(r"^ds_write|^ds_store")),
+    ("gld",       "g", re.compile(r"^(global|buffer|flat)_load")),
+    ("gst",       "G", re.compile(r"^(global|buffer|flat)_store")),
+    # ALU-dependency waits must be split OUT of the memory-wait class: s_wait_alu depctr_*
+    # (gfx11/12) and s_delay_alu (gfx11) resolve a register hazard, not an outstanding
+    # memory op, so folding them into the waitcnt bucket inflates the "full drain" ratio.
+    ("aluwait",   "d", re.compile(r"^s_wait_alu|^s_delay_alu")),
+    ("waitcnt",   "~", re.compile(r"^s_waitcnt|^s_wait_")),
+    ("barrier",   "|", re.compile(r"^s_barrier|^buffer_wbinvl|^s_barrier_")),
+    ("nop",       "n", re.compile(r"^s_nop")),
+    ("valu",      "v", re.compile(r"^v_")),
+    ("scalar",    "s", re.compile(r"^s_")),
+]
+_SYMBOL = {name: sym for name, sym, _ in _CLASSES}
+
+# label line. Two emitters:
+#   (a) assembler .s / .amdgcn:   "label:" (tolerate a trailing "; in Loop: ..." comment)
+#   (b) llvm-objdump -d of a .hsaco/.co: "<hexaddr> <label>:"  (the prebuilt-comparator form)
+_LABEL_RE = re.compile(
+    r"^\s*(?:[0-9a-fA-F]+\s+)?<(?P<obj>[\w.$@]+)>:\s*$"      # (b) objdump  <name>:
+    r"|^\s*(?P<asm>\.?\w[\w.$@]*):\s*(?:;.*)?$"               # (a) plain    name:
+)
+_BRANCH_RE = re.compile(r"^\s*s_(cbranch\w*|branch|cbranch)\s+(\.?\w[\w.$@]*)")
+# TWO wait spellings. Matching only the first is why every RDNA kernel used to report
+# "100% full drains": its relaxed waits fell through to the bare-waitcnt branch.
+#   gfx9      s_waitcnt vmcnt(0) lgkmcnt(1)   -- counter NAMED, value in parens
+#   gfx11/12  s_wait_dscnt 0x1                -- counter in the MNEMONIC, value an immediate
+#             s_wait_loadcnt_dscnt 0x0        -- fused, one immediate for the pair
+#             s_waitcnt_vscnt null, 0x0       -- gfx10 store-counter spelling
+_CNT_RE = re.compile(r"(\w*cnt)\s*\(\s*(\d+)\s*\)")
+# The counter group excludes `_` on purpose: `_` is the SEPARATOR between fused counters, so letting
+# the inner class match it too makes every separator ambiguous and the match exponential in the number
+# of `cnt_` repetitions (CodeQL: inefficient regular expression). Counter names are pure letters.
+_WAIT_IMM_RE = re.compile(
+    r"^s_wait(?:cnt)?_([a-z]*cnt(?:_[a-z]*cnt)*)\s+(?:null\s*,\s*)?"
+    r"(?:0[xX]([0-9a-fA-F]+)|(\d+))\s*$")
+
+
+def classify_wait(text: str):
+    """(kind, [(counter, value), ...]) for one wait instruction.
+
+    kind: 'drain' (at least one named counter is 0 -- that counter is fully drained, e.g.
+    `vmcnt(7) lgkmcnt(0)` drains every outstanding LDS op), 'relaxed' (every counter > 0 --
+    pipelined), 'alu' (register-dependency wait, not a memory drain), 'unknown' (a wait
+    whose form this parser does not recognise; callers count it as a drain, conservatively,
+    and it should be reported so the gap is visible instead of silently biasing the ratio).
+    """
+    s = re.split(r";|//", text, 1)[0].strip()
+    if not s:
+        return "unknown", []
+    mn = s.split()[0]
+    if mn.startswith(("s_wait_alu", "s_delay_alu")):
+        return "alu", [(mn, -1)]
+    cnts = [(k, int(v)) for k, v in _CNT_RE.findall(s)]           # gfx9 form
+    if not cnts:
+        m = _WAIT_IMM_RE.match(s)                                  # gfx11/12 form
+        if m:
+            val = int(m.group(2), 16) if m.group(2) else int(m.group(3))
+            cnts = [(m.group(1), val)]
+    if not cnts:
+        return "unknown", []
+    return ("drain" if any(v == 0 for _, v in cnts) else "relaxed"), cnts
+
+
+def _mnemonic(line: str) -> str | None:
+    """First token of a real instruction line, else None (label/directive/comment)."""
+    s = line.strip()
+    if not s or s.startswith((";", "//", "#", ".")) or s.endswith(":"):
+        return None
+    return s.split()[0]
+
+
+# Kernel-descriptor / metadata register budget. Two emitters (both may appear in one .s):
+#   (a) .amdhsa_kernel directive block: `.amdhsa_next_free_vgpr 244` / `.amdhsa_accum_offset 128`
+#       / `.amdhsa_next_free_sgpr 96`  (LLVM AMDGPU, all gfx9/10/11/12 -- arch-agnostic).
+#   (b) .amdgpu_metadata YAML tail:     `.vgpr_count: 244` / `.sgpr_count: 96` / `.agpr_count: 0`.
+# next_free_vgpr = ArchVGPR + AGPR combined budget on CDNA (the KD occupancy basis amd_occupancy.py uses).
+# A module may hold SEVERAL kernels. `.type <name>,@function` opens each one; an objdump-style
+# disasm has no `.type`, so `.amdhsa_kernel <name>` is the fallback anchor. The `.amdgpu_metadata`
+# YAML tail repeats every name and is NOT an anchor -- it would invent a second span per kernel.
+from amd_artifacts import kernels_in_asm, select_kernel
+
+
+def _is_cdna_family(arch) -> bool:
+    """True when `arch` is CDNA-lineage, i.e. its ArchVGPR and AGPR files are combined.
+
+    This was `_OCC.family_for(arch) == "cdna"` inline, which filed gfx1250 -- family "cdna5" --
+    under the no-AGPR branch: an equality test against ONE member of a family whose vocabulary
+    has more than one CDNA entry. Lifted out of the printer so the rule itself is assertable;
+    while it was an inline expression the only thing that could have caught it was a human
+    reading the label on a dump from a part nobody here had run.
+
+    Unknown/absent arch answers True, matching the prior behaviour: the label is cosmetic and
+    the CDNA form is the more informative of the two. Nothing numeric hangs off it.
+    """
+    if not _OCC or not arch:
+        return True
+    fam = _OCC.family_for(arch)
+    if not fam:
+        return True   # unclassifiable: keep the prior default rather than invent a family
+    return fam.startswith("cdna")
+
+
+def kd_regs(lines: list[str]) -> dict:
+    """Scan the WHOLE file (not just the loop) for the kernel-descriptor register budget.
+    Directive block wins over metadata YAML when both are present. Returns {} if neither seen
+    (e.g. an llvm-objdump disasm with no KD) -- callers treat that as 'vgpr unavailable', never
+    fabricate. On multiple kernels in one file, reports the MAX (worst-case occupancy driver)."""
+    from amd_resources import analyze
+    r = analyze('\n'.join(lines))
+    return {name: value for name, value in {'vgpr': r['vgpr_combined'],
+            'sgpr': r['sgpr'], 'accum_vgpr': r['agpr']}.items() if value is not None}
+
+
+def print_kd_regs(lines: list[str], arch: str | None = None) -> None:
+    """Register budget + waves/SIMD. The occupancy answer is ARCH-SPECIFIC (CDNA divides a
+    512-entry combined file, RDNA a 1536-entry one with a 256/wave cap), and LLVM already
+    computed it for this exact subtarget when the dump carries `; Occupancy:` -- prefer that
+    over any model here.
+
+    `arch` is a MODULE-level fact (`.amdgcn_target` sits above the first kernel), so when the
+    caller has narrowed `lines` to one kernel it must pass the arch it read from the whole
+    file -- otherwise narrowing the audit silently costs the occupancy verdict."""
+    kd = kd_regs(lines)
+    text = "\n".join(lines)
+    if arch is None and _OCC:
+        arch = _OCC.arch_from_asm(text)
+    print("kernel-descriptor register budget (occupancy driver):")
+    if not kd:
+        print("  (no .amdhsa_next_free_vgpr / .vgpr_count found -- KD absent in this dump; "
+              "vgpr UNAVAILABLE, do not guess. Dump a full .s with the KD block, or read the "
+              "profiler VGPR_Count.)")
+        print()
+        return
+    v = kd.get("vgpr")
+    is_cdna = _is_cdna_family(arch)
+    if v is not None:
+        combined = "  (ArchVGPR+AGPR combined, CDNA)" if is_cdna else \
+                   "  (no AGPR file on this arch)"
+        print(f"  next_free_vgpr = {v}{combined}")
+        if _OCC is None:
+            print("    waves/SIMD UNAVAILABLE -- amd_occupancy.py not importable; read LLVM's "
+                  "`; Occupancy:` from the .s")
+        else:
+            from amd_resources import analyze
+            resources = analyze(text, arch=arch)
+            waves = resources['waves_by_vgpr_term']
+            if waves is None:
+                print(f"    -> waves/SIMD UNAVAILABLE: {resources['waves_warning']}")
+            else:
+                print(f"    -> waves/SIMD by VGPR = {waves} [{resources['waves_source']}; register bound]")
+    if kd.get("accum_vgpr") is not None:
+        print(f"  accum_vgpr     = {kd['accum_vgpr']}")
+    if kd.get("sgpr") is not None:
+        print(f"  next_free_sgpr = {kd['sgpr']}")
+    priv = re.search(r"^\s*\.amdhsa_private_segment_fixed_size\s+(\d+)", text, re.MULTILINE) or \
+        re.search(r"^\s*(?:-\s*)?\.private_segment_fixed_size:\s*(\d+)", text, re.MULTILINE)
+    spills = re.search(r"^\s*(?:-\s*)?\.vgpr_spill_count:\s*(\d+)", text, re.MULTILINE)
+    if priv:
+        print(f"  private_segment_fixed_size = {priv.group(1)} B (scratch per work-item"
+              + (f"; .vgpr_spill_count {spills.group(1)}" if spills else "") + ")")
+    print(f"  (arch detected: {arch or 'UNKNOWN -- no .amdgcn_target in this dump'}; register "
+          f"file geometry differs per arch -- use hotspot_analyzer.py for the full per-arch "
+          f"limiter table.)")
+    print()
+
+
+def lds_from_meta(meta_path: str) -> list[tuple[str, int]]:
+    """LDS bytes/workgroup from the Triton cache METADATA (`shared`) -- the only correct source.
+
+    Why not the two obvious places: Triton sizes shared memory DYNAMICALLY at launch
+    (`@global_smem = external ... addrspace(3) global [0 x i8]`), so the kernel descriptor's
+    `.amdhsa_group_segment_fixed_size` is STRUCTURALLY 0 for every Triton kernel, and
+    rocprof-compute's `7.1.8 LDS Allocation` inherits the same 0 -- while block 2.1.17 of the
+    SAME report can show real LDS bandwidth. An LDS-staging kernel therefore reads as ZERO LDS
+    everywhere except here.
+
+    `meta_path` is a metadata .json or a directory to scan. `__grp__*.json` (launcher group
+    metadata) carries no `shared` and is skipped. Returns [(kernel_name, bytes), ...].
+    """
+    cands: list[str] = []
+    if os.path.isdir(meta_path):
+        for root, _dirs, files in os.walk(meta_path):
+            cands += [os.path.join(root, f) for f in files
+                      if f.endswith(".json") and not os.path.basename(f).startswith("__grp__")]
+    elif os.path.exists(meta_path):
+        cands = [meta_path]
+    out: list[tuple[str, int]] = []
+    for p in sorted(cands):
+        try:
+            d = json.loads(Path(p).read_text())
+        except (OSError, ValueError):
+            continue
+        if (isinstance(d, dict) and type(d.get("shared")) is int and d["shared"] >= 0
+                and isinstance(d.get("name"), str) and d["name"]):
+            out.append((d["name"], d["shared"]))
+    return out
+
+
+# LDS/CU comes from the shared vendor/amd occupancy model (per-arch there, because
+# gfx94*/gfx95* share the register family but not the LDS: 64 KiB vs 160 KiB).
+def lds_per_cu(arch) -> int | None:
+    """LDS bytes per CU for `arch`, or None when no figure is available.
+
+    None is a real answer, and there is deliberately NO numeric default. The tempting default
+    is 65536, and it is the worst available one precisely because it is *correct* for gfx942:
+    a wrong application of it never looks wrong on inspection, it just emits a plausible number
+    instead of an error, and on a 160 KiB part it understates the LDS limiter by 2.5x. A
+    confident wrong occupancy verdict is worse than a withheld one.
+    """
+    if not arch:
+        return None
+    if _OCC is not None and hasattr(_OCC, "lds_per_cu"):
+        return _OCC.lds_per_cu(arch)
+    return None
+
+
+def print_lds_budget(meta_path: str | None, cap: int | None,
+                     cap_src: str | None = None, kernel: str | None = None, records=None) -> None:
+    """LDS/WG -> WGs/CU. A SECOND occupancy limiter, independent of the register one: a kernel
+    can be capped by both at once, and relieving only one buys nothing.
+
+    `cap` is the LDS bytes/CU divisor, or None when it is not established. With None the
+    bytes/WG (a measured fact) are still printed and the WGs/CU verdict (a derived one) is
+    WITHHELD -- see `lds_per_cu` for why no default is offered.
+
+    `kernel` is the name the rest of the report is about. It is load-bearing: the metadata
+    directory holds an entry per kernel, and picking the largest here while the schedule audit
+    reads a different one is how a report ends up describing two kernels at once under one
+    name. With a kernel named, only its entry is used; a mismatch is reported, never silently
+    resolved."""
+    print("LDS budget per workgroup (the SECOND occupancy limiter):")
+    kernels = records if records is not None else lds_from_meta(meta_path) if meta_path else []
+    if not kernels:
+        print("  UNAVAILABLE -- pass --meta <ir-dir | kernel.json> (Triton cache metadata).")
+        print("  Do NOT substitute the KD's group_segment_fixed_size or rocprof-compute 7.1.8: "
+              "both are")
+        print("  structurally 0 for Triton kernels and will read as 'this kernel uses no LDS'.")
+        print()
+        return
+    if not kernel:
+        print("  UNAVAILABLE -- no observable kernel identity; launch metadata is withheld.\n")
+        return
+    if kernel:
+        hit = [kv for kv in kernels if kv[0] == kernel]
+        if len(hit) == 1:
+            kernels = hit
+        elif not hit:
+            print(f"  UNAVAILABLE for {kernel} -- the metadata here names "
+                  f"{', '.join(n for n, _ in kernels[:4])}"
+                  + (" ..." if len(kernels) > 4 else "") + ".")
+            print("  Point --meta at the metadata for the kernel being audited; the LDS term is")
+            print("  WITHHELD rather than taken from another kernel in the same directory.")
+            print()
+            return
+        else:
+            print(f"  UNAVAILABLE -- {len(hit)} metadata entries match {kernel!r}; cannot tell "
+                  f"which is this kernel's.")
+            print()
+            return
+    name, shared = kernels[0]
+    if not shared:
+        print(f"  lds_bytes_per_wg = 0  ({name})  -> no LDS staging in this kernel")
+    elif cap:
+        alloc = _OCC.round_up_lds(shared, cap_src) if (_OCC and cap_src and cap_src.startswith("gfx")) else shared
+        print(f"  lds_bytes_per_wg = {shared}  ({name})  -> WGs/CU by LDS <= {cap // alloc}"
+              f"  ({cap}/{alloc}, {cap_src}{', allocation granule applied' if alloc != shared else ''})")
+    else:
+        print(f"  lds_bytes_per_wg = {shared}  ({name})  -> WGs/CU by LDS = WITHHELD")
+        print("  The divisor is per-arch and is not established here: LDS/CU is 64 KiB on "
+              "gfx94* and")
+        print("  160 KiB on gfx95*, a 2.5x spread, so a guess moves the limiter by 2.5x while "
+              "still")
+        print("  printing a plausible number. Pass --arch <gfx target>, or --lds-per-cu "
+              "<bytes> read")
+        print("  off the part (`rocminfo` -> Segment: GROUP, Size).")
+    for n, s in sorted(kernels, key=lambda kv: -kv[1])[1:]:
+        print(f"    (also: {n} = {s} B)")
+    print("  (source: Triton cache metadata `shared`; LDS/CU is per-arch, NOT a family "
+          "constant.)")
+    print()
+
+
+def classify(mnemonic: str) -> tuple[str, str]:
+    for name, sym, rx in _CLASSES:
+        if rx.match(mnemonic):
+            return name, sym
+    return "other", "."
+
+
+def find_loops(lines: list[str]) -> list[tuple[str, int, int]]:
+    """Return (label, body_start_idx, branch_idx) for every back-edge loop.
+
+    A back-edge = a branch whose target label appears at an EARLIER line.
+    """
+    label_line: dict[str, int] = {}
+    for i, ln in enumerate(lines):
+        m = _LABEL_RE.match(ln)
+        if m:
+            name = m.group("obj") or m.group("asm")
+            label_line.setdefault(name, i)
+    loops = []
+    for i, ln in enumerate(lines):
+        m = _BRANCH_RE.match(ln)
+        if not m:
+            continue
+        target = m.group(2)
+        ti = label_line.get(target)
+        if ti is not None and ti < i:
+            loops.append((target, ti + 1, i))
+    return loops
+
+
+def kernel_body_span(lines: list[str]) -> tuple[str, int, int] | None:
+    """The instruction span of the LARGEST kernel body in the file: (name, start, end).
+
+    Why this exists. The schedule audit keys on a back-edge, and a kernel with no back-edge used to
+    end the static layer right there -- register budget printed, no op mix. That is fine for a GEMM
+    (which always has a K loop) and wrong for the kernels raw C++ is most often used to write: an
+    elementwise map, a fused epilogue, a fully-unrolled tile. Those have exactly one basic block,
+    and their op mix is the whole point ("is the load 2 bytes or 16?"), so going blind there loses
+    the evidence the memory lever is chosen on.
+
+    The span runs from the kernel's own label to its `s_endpgm`. Directives before the label
+    (`.amdhsa_*`, `.globl`) are excluded so the histogram counts instructions only."""
+    ends = [i for i, ln in enumerate(lines) if _mnemonic(ln) == "s_endpgm"]
+    if not ends:
+        return None
+    best = None
+    for end in ends:
+        # walk back to the nearest preceding label that is not a local branch target: the kernel
+        # symbol. Fall back to the first instruction after the previous s_endpgm.
+        start, name = None, None
+        for i in range(end - 1, -1, -1):
+            m = _LABEL_RE.match(lines[i])
+            if not m:
+                continue
+            lab = m.group("obj") or m.group("asm")
+            if lab.startswith((".LBB", ".Lfunc")):
+                continue          # a basic-block label, not the kernel entry
+            start, name = i + 1, lab
+            break
+        if start is None:
+            continue
+        span = end - start
+        if best is None or span > best[2] - best[1]:
+            best = (name, start, end)
+    return best
+
+
+def _count_mfma(lines: list[str], start: int, end: int) -> int:
+    """Count matrix-multiply instructions (MFMA on CDNA, WMMA on RDNA) in [start,end).
+    Used by pick_loop to score the hottest back-edge loop."""
+    n = 0
+    for ln in lines[start:end]:
+        mn = _mnemonic(ln)
+        if mn and classify(mn)[0] == "mfma":
+            n += 1
+    return n
+
+
+def _encloses(outer, inner) -> bool:
+    """True if loop `outer` strictly contains loop `inner` (its body range is a superset and they are
+    not the same loop). Ranges are [start, end)."""
+    _, os_, oe = outer
+    _, is_, ie = inner
+    return os_ <= is_ and ie <= oe and (os_, oe) != (is_, ie)
+
+
+def pick_loop(lines: list[str], loops, forced_label: str | None):
+    if forced_label:
+        for lab, s, e in loops:
+            if lab == forced_label:
+                return lab, s, e
+        sys.exit(f"loop label {forced_label!r} not found among back-edges: "
+                 f"{[l[0] for l in loops]}")
+    if not loops:
+        return None
+    # Prefer the INNERMOST hot loop. An enclosing loop contains ALL of an inner loop's MFMA, so it
+    # ties on the MFMA score and (with a longest-body tie-break) would win -- folding the kernel
+    # EPILOGUE between the inner exit and the outer back-edge into the per-opcode histogram, so a
+    # once-per-workgroup store/cast burst reads as a large fraction of the "hot loop" and misdirects
+    # the lever choice. So:
+    #   1) restrict to innermost loops (those enclosing no other back-edge) when any exist;
+    #   2) among candidates, most MFMA;
+    #   3) tie-break on SHORTEST body (the tight hot loop, not the enclosing scope).
+    innermost = [lp for lp in loops if not any(_encloses(lp, other) for other in loops)]
+    candidates = innermost or loops
+    scored = [((_count_mfma(lines, s, e), -(e - s)), (lab, s, e)) for lab, s, e in candidates]
+    scored.sort(reverse=True)
+    return scored[0][1]
+
+
+_OPC_ROW = re.compile(r"^\s{4}(\w+)\s+(\d+)\s+\(\s*([\d.]+)%\)")
+
+
+def parse_opcodes(path: str) -> dict[str, int]:
+    """Read the per-opcode section back out of a previous run's stdout, for --diff.
+    Round-over-round movement is the point: a lever that was supposed to delete a mnemonic
+    family and did not is a failed edit, visible here one round earlier than in the timing."""
+    out: dict[str, int] = {}
+    inside = False
+    try:
+        txt = Path(path).read_text(errors="ignore")
+    except OSError:
+        return out
+    for ln in txt.splitlines():
+        if ln.startswith("per-opcode histogram"):
+            inside = True
+            continue
+        if inside:
+            m = _OPC_ROW.match(ln)
+            if m:
+                out[m.group(1)] = int(m.group(2))
+            elif ln.strip() and not ln.startswith(" "):
+                break
+    return out
+
+
+_CLS_ROW = re.compile(r"^\s{2}\S\s(\w+)\s+(\d+)\s+\(")
+_DRAIN_ROW = re.compile(r"->\s*(\d+)% of memory waits are full drains")
+
+
+def parse_prev(path: str) -> dict:
+    """Op-class histogram and drain share of a previous run's stdout, for --diff."""
+    out: dict = {"classes": {}, "drain_pct": None}
+    try:
+        txt = Path(path).read_text(errors="ignore")
+    except OSError:
+        return out
+    inside = False
+    for ln in txt.splitlines():
+        if ln.startswith("histogram:"):
+            inside = True
+            continue
+        if inside:
+            m = _CLS_ROW.match(ln)
+            if m:
+                out["classes"][m.group(1)] = int(m.group(2))
+            elif not ln.strip():
+                inside = False
+        m = _DRAIN_ROW.search(ln)
+        if m:
+            out["drain_pct"] = float(m.group(1))
+    return out
+
+
+def print_opcodes(opc: Counter, total: int, top: int, prev: dict[str, int] | None,
+                  region: str = "hot loop") -> None:
+    """Per-MNEMONIC histogram. The op-CLASS histogram above is one level too coarse to act on:
+    a software dtype-conversion sequence, an address-arithmetic chain and a layout permute all
+    land in 'valu' and have opposite fixes. This is the granularity a lever is chosen at."""
+    if top <= 0 or not opc:
+        return
+    print(f"per-opcode histogram ({region}, top {top} of {len(opc)} distinct mnemonics):")
+    for mn, n in opc.most_common(top):
+        pct = 100.0 * n / total if total else 0.0
+        d = ""
+        if prev is not None:
+            was = prev.get(mn, 0)
+            if n != was:
+                d = f"   {n - was:+d} vs prev"
+            elif mn in prev:
+                d = "    = prev"
+        print(f"    {mn:<26} {n:>5}  ({pct:4.1f}%){d}")
+    if prev:
+        gone = [m for m in prev if m not in opc]
+        if gone:
+            print(f"    (eliminated since prev: {', '.join(sorted(gone)[:8])}"
+                  f"{' ...' if len(gone) > 8 else ''})")
+    print("  (a family >10% of the loop that you cannot name the source construct for is the "
+          "lever\n   to look for; op-class % cannot show you which one it is.)")
+    print()
+
+
+def audit(lines: list[str], start: int, end: int, max_stream: int,
+          top_opcodes: int = 12, prev_opcodes: dict[str, int] | None = None,
+          line_offset: int = 0, prev: dict | None = None, region: str = "hot loop") -> None:
+    """`region` names the audited span in the output: "hot loop" for a back-edge loop, "kernel body"
+    when the kernel has none (a per-thread total, not a per-iteration cost)."""
+    hist: Counter = Counter()
+    opc: Counter = Counter()
+    stream: list[str] = []
+    relaxed = full_drain = unknown_wait = alu_waits = barriers = 0
+    nops = nop_immediate_sum = 0
+    nop_immediates: Counter = Counter()
+    waitcnt_detail: Counter = Counter()
+    drain_detail: Counter = Counter()
+    alu_detail: Counter = Counter()
+    for ln in lines[start:end]:
+        mn = _mnemonic(ln)
+        if mn is None:
+            continue
+        name, sym = classify(mn)
+        hist[name] += 1
+        opc[mn] += 1
+        stream.append(sym)
+        if name == "barrier":
+            barriers += 1
+        if name == "nop":
+            nops += 1
+            m = re.search(r"^s_nop\s+(?:0x([0-9a-fA-F]+)|(\d+))", ln.strip())
+            if m:
+                immediate = int(m.group(1), 16) if m.group(1) else int(m.group(2))
+                nop_immediate_sum += immediate
+                nop_immediates[immediate] += 1
+        if name == "aluwait":
+            alu_waits += 1
+            alu_detail[re.split(r";|//", ln, 1)[0].strip()] += 1
+        if name == "waitcnt":
+            kind, cnts = classify_wait(ln)
+            if kind == "drain":
+                full_drain += 1
+                for k, v in cnts:
+                    if v == 0:
+                        drain_detail[f"{k}(0)"] += 1
+                    else:
+                        waitcnt_detail[f"{k}({v})"] += 1
+            elif kind == "relaxed":
+                relaxed += 1
+                for k, v in cnts:
+                    waitcnt_detail[f"{k}({v})"] += 1
+            else:
+                # a wait whose form this parser does not know -> counted as a drain
+                # (conservative) but reported, so a new spelling shows up as a parser gap
+                # instead of quietly inflating the drain ratio.
+                full_drain += 1
+                unknown_wait += 1
+
+    total = sum(hist.values())
+    # Pipeline/interleave signals over the MFMA-vs-VALU subsequence (computed on the
+    # correctly-scoped stream, not an external re-parse). "M" = matrix (mfma/wmma);
+    # "V" = VALU-family (valu + exp/transcendental). Transitions ~ how finely the two
+    # are interleaved; the longest V-only run is the largest exposed VALU stretch (no MFMA
+    # to hide it). NOTE: more transitions is NOT automatically faster -- read alongside
+    # per-unit busy (PMC) and the overhead classes (scalar/LDS-read/s_nop).
+    mv = ["M" if s == "M" else "V" for s in stream if s in ("M", "v", "e")]
+    mv_transitions = sum(1 for i in range(1, len(mv)) if mv[i] != mv[i - 1])
+    longest_v_run = _cur = 0
+    for c in mv:
+        if c == "V":
+            _cur += 1
+            longest_v_run = max(longest_v_run, _cur)
+        else:
+            _cur = 0
+    n_mfma_in_mv = mv.count("M")
+    print(f"{region}: lines [{start + 1 + line_offset}, {end + 1 + line_offset}]  "
+          f"({total} instructions)  [file line numbers]\n")
+
+    print("op-class symbol stream "
+          "(M=mfma/wmma e=exp R=ldsRead W=ldsWrite g=gLoad G=gStore "
+          "v=valu s=scalar ~=memWait d=aluDepWait |=barrier n=nop .=other):")
+    s = "".join(stream)
+    if len(s) > max_stream:
+        s = s[:max_stream] + f" ... (+{len(stream) - max_stream} more)"
+    print("  " + s + "\n")
+
+    print("histogram:")
+    prev_cls = (prev or {}).get("classes")
+    for name, _sym, _rx in _CLASSES + [("other", ".", None)]:
+        was = prev_cls.get(name, 0) if prev_cls is not None else None
+        if hist.get(name) or was:
+            pct = 100.0 * hist[name] / total if total else 0.0
+            d = "" if was is None else (f"   {hist[name] - was:+d} vs prev" if hist[name] != was
+                                        else "    = prev")
+            print(f"  {_SYMBOL.get(name, '.'):>1} {name:<10} {hist[name]:>5}  ({pct:4.1f}%){d}")
+    if hist.get("scratch"):
+        print(f"  ({hist['scratch']} scratch_* op(s) in the {region}: register spill traffic -- see "
+              f"private_segment_fixed_size above)")
+    print()
+
+    print_opcodes(opc, total, top_opcodes, prev_opcodes, region)
+
+    wc_total = relaxed + full_drain
+    print("memory-wait quality (s_waitcnt / s_wait_*cnt):")
+    print(f"  relaxed (every counter > 0, pipelined) : {relaxed}")
+    print(f"  full-drain (some counter == 0)         : {full_drain}")
+    if drain_detail:
+        print("  full drains per counter: " + ", ".join(f"{k}={n}" for k, n in sorted(drain_detail.items())))
+    share = 100.0 * full_drain / wc_total if wc_total else None
+    if wc_total:
+        print(f"  -> {share:.0f}% of memory waits are full drains (at least one counter at 0)")
+    if prev and prev.get("drain_pct") is not None and share is not None:
+        print(f"  drain share {prev['drain_pct']:.0f}% -> {share:.0f}% vs prev")
+    if unknown_wait:
+        print(f"  ({unknown_wait} wait(s) in an unrecognised form counted as drains -- PARSER "
+              f"GAP, the ratio above is an upper bound; report the spelling)")
+    if waitcnt_detail:
+        top = ", ".join(f"{k}={n}" for k, n in waitcnt_detail.most_common(6))
+        print(f"  non-zero counts seen: {top}")
+    print(f"ALU-dependency waits (s_wait_alu / s_delay_alu): {alu_waits}")
+    if alu_detail:
+        top = ", ".join(f"{k}={n}" for k, n in alu_detail.most_common(4))
+        print(f"  {top}")
+    print("  (register-hazard waits, NOT memory drains -- excluded from the ratio above. Many "
+          "of them\n   means VALU/SALU dependency chains, which unroll or wider vectors hide, "
+          "not waitcnt relaxation.)")
+    print()
+
+    print(f"producer<->consumer barriers in {'loop body' if region == 'hot loop' else region}: {barriers}")
+    print()
+    print("MFMA<->VALU interleave (pipeline schedule quality):")
+    print(f"  MFMA<->VALU transitions: {mv_transitions}   (#MFMA in M/V stream: {n_mfma_in_mv})")
+    print(f"  longest VALU-only run (no interleaved MFMA): {longest_v_run}")
+    print("  (more transitions = finer interleave, but NOT automatically faster -- weigh")
+    print("   against per-unit busy (PMC) + overhead classes; a long VALU-only run is an")
+    print("   exposed stretch no MFMA hides; parse_pmc.py gives the counters.)")
+    print()
+    print("s_nop (static encoding observations):")
+    print(f"  count: {nops}   raw immediate sum: {nop_immediate_sum}")
+    if nop_immediates:
+        counts = ", ".join(f"{value}={count}" for value, count in sorted(nop_immediates.items()))
+        print(f"  raw immediate counts: {counts}")
+    if nops != sum(nop_immediates.values()):
+        print(f"  unparsed immediates: {nops - sum(nop_immediates.values())}")
+    print("  (raw immediates are not measured stall time; no architecture-specific duration")
+    print("   formula is applied. Static presence alone does not establish a cause or fix.)")
+    print()
+    print("VERDICT IS YOURS (signals only): inspect single-class runs and whether")
+    print("independent operations could be ready. For full drains, inspect outstanding")
+    print("dependencies; for barrier counts, inspect the synchronization protocol.")
+    print("Correlate these observations with runtime evidence before attributing a cause")
+    print("or choosing a change. Interpret s_nop with the target ISA and dependency context. See")
+    print("q.py \"asm loop audit s_waitcnt s_nop\" for the related cards.")
+
+
+def _selftest() -> int:
+    # Synthetic nested loop: an OUTER loop whose body contains an INNER loop plus an epilogue. The
+    # inner loop holds the MFMA; the epilogue holds a store-cast burst. The outer loop contains ALL
+    # the inner MFMA (ties on the MFMA score) and is LONGER -> the old (mfma, +len) tie-break picked
+    # it, folding the epilogue into the hot-loop histogram. pick_loop must now pick the INNER loop.
+    asm = [
+        "outer_head:",                 # 0  outer back-edge target
+        "    s_add_u32 s0, s0, 1",     # 1
+        "inner_head:",                 # 2  inner back-edge target
+        "    v_mfma_f32_16x16x16 a[0:3], v0, v1, a[0:3]",  # 3  MFMA (inner)
+        "    v_mfma_f32_16x16x16 a[0:3], v2, v3, a[0:3]",  # 4  MFMA (inner)
+        "    s_add_u32 s1, s1, 1",     # 5
+        "    s_cbranch_scc0 inner_head",  # 6  inner back-edge
+        "    v_cvt_f16_f32 v10, v10",  # 7  epilogue store-cast (once per outer iter, NOT hot)
+        "    v_cvt_f16_f32 v11, v11",  # 8
+        "    v_cvt_f16_f32 v12, v12",  # 9
+        "    v_cvt_f16_f32 v13, v13",  # 10
+        "    s_cbranch_scc0 outer_head",  # 11 outer back-edge
+    ]
+    loops = find_loops(asm)
+    labs = {l[0] for l in loops}
+    assert labs == {"outer_head", "inner_head"}, labs
+    lab, s, e = pick_loop(asm, loops, None)
+    assert lab == "inner_head", (f"innermost loop must win, got {lab}", loops)
+    # the picked body must NOT include the epilogue cvt burst (that was the bug)
+    assert not any("v_cvt" in asm[i] for i in range(s, e)), ("epilogue folded into hot loop", s, e)
+    # --loop-label override still forces the outer loop
+    lab2, _, _ = pick_loop(asm, loops, "outer_head")
+    assert lab2 == "outer_head", lab2
+    # a single flat loop still works
+    flat = ["h:", "    v_mfma_f32_16x16x16 a[0:3], v0, v1, a[0:3]", "    s_cbranch_scc0 h"]
+    fl = find_loops(flat)
+    assert pick_loop(flat, fl, None)[0] == "h", fl
+
+    # --- wait classification, both ISA spellings -------------------------------------
+    # gfx9: counter named, value in parens
+    assert classify_wait("s_waitcnt vmcnt(0) lgkmcnt(0)")[0] == "drain"
+    assert classify_wait("s_waitcnt vmcnt(0) lgkmcnt(3)")[0] == "drain"      # VMEM fully drained
+    assert classify_wait("s_waitcnt vmcnt(7) lgkmcnt(0)")[0] == "drain"      # LDS fully drained
+    assert classify_wait("s_waitcnt vmcnt(7) lgkmcnt(3)")[0] == "relaxed"
+    assert classify_wait("s_waitcnt_vscnt null, 0x0")[0] == "drain"
+    # gfx11/12: counter in the mnemonic, hex or decimal immediate
+    assert classify_wait("s_wait_dscnt 0x0")[0] == "drain"
+    assert classify_wait("s_wait_dscnt 0x1")[0] == "relaxed"
+    assert classify_wait("s_wait_loadcnt 0x7")[0] == "relaxed"
+    assert classify_wait("s_wait_loadcnt 7")[0] == "relaxed"
+    assert classify_wait("s_wait_kmcnt 0x0")[0] == "drain"
+    assert classify_wait("s_wait_loadcnt_dscnt 0x0")[0] == "drain"
+    assert classify_wait("s_wait_dscnt 0xb")[1] == [("dscnt", 11)], classify_wait("s_wait_dscnt 0xb")
+    # ALU-dependency waits are their OWN class, never a memory drain
+    assert classify_wait("s_wait_alu depctr_va_vcc(0)")[0] == "alu"
+    assert classify_wait("s_delay_alu instid0(VALU_DEP_1)")[0] == "alu"
+    assert classify("s_wait_alu")[0] == "aluwait" and classify("s_wait_dscnt")[0] == "waitcnt"
+
+    # --- hand-written gfx1201 fragment (synthetic: values chosen so the expected counts are
+    # obvious by inspection; nothing here is excerpted from a real kernel) ---------------
+    rdna = [
+        '\t.amdgcn_target "amdgcn-amd-amdhsa--gfx1201"',
+        "\t\t.amdhsa_wavefront_size32 1",
+        "\t\t.amdhsa_next_free_vgpr 168",
+        "rdna_loop:",
+        "    s_wait_dscnt 0x1",                     # relaxed
+        "    ds_read_b128 v[0:3], v20",
+        "    s_wait_dscnt 0x0",                     # drain
+        "    v_wmma_f32_16x16x16_f16 v[8:11], v[0:3], v[4:7], v[8:11]",
+        "    s_wait_alu depctr_va_vcc(0)",          # ALU dep, NOT a drain
+        "    s_wait_loadcnt 0x7",                   # relaxed
+        "    s_cbranch_scc0 rdna_loop",
+    ]
+    assert _OCC is not None, "amd_occupancy.py must be importable (sibling in a composed pack)"
+    assert _OCC.arch_from_asm("\n".join(rdna)) == "gfx1201"
+    # 168 VGPR on RDNA = 9 waves/SIMD; the old CDNA formula would have said 512/168 -> 3
+    assert _OCC.waves_by_vgpr(168, "gfx1201")[0] == 9
+    assert _OCC.waves_by_vgpr(168, "gfx942")[0] == 3
+    lab, s, e = pick_loop(rdna, find_loops(rdna), None)
+    assert lab == "rdna_loop", lab
+    kinds = Counter()
+    for ln in rdna[s:e]:
+        mn = _mnemonic(ln)
+        if mn and classify(mn)[0] in ("waitcnt", "aluwait"):
+            kinds[classify_wait(ln)[0]] += 1
+    assert kinds == Counter({"relaxed": 2, "drain": 1, "alu": 1}), kinds
+    # WMMA counts as a matrix op, same as MFMA
+    assert _count_mfma(rdna, s, e) == 1, _count_mfma(rdna, s, e)
+
+    # --- the LDS/CU divisor. Written so a WRONG value has to FAIL, which is stronger than
+    # agreeing with a right one: the constant this file used to default to (65536) is correct
+    # on gfx942, so any check that only looks at gfx942 passes under the bug. The inequality
+    # and the two None cases are what reject it.
+    assert lds_per_cu(None) is None, lds_per_cu(None)
+    assert lds_per_cu("") is None
+    # --- kernel selection: the audited object and the label must be the same thing -------
+    _two = ["\t.type\tk_main,@function", "k_main:", "\tv_mfma_f32_16x16x16f16 a[0:3], v0, v1, a[0:3]",
+            "\t.amdhsa_kernel k_main", "\t.amdhsa_next_free_vgpr 128", "\t.end_amdhsa_kernel",
+            "\t.type\tk_tail,@function", "k_tail:", "\tglobal_load_dwordx4 v[0:3], v[4:5], off",
+            "\t.amdhsa_kernel k_tail", "\t.amdhsa_next_free_vgpr 16", "\t.end_amdhsa_kernel",
+            ".amdgpu_metadata", "  - .name: k_main", "  - .name: k_tail"]
+    _ks = kernels_in_asm(_two)
+    assert [n for n, _, _ in _ks] == ["k_main", "k_tail"], _ks
+    # the metadata tail must not invent extra spans
+    assert len(_ks) == 2, _ks
+    # each span holds its OWN register budget -- the pre-fix whole-file scan maxed across both
+    assert kd_regs(_two[_ks[0][1]:_ks[0][2]])["vgpr"] == 128
+    assert kd_regs(_two[_ks[1][1]:_ks[1][2]])["vgpr"] == 16
+    try:
+        kd_regs(_two)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("multi-kernel resource analysis must refuse instead of mixing counts")
+    # a unique substring selects; the label comes from the same call that narrows the lines
+    _sel, _nm = select_kernel(_two, "tail")
+    assert _nm == "k_tail" and kd_regs(_sel)["vgpr"] == 16, (_nm, _sel)
+    # ambiguity and absence both REFUSE rather than pick
+    for _bad in (None, "k_"):
+        try:
+            select_kernel(_two, _bad)
+        except SystemExit as _e:
+            assert "k_main" in str(_e) and "k_tail" in str(_e), _e
+        else:
+            raise AssertionError(f"select_kernel({_bad!r}) should have refused")
+    # a single-kernel dump needs no selector and still yields its name
+    _one = _two[:6]
+    assert select_kernel(_one, None)[1] == "k_main"
+    # an unnamed excerpt is auditable but unlabelled -- not an error
+    assert select_kernel(["\tv_mfma_f32_16x16x16f16 a[0:3], v0, v1, a[0:3]"], None) == (
+        ["\tv_mfma_f32_16x16x16f16 a[0:3], v0, v1, a[0:3]"], None)
+    assert lds_per_cu("gfx942") == 65536, lds_per_cu("gfx942")
+    assert lds_per_cu("gfx950") == 163840, lds_per_cu("gfx950")
+    assert lds_per_cu("gfx942") != lds_per_cu("gfx950"), "a constant divisor is the bug"
+    assert lds_per_cu("gfx9999") is None, lds_per_cu("gfx9999")
+    # The MISS path, exercised with the shared model absent. Every assertion above reaches this
+    # function only while `_OCC` is importable, so its fallback `return` is unreachable from
+    # them and a literal parked there passes the lot -- which is exactly the shape of the
+    # default this file used to carry. The packs that ship without `amd_occupancy.py` take this
+    # path EXCLUSIVELY, so it is the one place a default does its damage and the one place
+    # nothing was looking.
+    _saved_occ = _OCC
+    try:
+        globals()["_OCC"] = None
+        assert lds_per_cu("gfx942") is None, (
+            f"with the occupancy model absent, lds_per_cu must return None, got "
+            f"{lds_per_cu('gfx942')} -- a numeric fallback here is a guess wearing a fact's hat")
+        assert lds_per_cu("gfx950") is None
+    finally:
+        globals()["_OCC"] = _saved_occ
+    assert _OCC is _saved_occ
+    # The AGPR label keys off the ISA family. Pin the classification AND the vocabulary it
+    # rests on: `startswith("cdna")` is only correct while every CDNA-lineage family name
+    # begins "cdna", so a new family added upstream must fail here rather than be labelled
+    # RDNA-like by silent fall-through.
+    # The RULE, not just its ingredient: assert _is_cdna_family directly, or `is_cdna = True`
+    # passes every family_for check below while labelling every RDNA dump as CDNA.
+    assert _is_cdna_family("gfx942") and _is_cdna_family("gfx950")
+    assert _is_cdna_family("gfx1250"), "gfx1250 is CDNA-lineage (family 'cdna5')"
+    if _OCC:
+        assert not _is_cdna_family("gfx1100"), "RDNA has a separate AGPR-free register file"
+        assert not _is_cdna_family("gfx1201")
+        assert _is_cdna_family("gfx0000"), "an arch with no family keeps the prior default"
+        _fam = _OCC.family_for
+        assert all((_fam(a) or "").startswith("cdna") for a in ("gfx942", "gfx950", "gfx1250")), \
+            [(a, _fam(a)) for a in ("gfx942", "gfx950", "gfx1250")]
+        assert not any((_fam(a) or "").startswith("cdna") for a in ("gfx1100", "gfx1201")), \
+            [(a, _fam(a)) for a in ("gfx1100", "gfx1201")]
+        assert set(_OCC.MODELS) == {"cdna", "cdna5", "rdna"}, (
+            f"ISA family vocabulary changed: {sorted(_OCC.MODELS)}. The AGPR label above is a "
+            f"cdna-prefix test -- classify the new family before shipping, or it reads as RDNA.")
+
+    print("[asm_loop_audit] SELFTEST PASS")
+    return 0
+
+
+def _line_offset(orig: list[str], sel: list[str], idx: int) -> int:
+    """Kernel selection rebuilds the line list (module target + one body + its descriptor), so
+    indices into it are not file lines. Map the anchor line `sel[idx]` (the loop label) back to
+    the file; 0 when it cannot be located uniquely."""
+    if not (0 <= idx < len(sel)) or sel is orig:
+        return 0
+    hits = [i for i, ln in enumerate(orig) if ln == sel[idx]]
+    return hits[0] - idx if len(hits) == 1 else 0
+
+
+def main() -> None:
+    if "--help-full" in sys.argv:          # one card; --help-full is accepted as an alias
+        sys.argv = [x for x in sys.argv if x != "--help-full"] + ["--help"]
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("asm", help="stripped .s (or .amdgcn) file from dump_ir.sh")
+    ap.add_argument("--loop-label", help="force a specific loop back-edge label")
+    # A module with several kernels has no safe default pick: see select_kernel.
+    ap.add_argument("--kernel", default=None, metavar="NAME",
+                    help="kernel to audit (unique substring); required when the dump holds several")
+    ap.add_argument("--max-stream", type=int, default=400,
+                    help="truncate the printed symbol stream to N symbols (default 400)")
+    # nargs="?" because the docs describe this as "LDS bytes/WG come from --meta", which
+    # reads as a flag -- four separate runs invoked a bare `--meta`, got argparse's
+    # "expected one argument", and lost the LDS read for that round. The bare form now
+    # means what the help already promised: look next to <asm>.
+    ap.add_argument("--meta", nargs="?", const="",
+                    help="Triton metadata .json or dir for LDS bytes/WG (metadata.shared; the KD "
+                         "reads 0 for launch-sized LDS). Bare/omitted: manifest or same-stem json")
+    # The old help said "CDNA gfx942/gfx950 64 KiB", which is wrong and contradicts this
+    # pack's own arch cards: gfx950 has 160 KiB/CU.
+    ap.add_argument("--arch", default=None,
+                    help="target when the dump names none (its .amdgcn_target wins)")
+    # There is NO default here, and the help must not promise one: the help and the behaviour
+    # have to say the same thing. Fixing the prose while leaving a 65536 fallback in place is
+    # worse than fixing neither, because it makes the reader trust the number.
+    ap.add_argument("--lds-per-cu", type=int, default=None,
+                    help="LDS bytes/CU for an unknown target (no default: WG/CU is withheld)")
+    ap.add_argument("--opcodes", type=int, default=12, metavar="N",
+                    help="rows in the per-mnemonic histogram (default 12, 0 = off)")
+    ap.add_argument("--diff", metavar="PREV.TXT",
+                    help="a previous run's stdout -> per-opcode, op-class and drain-share deltas")
+    a = ap.parse_args()
+    if a.lds_per_cu is not None and a.lds_per_cu <= 0:
+        ap.error(f"--lds-per-cu must be a positive byte count, got {a.lds_per_cu}")
+    # A --diff file that cannot be read used to produce a report with no deltas, which reads the
+    # same as "nothing moved since the previous round".
+    if a.diff is not None and not Path(a.diff).is_file():
+        ap.error(f"--diff {a.diff!r} is not a readable file (save the previous run's stdout first)")
+
+    try:
+        lines = Path(a.asm).read_text().splitlines()
+    except OSError as e:
+        sys.exit(f"cannot read {a.asm!r}: {e}")
+
+    # KD register budget (vgpr/sgpr/accum) is a whole-file fact -- print it FIRST, before the
+    # loop check, so a loop-less kernel (e.g. a trivial reduction) still yields the vgpr occupancy
+    # driver instead of exiting empty. The loop schedule audit is separate and may be absent.
+    # SELECT FIRST. Every reading below (register budget, LDS, loop pick, histogram) is a
+    # whole-`lines` scan, so narrowing here is what keeps the audited object and the printed
+    # label the same thing. They used to come from different places: the heading named the
+    # file, the LDS line named whichever kernel had the most shared memory, and the loop picker
+    # scored loops from every kernel at once.
+    # `.amdgcn_target` precedes the first kernel, so read the arch from the whole module
+    # BEFORE narrowing -- it is a property of the build, not of the kernel picked.
+    _arch = (_OCC.arch_from_asm("\n".join(lines)) if _OCC else None) or a.arch
+    orig_lines = lines
+    try:
+        lines, kname = select_kernel(lines, a.kernel)
+    except ValueError as exc:
+        # Inconsistent descriptors/metadata/code (e.g. several modules concatenated into one
+        # file) leave no trustworthy kernel identity; refuse with a message, not a traceback.
+        ap.error(f"cannot identify one kernel in {a.asm}: {exc}. Audit a single module's "
+                 f"assembly (one dump_ir.sh output or one llvm-objdump of a code object).")
+    print(f"=== asm loop audit: {a.asm}"
+          + (f"  [kernel: {kname}]" if kname else "  [single unnamed object]") + " ===\n")
+    print_kd_regs(lines, _arch)
+    # The register file is only ONE of the two occupancy limiters; print the LDS one next to it
+    # so they are never reasoned about separately.
+    # Precedence: an explicit figure (the caller read it off the part) > --arch > the target
+    # the dump names itself. If none of the three lands, `_lds` is None and the WGs/CU verdict
+    # is withheld -- it is NOT backfilled with a constant.
+    if a.lds_per_cu:
+        _lds, _src = a.lds_per_cu, "--lds-per-cu"
+    else:
+        _lds, _src = lds_per_cu(_arch), _arch
+    records = None
+    if not a.meta:
+        from amd_artifacts import inspect_artifact
+        try:
+            _name, metadata, _bound = inspect_artifact(a.asm, kernel=a.kernel)
+        except (ValueError, OSError) as exc:
+            ap.error(str(exc))
+        records = []
+        if (metadata and type(metadata.get('shared')) is int and metadata['shared'] >= 0):
+            records = [(metadata['name'], metadata['shared'])]
+    print_lds_budget(a.meta, _lds, _src, kname, records=records)
+
+    loops = find_loops(lines)
+    picked = pick_loop(lines, loops, a.loop_label)
+    if picked is None:
+        # No back-edge. Audit the WHOLE KERNEL BODY instead of going blind: for a single-block
+        # kernel that body IS the hot code, and its op mix is the evidence a memory/index lever is
+        # picked on. Labelled explicitly, because two things that must not be confused read the
+        # same in a histogram: per-iteration cost (a loop) and per-thread total cost (this).
+        span = kernel_body_span(lines)
+        if span is None:
+            print("no back-edge loop found AND no s_endpgm to bound a kernel body -- is this a "
+                  "device .s? (dump_ir.sh writes <stem>.<arch>.s; a host-only dump has neither). "
+                  "KD register budget above is still valid.")
+            return
+        name, start, end = span
+        print(f"no back-edge loop found -> auditing the WHOLE KERNEL BODY of {name} "
+              f"({end - start} lines).")
+        print("  This is a PER-THREAD total, not a per-iteration cost: do not read the counts below "
+              "as a steady-state schedule, and do not compare them against a looped kernel's "
+              "per-iteration histogram.\n")
+        print(f"--- kernel body @ {name} (no loop) ---\n")
+        audit(lines, start, end, a.max_stream, a.opcodes,
+              parse_opcodes(a.diff) if a.diff else None,
+              _line_offset(orig_lines, lines, start - 1), parse_prev(a.diff) if a.diff else None,
+              region="kernel body")
+        return
+    lab, start, end = picked
+    print(f"--- hot loop @ {lab} ---\n")
+    audit(lines, start, end, a.max_stream, a.opcodes,
+          parse_opcodes(a.diff) if a.diff else None,
+          _line_offset(orig_lines, lines, start - 1), parse_prev(a.diff) if a.diff else None)
+
+
+if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        sys.exit(_selftest())
+    main()

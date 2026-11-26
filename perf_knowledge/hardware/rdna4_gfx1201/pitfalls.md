@@ -6,7 +6,7 @@ dtypes: [bf16, fp16, fp8_e4m3]
 regimes: [both]
 updated: 2026-09-10
 sources:
-  - ../../expert_skills/skills/gluon_authoring/references/platform-known-issues.md
+  - ../../expert_skills/skills/gluon_authoring/references/pitfalls/platform-known-issues.md
 ---
 
 # RDNA4 / gfx1201 — pitfalls

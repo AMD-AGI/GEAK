@@ -1538,7 +1538,10 @@ function expertSkillsBlock(role) {
     `Also Read ${WORKFLOW_DIR}/roles/_fragments/expert_skills.md and follow it: query ` +
     `${EXPERT_SKILLS_DIR}/index.yaml for skills whose \`match\` fits the current bottleneck/op and whose ` +
     `validation_status is \`validated\`, and treat each as a HIGH-PRIOR candidate to reproduce — advisory ` +
-    `only, never overriding your on-box A/B, never reducing a result below the measured baseline.`;
+    `only, never overriding your on-box A/B, never reducing a result below the measured baseline. ` +
+    `A skill whose skill.md says \`role: reference_fact_store\` (gluon_authoring; index status draft, ` +
+    `auto_apply false: consult it when its match gens/backends fit, whatever its status) is not a recipe: ` +
+    `query it with its scripts/q.py and judge each card by its evidence and scope (unverified ranks last).`;
 }
 
 // e2e warm start: identity formatting + the prompt hook. These `let`s stay at their off-value

@@ -81,10 +81,23 @@ def main() -> int:
     # 1. layout recovery must produce something sensible.
     layouts = t2g.parse_layouts(plain_ttgir)
     kinds = {l.kind for l in layouts}
-    assert layouts and ("blocked" in kinds), f"no layouts recovered (kinds={kinds})"
+    # a distributed register layout: `blocked` on older builds; Triton 3.8.0 on gfx950 prints this
+    # matmul's load layouts as `linear` (no #blocked at all), which is still a recovered layout.
+    assert layouts and ({"blocked", "linear"} & kinds), f"no register layout recovered (kinds={kinds})"
     assert any(l.kind == "amd_mfma" for l in layouts) or any(l.kind == "linear" for l in layouts) \
         or "dot_op" in kinds, "no MMA/dot layout recovered"
     print(f"[gpu-smoke] recovered {len(layouts)} layouts: {sorted(kinds)}")
+
+    # 1b. the skill's documented port entry (track B, step 2 of the entry's procedure) on the same TTGIR.
+    import subprocess
+    with tempfile.TemporaryDirectory() as d:
+        tp = os.path.join(d, "plain.ttgir"); open(tp, "w").write(plain_ttgir)
+        arch = torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
+        r = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "ttgir_bridge.py"),
+                            "recover", "--ttgir", tp, "--arch", arch, "--out", os.path.join(d, "out")],
+                           capture_output=True, text=True, timeout=600)
+        print(f"[gpu-smoke] ttgir_bridge recover rc={r.returncode}: {(r.stdout + r.stderr).strip().splitlines()[-1:]}")
+        assert r.returncode == 0, r.stdout + r.stderr
 
     # 2. official translator -> runnable Gluon anchor -> correctness == plain.
     try:
@@ -129,4 +142,12 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if any(a in ("-h", "--help") for a in sys.argv[1:]):
+        print(__doc__)
+        raise SystemExit(0)
+    if not torch.cuda.is_available():
+        print("smoke_recover_gpu.py: no visible GPU -- this smoke LAUNCHES kernels; run it on the "
+              "gfx950 box under the GPU lock (offline layers: smoke_test_recover.sh in its selftest mode)",
+              file=sys.stderr)
+        raise SystemExit(2)
     raise SystemExit(main())

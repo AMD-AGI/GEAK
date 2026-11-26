@@ -11,8 +11,8 @@ pair. On the W7900, kernels use:
   `COUNTER_GUIDANCE=gfx1100-safe-set` (§4);
 - the published W7900 peaks in §1 when `ROOFLINE_STATUS=calibrated-w7900`.
 
-Occupancy / LDS constants below are copied from the Gluon skill
-`perf_knowledge/expert_skills/skills/gluon_authoring/references/hardware/hw_constants.json`
+Occupancy / LDS constants below are copied from the shared hardware data
+`perf_knowledge/hardware/data/hw_constants.json`
 (`gfx1100`). Roofline peaks come from AMD's published W7900 figures, copied into the
 `product: w7900` section of `e2e_workflow/knowledge/analysis_skills/roofline/peaks.md`.
 
@@ -97,7 +97,7 @@ are datasheet numbers, not peaks measured on this box, so label the denominator 
 | 256        | 5              |
 
 Re-derive on a new ROCm with
-`perf_knowledge/expert_skills/skills/gluon_authoring/scripts/amd_occupancy.py --compiler-sweep --arch gfx1100`.
+`kernel_workflow/scripts/kernel_tools/amd_occupancy.py --compiler-sweep --arch gfx1100`.
 
 ## 3. Matrix ISA: gfx11 WMMA
 

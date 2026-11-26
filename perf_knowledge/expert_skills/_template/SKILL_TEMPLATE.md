@@ -29,6 +29,9 @@ expects:
   e2e_delta_min_pct: 1.0            # e2e scope: Director same-session e2e delta
   parity: required                  # required | relaxed(<tol)
 role: advisory_prior                # the consuming workflow treats this as advisory, never a mandate
+# role: reference_fact_store        # instead: a queryable fact store (facts.jsonl + INDEX.md + scripts/q.py +
+#                                   # scripts/lint_facts.py), no playbook_file; body sections are then
+#                                   # When to use / Evidence and scope / How to query / Sources (validate_skill.py)
 supersedes: []
 ---
 

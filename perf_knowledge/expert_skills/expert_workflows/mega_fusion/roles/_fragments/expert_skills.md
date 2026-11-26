@@ -30,3 +30,12 @@ faster but can never reduce a result below your measured baseline.
    not replace the COMMANDMENT / oracle. The isolated A/B picks the winner.
 
 If no skill matches, proceed exactly as without this fragment.
+
+## Reference fact stores (`role: reference_fact_store`, e.g. `gluon_authoring`)
+Not a playbook and never a high-prior candidate. Its index entry is `draft` / `auto_apply: false` (it claims
+no validated win), so consult it when its `match` gens/backends fit, whatever the status filter above says.
+Query it instead of reading files: `python3 EXPERT_SKILLS_DIR/skills/<id>/scripts/q.py "<words or a pasted
+error line>"` (`--id <id>`, `--kind tool`; `INDEX.md` is large: grep it). Each card is a conditional claim
+with a `scope` and an `evidence` label: a card whose scope does not cover your case is not evidence for it,
+and `unverified` cards are hypotheses until their `check` is run. A card with `overrides[]` supersedes the
+named `perf_knowledge` file for its scope only. Your plan and the isolated A/B vs the oracle decide.

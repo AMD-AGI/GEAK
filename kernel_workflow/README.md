@@ -1,5 +1,9 @@
 # kernel_workflow — Dynamic Workflow for Kernel / Model Inference Optimization
 
+Optional shared AMD hardware and profiler tools live in [scripts/kernel_tools](scripts/kernel_tools); their
+cards (purpose, command, outputs, refusal codes, profiler/ATT pairing) are queried with
+`python3 perf_knowledge/expert_skills/skills/gluon_authoring/scripts/q.py --kind tool`; each tool's `--help` is its detailed doc.
+
 A deterministic **Workflow** (JS-orchestrated multi-agent pipeline) that optimizes the inference
 speed of a GPU kernel directory — a single kernel, several kernels fused together, or an end-to-end
 vLLM / SGLang model — on AMD Instinct MI-series accelerators (MI300X / MI300A / MI308X / MI325X on

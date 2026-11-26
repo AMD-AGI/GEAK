@@ -28,7 +28,12 @@ the measurement wins (note it so the skill is later marked `stale`).
    - `match.profile_signature` (if present): the Top-N op name matches `op_name_regex` and its
      `pct_gpu_time ≥ min_pct_gpu`
    - `validation_status == validated` (ignore `draft`/`failed`; treat `stale` as a plain reference only)
-3. **For each matched skill**, Read its file and treat its `Procedure` as a **high-prior candidate**:
+3. **For each matched recipe skill**, Read its file and treat its `Procedure` as a **high-prior candidate**
+   (a skill whose `skill.md` says `role: reference_fact_store`, e.g. `gluon_authoring`, is not a recipe and
+   does not enter a plan as a candidate: its index entry is `draft` / `auto_apply: false` (no validated win
+   claimed), so consult it when its `match` gens/backends fit, whatever step 2 says about status; query it
+   with its `scripts/q.py` and judge each card by its `evidence` and `scope`; a card with `overrides[]`
+   supersedes the named `perf_knowledge` file for its scope):
    - In routing (System Architect): list it in the head/kernel `author_plan` BEFORE generic backends,
      annotated `source: expert_skill:<id> (advisory)`.
    - In bake-off / integration (Op Benchmarker / e2e Integrator): reproduce its Procedure as one

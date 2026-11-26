@@ -9,11 +9,17 @@
 #   GPU (optional): if triton + torch import, run the full compile -> recover ->
 #           recompile -> verify + correctness loop via smoke_recover_gpu.py.
 #
-# Usage: bash smoke_test_recover.sh [path-to-gfx950-gluon-tutorials]
+# Usage: bash smoke_test_recover.sh [--selftest] [path-to-gfx950-gluon-tutorials]
+#   --selftest   OFFLINE layers only (what selftest_all.sh runs): layer 5 never launches.
+# Layer 5 launches kernels: take the GPU lock first (kernel_workflow/scripts/gpu_lock.sh).
 set -euo pipefail
 
+OFFLINE_ONLY=0
+if [ "${1:-}" = "--selftest" ]; then OFFLINE_ONLY=1; shift; fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export PYTHONPATH="$SCRIPT_DIR:${PYTHONPATH:-}"   # so the inline/companion python can import the modules
+KT_DIR="$(cd "$SCRIPT_DIR/../../../../.." && pwd)/kernel_workflow/scripts/kernel_tools"
+export PYTHONPATH="$SCRIPT_DIR:$KT_DIR:${PYTHONPATH:-}"   # so the inline/companion python can import the modules
 TUT="${1:-$HOME/gfx950-gluon-tutorials}"
 DUMPS="$TUT/kernels/gemm/a16w16"
 V5="$DUMPS/v5_local_prefetch/ir_dump_K4096_fp16/v5_local_prefetch.ttgir"
@@ -45,11 +51,26 @@ echo "== 1d. layout-bridge, occupancy and capability self-tests =="
 python3 "$SCRIPT_DIR/ttgir_bridge.py" --selftest
 python3 "$SCRIPT_DIR/probe.py" --selftest
 # amd_occupancy is where probe DELEGATES the divisor, and its self-test cross-checks
-# hw_constants.json -- i.e. it is the one that catches a bad per-arch figure at the source
+# perf_knowledge/hardware/data/hw_constants.json -- i.e. it is the one that catches a bad per-arch figure at the source
 # rather than in the report. probe_levers degrades to available=None without triton rather
 # than failing, so it is offline-safe here too.
-python3 "$SCRIPT_DIR/amd_occupancy.py" --selftest
+python3 "$KT_DIR/amd_occupancy.py" --selftest
 python3 "$SCRIPT_DIR/probe_levers.py" --selftest
+
+echo "== 1e. GEAK shared kernel tools (kernel_workflow/scripts/kernel_tools) =="
+# Every one is offline (no GPU, no network, no tool cache).
+python3 "$KT_DIR/_hwdata.py" --selftest
+for t in asm_loop_audit amd_isa mfma_efficiency deep_mfma_analysis; do
+  python3 "$KT_DIR/$t.py" --selftest >/dev/null || { echo "SMOKE FAIL: $t.py --selftest"; exit 1; }
+  echo "   $t ok"
+done
+bash "$KT_DIR/dump_ir.sh" --selftest | tail -1
+
+echo "== 1f. fact store lint and harness/bench self-tests =="
+python3 "$SCRIPT_DIR/lint_facts.py" --pack
+python3 "$KT_DIR/ab_bench.py" --selftest
+python3 "$KT_DIR/create_harness.py" --selftest
+python3 "$KT_DIR/parse_correctness.py" --selftest
 
 if [ -f "$V5" ] && [ -f "$V3SW" ] && [ -f "$V3NO" ]; then
   echo "== 2. recover anchor (--with-pipeline) from a real plain .ttgir =="
@@ -84,10 +105,12 @@ else
 fi
 
 echo "== 5. GPU end-to-end (optional) =="
-if python3 -c "import triton, torch" 2>/dev/null; then
+if [ "$OFFLINE_ONLY" = 1 ]; then
+  echo "   SKIP (--selftest is offline-only; run without it, under the GPU lock, for the full loop)"
+elif python3 -c "import triton, torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; then
   python3 "$SCRIPT_DIR/smoke_recover_gpu.py"
 else
-  echo "   SKIP (no triton/torch import); run on the gfx950 box for the full loop"
+  echo "   SKIP (no triton/torch import or no visible GPU); run on the gfx950 box for the full loop"
 fi
 
 echo "SMOKE TEST PASS"
