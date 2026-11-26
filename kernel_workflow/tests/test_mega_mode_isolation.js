@@ -363,19 +363,23 @@ ok(/const STRUCTURAL_CONTRACT_BLOCKING/.test(src) &&
    /!STRUCTURAL_CONTRACT_BLOCKING \|\| n\.structural_verified/.test(src),
   'Mega AST contract is advisory unless explicitly promoted to a blocking policy');
 
-// A region UT (args.region_ut) supplies the mega args the caller left unset, before they are parsed, and
-// every mode=mega role also reads knowledge/mega_region_ut.md. Unset, nothing runs and no prompt changes.
+// A region UT (args.region_ut, any layout): an adapter agent writes the unified contract beside it before
+// any mega arg is parsed; its mega args fill only the unset ones, and every mode=mega role also reads the
+// region UT knowledge and the contract. Unset, nothing runs and no prompt changes.
 {
   const full = require('./mega_source').full();
   const at = full.indexOf("if (MEGA && A.region_ut) {");
   ok(at > 0 && at < full.indexOf('const POSITIVE_CONTROL =') &&
-     /tools\/region_ut_args\.py \$\{A\.region_ut\}/.test(full) &&
-     /for \(const \[k, v\] of Object\.entries\(u\)\) if \(A\[k\] == null\) A\[k\] = v;/.test(full),
-    'a region UT fills only the unset mega args, before any of them is read');
-  ok(/\(A\.region_ut \? `; KERNEL_PATH is a ` \+\s*`region UT: then also \$\{WORKFLOW_DIR\}\/knowledge\/mega_region_ut\.md` : ''\)/.test(full) &&
+     /You are the region UT adapter\. Read \$\{WORKFLOW_DIR\}\/knowledge\/mega_region_ut\.md/.test(full) &&
+     /write its contract to \$\{UT_CONTRACT\}/.test(full) &&
+     /!u\.benchmark_harness \|\| !\(u\.target_guards \|\| \[\]\)\.length/.test(full) &&
+     /for \(const \[k, v\] of Object\.entries\(u\)\) if \(A\[k\] == null && k !== 'ut'\) A\[k\] = v;/.test(full),
+    'a region UT is adapted by an agent and fills only the unset mega args, before any of them is read');
+  ok(/const UT_CONTRACT = A\.region_ut \? `\$\{String\(A\.region_ut\)\.replace\(\/\\\/\+\$\/, ''\)\}\.mega_ut\.json` : '';/.test(full) &&
+     /region UT: then also \$\{WORKFLOW_DIR\}\/knowledge\/mega_region_ut\.md and its contract \$\{UT_CONTRACT\}/.test(full) &&
      fs.existsSync(path.join(__dirname, '..', 'knowledge', 'mega_region_ut.md')) &&
      fs.existsSync(path.join(__dirname, '..', 'tools', 'region_ut_args.py')),
-    'with a region UT every mode=mega role also reads knowledge/mega_region_ut.md');
+    'with a region UT every mode=mega role also reads knowledge/mega_region_ut.md and the contract');
 }
 console.log(failures === 0
   ? '\nPASS: mode=mega has one lifecycle; Expert Skills are optional normative knowledge.'

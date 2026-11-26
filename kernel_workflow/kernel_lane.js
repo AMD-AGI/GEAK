@@ -2150,10 +2150,11 @@ function multiGpuBlock(role) {
 
 // mode=mega reads the shared role file, then its mode=mega fragment, whose sections replace the
 // same-named sections of the role file.
+const UT_CONTRACT = A.region_ut ? `${String(A.region_ut).replace(/\/+$/, '')}.mega_ut.json` : '';
 const megaRoleFiles = (file) => `${WORKFLOW_DIR}/roles/${file}, then ` +
   `${WORKFLOW_DIR}/roles/_fragments/${file.replace(/\.md$/, '')}_mega.md (mode=mega: each section of the ` +
   `second file replaces the section with the same heading in the first)` + (A.region_ut ? `; KERNEL_PATH is a ` +
-  `region UT: then also ${WORKFLOW_DIR}/knowledge/mega_region_ut.md` : '');
+  `region UT: then also ${WORKFLOW_DIR}/knowledge/mega_region_ut.md and its contract ${UT_CONTRACT}` : '');
 function roleAgent(role, phase, intro, inputs) {
   const base = `You are the ${role}. PHASE=${phase}.
 First Read ${MEGA ? megaRoleFiles(`${role}.md`) : `${WORKFLOW_DIR}/roles/${role}.md`} and follow its instructions for PHASE=${phase}.
@@ -2180,13 +2181,16 @@ const STRS = { type: 'array', items: STR }, ANYOBJ = { type: 'object', additiona
 const ANYOBJS = { type: 'array', items: ANYOBJ };
 
 // ---- mode=mega args (parsed for every mode; checked only under MEGA) ----
-// A region UT (args.region_ut, a GEAK UT task dir) supplies every mega arg the caller left unset.
+// A region UT (args.region_ut, a UT task dir in any layout): an adapter agent writes its unified contract
+// (knowledge/mega_region_ut.md), whose mega args fill every arg the caller left unset.
 if (MEGA && A.region_ut) {
-  const u = (await agent(`Run exactly: python3 ${WORKFLOW_DIR}/tools/region_ut_args.py ${A.region_ut}\n` +
-    'It prints one JSON object. Return it verbatim. Do nothing else.',
+  const u = (await agent(`You are the region UT adapter. Read ${WORKFLOW_DIR}/knowledge/mega_region_ut.md ` +
+    `("Adapter"), then the UT at ${A.region_ut}; write its contract to ${UT_CONTRACT} and return that JSON.`,
     { phase: 'Setup', label: 'region_ut', schema: ANYOBJ })) || {};
-  if (u.error || !u.benchmark_harness) throw new Error(`region_ut ${A.region_ut}: ${u.error || 'no output'}`);
-  for (const [k, v] of Object.entries(u)) if (A[k] == null) A[k] = v;
+  if (u.error || !u.benchmark_harness || !(u.target_guards || []).length) {
+    throw new Error(`region_ut ${A.region_ut}: ${u.error || 'no contract'}`);
+  }
+  for (const [k, v] of Object.entries(u)) if (A[k] == null && k !== 'ut') A[k] = v;
 }
 // Modeled time (allocated phase slices, not wall time) so a replay follows the same budget path.
 const WORKFLOW_STARTED_MS = 0;

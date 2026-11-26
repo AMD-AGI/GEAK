@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""mode=mega args from a region UT task dir (args.region_ut): what the UT fixes, so a caller passes only the UT.
+"""A starting contract for the region UT adapter (knowledge/mega_region_ut.md) on the UT layouts GEAK produces.
+
+The adapter agent owns the contract: it starts from this output when the layout is known, corrects it from
+the UT, and derives every field itself for any other layout ({"error"} here).
 
 A region UT is a GEAK UT task dir (unittest.py, cases.py, meta.json, kernel_src/, run/):
 - kernel_ut: the e2e kernel-extraction UT (e2e_workflow kernel-ut skill): meta.workload.cases (sig, regime,
   effective_calls), meta.tol;
 - acceptance: a UT that also declares meta.cases (served `weight`) and meta.acceptance {tol, noise_bound,
   min_speedup}, and times every case in unittest.py.
-kernel_lane.js fills every arg the caller left unset from this JSON (an arg the caller passed wins);
-knowledge/mega_region_ut.md says how each role runs and reads the UT.
 
 - benchmark: the UT's own unittest.py; accuracy: its correctness gate at acceptance.tol, else meta.tol.
 - guards: the heaviest case (weight, else effective_calls) is the target; every other case is a regression
