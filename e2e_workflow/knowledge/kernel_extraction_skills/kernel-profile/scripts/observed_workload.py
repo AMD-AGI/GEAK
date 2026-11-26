@@ -96,7 +96,7 @@ SGLANG_DECODE_RE = re.compile(_HEAD + _DECODE)
 
 def _ts(s):
     s = s.strip()
-    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%H:%M:%S"):   # ATOM: time only
         try:
             return dt.datetime.strptime(s, fmt)
         except ValueError:
@@ -160,6 +160,38 @@ SGLANG_SWA_DECODE_RE = re.compile(
     r"(?:cuda graph: (?P<graph>\w+), )?"
     r"gen throughput \(token/s\): (?P<gen_tps>[\d.]+), #queue-req: (?P<queue>\d+)"
 )
+
+
+# ATOM (atom/model_engine/scheduler.py): one line per scheduled prefill forward; decode has no
+# per-iteration line, only the engine's periodic throughput row (`--log-format atom`, one row
+# per --decode-log-interval SECONDS), so each row stands for gen_tps * interval / running
+# iterations. No rank tag: ATOM's engine core logs once per engine.
+ATOM_PREFILL_RE = re.compile(
+    r"^\[atom (?P<ts>[\d:]+)\] Scheduled prefill batch: (?P<new_seq>\d+) reqs, "
+    r"(?P<new_token>\d+) new tokens \(done: \[(?P<done>[^\]]*)\]")
+ATOM_DECODE_RE = re.compile(
+    r"^\[atom (?P<ts>[\d:]+)\] Engine \d+: Avg prompt throughput: [\d.]+ tokens/s, "
+    r"Avg generation throughput: (?P<gen_tps>[\d.]+) tokens/s, Running: (?P<running>\d+) reqs, "
+    r"Waiting: (?P<queue>\d+) reqs")
+
+
+def _atom_prefill(line):
+    m = ATOM_PREFILL_RE.match(line)
+    if not m:
+        return None
+    done = [int(x) for x in m.group("done").replace(" ", "").split(",") if x]
+    return dict(kind="prefill", rank=0, ts=_ts(m.group("ts")), new_seq=int(m.group("new_seq")),
+                new_token=int(m.group("new_token")), cached_token=sum(done),
+                running=0, queue=0, cuda_graph=False)
+
+
+def _atom_decode(line):
+    m = ATOM_DECODE_RE.match(line)
+    if not m or int(m.group("running")) == 0:
+        return None
+    return dict(kind="decode", rank=0, ts=_ts(m.group("ts")), running=int(m.group("running")),
+                token=0, accept_len=1.0, gen_tps=float(m.group("gen_tps")),
+                queue=int(m.group("queue")), cuda_graph=None, per_second=True)
 
 
 LOG_DIALECTS = [
@@ -290,7 +322,8 @@ def expand_decode(rows, interval):
     for i, d in enumerate(rows):
         prev = rows[i - 1] if i else None
         same_run = bool(prev) and prev["running"] == d["running"]
-        out.append(dict(d, ts=d["ts"].isoformat(), iterations=interval,
+        its = d["gen_tps"] * interval / d["running"] if d.get("per_second") else interval
+        out.append(dict(d, ts=d["ts"].isoformat(), iterations=its,
                         token_delta=(d["token"] - prev["token"]) if same_run else None,
                         continues_run=same_run))
     return out
@@ -395,7 +428,7 @@ def decode_joint(expanded):
         d["iterations"] += r["iterations"]
         d["rows"] += 1
         d["accept"] += r["iterations"] * r["accept_len"]
-        if r["running"]:
+        if r["running"] and r["token"]:
             d["ctx"].append(r["token"] / r["running"])
     total = sum(d["iterations"] for d in g.values()) or 1
     out = []
@@ -448,7 +481,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--log", nargs="+", required=True,
                     help="serving/scheduler log(s) of the measured run")
-    ap.add_argument("--log-format", choices=["scheduler", "vllm-iterations"], default="scheduler")
+    ap.add_argument("--log-format", choices=["scheduler", "vllm-iterations", "atom"], default="scheduler",
+                    help="atom: decode rows are ATOM's throughput rows; --decode-log-interval is "
+                         "their period in seconds (default 10)")
     ap.add_argument("--accept-len", type=float, default=1.0,
                     help="measured acceptance for the decode-only cross-check")
     ap.add_argument("--rank", type=int, default=0,
@@ -471,12 +506,15 @@ def main():
     args = ap.parse_args()
     if args.mode == "multinode":
         use_multinode_dialects()
+    if args.log_format == "atom":
+        LOG_DIALECTS.insert(0, ("atom", [_atom_prefill, _atom_decode]))
 
     info = {}
     if args.server_info and os.path.exists(args.server_info):
         info = json.load(open(args.server_info))
     interval = (1 if args.log_format == "vllm-iterations" else
-                args.decode_log_interval or info.get("decode_log_interval"))
+                args.decode_log_interval or info.get("decode_log_interval")
+                or (10 if args.log_format == "atom" else None))
     if not interval:
         raise SystemExit(
             "observed_workload: decode_log_interval is unknown. Every decode row stands "
@@ -544,6 +582,13 @@ def main():
             "cached_token is prior context extent, not a prefix-cache hit counter.",
             "Graph execution mode must be established from runtime evidence, not scheduler geometry.",
             "accept_len is supplied for the cross-check; mixed-step generation is outside its decode-only total.",
+        ]
+    if args.log_format == "atom":
+        out["log_format"] = "atom"
+        out["prefill"]["prefix_cache_hit_pct"] = None
+        out["measurement_notes"] = [
+            "cached_token is ATOM's `done` (prior context: prefix-cache hits and earlier chunks).",
+            "Decode iterations are estimated from throughput rows: gen_tps x interval / running.",
         ]
     with open(args.out, "w") as fh:
         json.dump(out, fh, indent=1, default=str)

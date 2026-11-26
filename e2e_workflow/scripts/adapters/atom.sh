@@ -111,8 +111,11 @@ adapter_launch() {
   # --max-model-len: mirror the InferenceX fixed_seq_len recipes, which pin 10240 for every shape
   # EXCEPT 1k/1k (where they leave the model default). Explicit MAX_MODEL_LEN always wins. This keeps
   # GEAK numbers comparable to the InferenceX baseline instead of silently sizing KV differently.
+  # Only for a known fixed-length sweep: a trace replay (AgentX) sends 100k+ prompts, and a
+  # multinode rank is not told ISL/OSL -- both keep the model's own limit.
   local _mml="${MAX_MODEL_LEN:-}"
-  if [ -z "$_mml" ] && ! { [ "${ISL:-}" = "1024" ] && [ "${OSL:-}" = "1024" ]; }; then
+  if [ -z "$_mml" ] && [ -n "${ISL:-}" ] && [ -n "${OSL:-}" ] && [ "${BENCH_CLIENT:-}" != "agentx" ] \
+     && ! { [ "$ISL" = "1024" ] && [ "$OSL" = "1024" ]; }; then
     _mml=10240
   fi
 

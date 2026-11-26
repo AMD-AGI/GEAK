@@ -71,3 +71,27 @@ class SamplingPipelineTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class AtomLogTest(unittest.TestCase):
+    """ATOM logs one line per prefill forward and only a periodic throughput row for decode."""
+
+    def test_atom_rows_become_prefill_batches_and_decode_iterations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / 'server.log'
+            log.write_text(
+                '[atom 10:00:01] Scheduled prefill batch: 2 reqs, 16384 new tokens (done: [32768, 0], new: [8192, 8192]), req_ids: (0, 1)\n'
+                '[atom 10:00:10] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 200.0 tokens/s, Running: 4 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.0%, Prefix cache hit rate: 0.0%\n'
+                '[atom 10:00:20] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%\n')
+            out = Path(tmp) / 'ow.json'
+            r = subprocess.run([sys.executable, str(SCRIPTS / 'observed_workload.py'), '--log-format', 'atom',
+                                '--log', str(log), '--completed-output-tokens', '2000', '--out', str(out)],
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            d = json.loads(out.read_text())
+            self.assertEqual(d['counts']['prefill_batches'], 1)
+            self.assertEqual(d['raw_prefill_rows'][0]['cached_token'], 32768)
+            # 200 tok/s x 10 s / 4 running = 500 iterations at bs 4; the idle row is not decode
+            self.assertEqual([(b['batch_size'], b['iterations']) for b in d['decode']['buckets']], [(4, 500.0)])
+            self.assertEqual(d['decode']['crosscheck']['disagreement_pct'], 0.0)
+            self.assertIsNone(d['prefill']['prefix_cache_hit_pct'])
