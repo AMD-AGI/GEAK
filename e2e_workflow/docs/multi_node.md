@@ -423,6 +423,7 @@ Everything about the machines is in the handoff's `multinode` block, read once b
 | `MEM_FRACTION` | 0.90 | check: the free share of the fullest card's VRAM a node must have |
 | `SERVING_LOCK_WAIT` | 7200 | seconds a serving leg waits for a card a GEAK kernel task has leased |
 | `ATOM_PROFILE_WINDOW_MAX_SEC` | 6 | ATOM only: the cap on a profile window (see the trace gate) |
+| `ATOM_PROBE_DECODE_TOKENS` | 1024 | ATOM only: tokens each request of a DECODE sampling point generates, so none turns over inside the window |
 
 The trace wait is fixed: bytes quiet for 30 s count as exported, an incomplete set is
 given up after 180 s quiet, 1800 s at most, and the gate expects `TP` traces (under PD

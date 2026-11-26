@@ -26,13 +26,14 @@ complete trace with collectives in it, and names the one to parse:
   `DIR/ranks/mn_trace_roles.json` names each engine's TP-0 trace and ranks. `--role` gates one
   engine (a sampling-point probe opens its window on one).
 
-## pd-points: sampling points of a fixed-length PD run (sglang)
+## pd-points: sampling points of a fixed-length PD run (sglang, ATOM)
 
     mn_traces.py pd-points --engine-log prefill=LOG --engine-log decode=LOG \
         --skill-root <kernel-profile> --out-dir DIR [--points-per-phase 3]
 
 Plans the points from each engine's BASELINE server log with kernel-profile's
-`observed_workload.py --mode multinode` and `plan_sampling_points.py`, then writes
+`observed_workload.py --mode multinode` (`--log-format atom` for an ATOM engine log) and
+`plan_sampling_points.py`, then writes
 `DIR/sampling_points.json` and prints `PROFILE_PROBE_IDS=<ids>` for `bench_e2e.sh`.
 
 ## pd-mass: AgentX ranking on both engines' GPU-time mass
