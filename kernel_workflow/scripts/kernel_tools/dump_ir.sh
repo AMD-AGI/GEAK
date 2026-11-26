@@ -24,8 +24,9 @@
 #
 # --arch: only --emit-gluon consumes it. Not given -> read from rocminfo (printed); still unknown ->
 # --emit-gluon REFUSES (exit 4) instead of assuming one (gfx942 vs gfx950 changes the recovery).
-# No `rm`: the per-variant compile cache is a fresh mktemp dir under ${TMPDIR:-/tmp}/geak-dump-ir
-# (TILE_HW_CACHE overrides); a non-empty one is MOVED ASIDE.
+# No `rm` of anything it did not create: the per-variant compile cache is a fresh mktemp dir under
+# ${TMPDIR:-/tmp}/geak-dump-ir (TILE_HW_CACHE overrides); a non-empty one is MOVED ASIDE. A failed run
+# removes that fresh cache (and its hook dir) on exit; DUMP_IR_KEEP_CACHE=1 keeps it.
 #
 # Writes: <ir_dir>/<variant>/<variant>.{ttgir,llir,amdgcn,s} + meta_*.json (LDS bytes/workgroup).
 # Exit: 0 dumped | 1 no compile command / bare --kernel | 2 unknown option before the compile
@@ -56,7 +57,10 @@ names shared with this wrapper, such as --arch, --out, --variant or --help.
   --kernel       module.path:object, handed to recover_gluon.py for --emit-gluon anchor|pipeline
   --kernel-name  substring that PINS which compiled kernel's IR is copied (multi-kernel ops)
   --all          multi-case benchmark: dump EVERY compilation to <out>/<variant>_c<i>/ (index in
-                 <out>/<variant>/ir_index.json, with each one's constexprs) instead of refusing with E_IR_SELECTION
+                 <out>/<variant>/ir_index.json, with each one's constexprs) instead of refusing with E_IR_SELECTION.
+                 With --all, --kernel-name also accepts a constexpr NAME=VALUE (or NAME_VALUE) to keep only
+                 the compilations specialised that way; otherwise it matches the kernel's base name.
+  A failed run removes its temp compile cache (DUMP_IR_KEEP_CACHE=1 keeps it).
 
   bash dump_ir.sh python bench.py --version plain --variant plain --out ir/
   bash dump_ir.sh python bench.py --version plain --variant plain --out ir/ --emit-gluon layouts --arch gfx950
@@ -106,6 +110,16 @@ selftest() {
   if [ $rc -eq 0 ] && python3 -c "import json,sys; ix={r['compilation'].split('/')[0]: r['constexprs']['BLOCK'] for r in json.load(open(sys.argv[1]))}; assert ix=={'s1':'64','s2':'128'}, ix" "$T/ir/s/ir_index.json" 2>/dev/null; then
     echo "  ok   --all: shared num_warps/num_stages told apart by the compile hash"
   else echo "  FAIL --all shared-warps constexprs (rc=$rc): $out"; f=1; fi
+  # --all + a constexpr pin NAME=VALUE keeps only that specialisation
+  out="$(TILE_HW_CACHE="$T/cache" bash "$SELF" bash -c "$fake2" --all --kernel-name BLOCK=128 --variant p --out "$T/ir" 2>&1)"; rc=$?
+  if [ $rc -eq 0 ] && python3 -c "import json,sys; ix=json.load(open(sys.argv[1])); assert [r['constexprs']['BLOCK'] for r in ix]==['128'], ix" "$T/ir/p/ir_index.json" 2>/dev/null; then
+    echo "  ok   --all --kernel-name NAME=VALUE selects that constexpr specialisation"
+  else echo "  FAIL constexpr pin (rc=$rc): $out"; f=1; fi
+  # a constexpr-suffixed name that matches no kernel: names the compiled kernels, removes the temp cache
+  out="$(TILE_HW_CACHE="$T/cache_miss" bash "$SELF" bash -c "$fake3" --kernel-name ROW_WARPS_1 --variant m --out "$T/ir" 2>&1)"; rc=$?
+  if [ $rc -eq 3 ] && grep -q "compiled: k" <<<"$out" && [ -z "$(ls -A "$T/cache_miss" 2>/dev/null)" ]; then
+    echo "  ok   unmatched --kernel-name lists the compiled kernels; failed run removes its temp cache"
+  else echo "  FAIL unmatched --kernel-name (rc=$rc, cache: $(ls "$T/cache_miss" 2>/dev/null)): $out"; f=1; fi
   if grep -nE '(^|[;&|]|then|do)[[:space:]]*rm[[:space:]]+-' "$SELF" >/dev/null; then
     echo "  FAIL an rm call is present (GEAK roles run this; move aside instead)"; f=1
   fi
@@ -203,6 +217,25 @@ if [ -n "$(ls -A "$CACHE" 2>/dev/null)" ]; then
   mv "$CACHE" "$CACHE.stale.$(date +%s).$$" && mkdir -p "$CACHE"
 fi
 export TRITON_CACHE_DIR="$CACHE"
+# A failed run leaves nothing worth keeping in this fresh mktemp cache (and its --all hook dir):
+# remove exactly those two paths on a non-zero exit, unless DUMP_IR_KEEP_CACHE=1. They were created
+# above by mktemp under $CACHE_PARENT; nothing else is touched. A successful run keeps the cache.
+_dump_ir_cleanup() {
+  local rc=$?
+  if [ "$rc" != 0 ] && [ "${DUMP_IR_KEEP_CACHE:-0}" != 1 ]; then
+    python3 - "$CACHE_PARENT" "$CACHE" "$CACHE.hook" <<'PYCLEAN' || true
+import os, shutil, sys
+parent = os.path.realpath(sys.argv[1])
+for p in sys.argv[2:]:
+    rp = os.path.realpath(p)
+    if os.path.dirname(rp) == parent and os.path.basename(rp).startswith("dump_ir_") and os.path.isdir(rp):
+        shutil.rmtree(rp, ignore_errors=True)
+PYCLEAN
+    echo "[dump_ir] failed (rc=$rc): temp compile cache $CACHE removed (DUMP_IR_KEEP_CACHE=1 keeps it)" >&2
+  fi
+  return "$rc"
+}
+trap _dump_ir_cleanup EXIT
 
 # Optional compiler knobs, upstream-only. Everything here is a real upstream 3.8.0 control;
 # see compiler-contract.md ## What upstream 3.8.0 actually gives you.
@@ -257,6 +290,24 @@ finally:
 try:
     if importlib.util.find_spec("triton") is not None:
         from triton import knobs as _knobs
+        # Setting ANY jit_post_compile_hook makes Triton json.dumps the launch's constexprs
+        # (runtime/jit.py serialize_specialization_data, Triton 3.8.0); a Gluon layout passed as a
+        # constexpr (BlockedLayout, DistributedLinearLayout, ...) is not JSON-serializable and the
+        # launch raised TypeError. Only hooks read that string and this hook does not, so on that
+        # error fall back to a stub instead of failing the user's command.
+        try:
+            from triton.runtime import jit as _jit
+            _ser = _jit.serialize_specialization_data
+
+            def _safe_ser(*a, **kw):
+                try:
+                    return _ser(*a, **kw)
+                except TypeError:
+                    return json.dumps({"name": str(a[0]) if a else None, "serialized": False})
+
+            _jit.serialize_specialization_data = _safe_ser
+        except Exception:
+            pass
         _log = os.path.join(os.environ.get("TRITON_CACHE_DIR", ""), "_constexprs.jsonl")
         _prev = _knobs.runtime.jit_post_compile_hook
 

@@ -557,7 +557,9 @@ def main() -> None:
             except (OSError, ValueError, KeyError, TypeError) as e:
                 sys.exit(f"extract_sku --facts: {e}")
         if not key:
-            sys.exit("extract_sku --facts: name a SKU (e.g. MI355X) or pass --hardware-context FILE")
+            sys.exit("extract_sku --facts: pass --hardware-context $EVAL_DIR/hardware_context.json, created "
+                     f"once per run with: {_hwdata.context_command()} -- or name a reference SKU on purpose "
+                     "(e.g. MI355X); a named SKU is not checked against this GPU")
         row = load()["skus"].get(key.upper())
         if not row:
             sys.exit(f"extract_sku --facts: unknown SKU {key!r}; --render table <arch> lists them")

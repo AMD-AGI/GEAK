@@ -34,7 +34,8 @@ WHY: hw_budget.py, mem_bw_probe.py and extract_sku.py need the SKU (MI355X vs MI
 changes CUs, peaks and cache sizes). Give them this file instead of guessing a SKU name; it also
 stops a tool from silently pricing the wrong part.
 
-  python3 $SKILL_DIR/../scripts/hardware_context.py --output $EVAL_DIR/hardware_context.json
+  python3 kernel_workflow/scripts/kernel_tools/hw_context.py --output $EVAL_DIR/hardware_context.json
+  (from the GEAK root; that shim runs this file, <GEAK root>/scripts/hardware_context.py)
   then: hw_budget.py / mem_bw_probe.py / extract_sku.py --facts  ... --hardware-context $EVAL_DIR/hardware_context.json
 
   --check FILE [--live]   is FILE still valid (and, with --live, is it this GPU)?

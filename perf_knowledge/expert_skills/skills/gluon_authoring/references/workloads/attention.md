@@ -31,11 +31,12 @@ Split-KV decode: `## Decode (split-KV): a structure, not a config knob`.
 Levers measured on one bf16 varlen prefill kernel family (D 128 + 64 PE, and D 256) on Triton 3.8 / gfx950
 by leave-one-out ablation. On that kernel they touched disjoint code (config key, launcher, loop body) and
 stacked. The table is unordered: pick rows by the signal in the profile. The evidence column is that
-kernel family's result, not an order for another kernel.
+kernel family's result, not an order for another kernel, and it is **bf16** evidence: on another dtype
+(fp8, scaled MFMA) a row is a hypothesis to A/B, not a prior.
 
 | Signal | Lever | Evidence (that kernel family, gfx950 / Triton 3.8.0) |
 | --- | --- | --- |
-| spills on a wide head at 2 waves/SIMD | **register budget:** 1 wave/SIMD with AGPRs usable (no `"0,0"` AGPR cap) (AGPR card in `../tile-programming/llvm-fn-attrs.md`) | removing it cost the most of any lever there |
+| spills on a wide head at 2 waves/SIMD (bf16) | **register budget:** 1 wave/SIMD with AGPRs usable (no `"0,0"` AGPR cap) (AGPR card in `../tile-programming/llvm-fn-attrs.md`) | bf16: removing it cost the most of any lever there. Not measured on fp8 / scaled MFMA: A/B it there, not a prior |
 | an extra MFMA chain (rope/PE slice, padded head) gated to the one-tile loop at 4 warps | **every head slice on the pipelined loop:** the slice rides the authored K/V ring when the tile fits without scratch | routing it back off lost on the PE cases measured. Scope: with the barrier-only 4-warp loop (row below). aiter's gfx950 Gluon MHA (`aiter/ops/triton/_gluon_kernels/gfx950/attention/mha.py`, `PE_IN_PIPELINE = num_warps >= 8`) keeps PE off the pipeline at 4 warps because its stage-marker loop measured slower there; that holds for the marker version |
 | varlen load imbalance; M-blocks under-fill the device (*check:* grid size vs CU count) | **grid order, then fill-gated split-KV:** a longest-first (LPT) compacted grid computed in-kernel from `cu_seqlens` (no host sync; gate: `## Scheduling (load-imbalanced grids)`); then a key-axis split merged in-kernel by the last arriver (`### In-kernel split merge on gfx950`) | on a full grid the split variants tried lost |
 | `warp_pipeline_stage` at `num_warps=4`: one extra `s_barrier` per border (compile-checked at 4 and 8 warps) and several `lgkmcnt(0)` per tile (*check:* barriers per tile in `asm_loop_audit.py`) | **barrier-only 4-warp loop:** markers have no second group to offset at 4 warps; use `wait_group` + one `gl.barrier()` per landed buffer (its `lgkmcnt(0)` covers RAW on the landed tile and WAR on the slot the next copy overwrites); a 3-slot ring needs one barrier per tile | paid on the 4-warp PE tiles |
@@ -465,7 +466,10 @@ they can turn negative on top of it.
 fold stage stops being a serial VALU chain or the body changes shape): the 8-warp
 `warp_pipeline_stage` ping-pong (lost in each run that tried it: the fold stage is a serial VALU chain
 with one wave per SIMD in it, so the lockstep barrier waits; 8-warp workgroups also cost one
-workgroup per CU), in-wave accumulator ping-pong (spills / VALU is the longer pipe), 3 waves/SIMD
+workgroup per CU) — this covers the 8-warp two-group build only, not a 4-warp body that software-
+pipelines within each wave (tile *t+1*'s MFMAs issued beside tile *t*'s VALU fold, with
+`warp_pipeline_stage` markers as stage boundaries): that is a different lever, not covered by this
+negative and needs its own A/B; in-wave accumulator ping-pong (spills / VALU is the longer pipe), 3 waves/SIMD
 **at the default scheduler** (spills or `v_accvgpr` shuttles; not the minreg route of `#### DSA indexer: occupancy needs the scalar fold and iterative-minreg`), folding
 head weights through an MFMA (numerics or MFMA cost).
 

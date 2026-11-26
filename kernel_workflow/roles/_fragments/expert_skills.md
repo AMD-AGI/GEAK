@@ -26,6 +26,12 @@ faster but can never reduce a result below your measured baseline.
    - migration skills: `from_backend`→`to_backend` fits this run's `mode`/`target_language`
      (e.g. authoring Triton from a TileLang source → a `tilelang→triton` skill applies)
    - `validation_status == validated` (ignore draft/failed; `stale` = plain reference only)
+   - `'*'` in a `match` field matches any value. A skill matched only through `'*'` (generic over
+     operators or dtypes) is a reference: each of its levers holds for the arch / dtype / kernel class
+     its evidence names; on another dtype or kernel class treat that lever as a hypothesis to A/B, not
+     as a high-prior recipe.
+   - The match depends only on the op, dtype, regime and box: once your plan or memory records the
+     matched skill ids for this op, reuse that record instead of re-reading `index.yaml`.
 3. For each match, Read the skill file and treat its `Procedure` as a **high-prior author/optimize
    candidate**: follow its kernel structure and the named lever, honor `Knobs & pitfalls` and
    `Do-no-harm notes`, then measure against the immutable oracle as usual. The skill's

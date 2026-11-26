@@ -18,6 +18,52 @@ def _groups(cache, kernel_name=''):
     return groups
 
 
+def _meta(key):
+    try:
+        return json.loads((key[0] / (key[1] + '.json')).read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _constexpr_filter(kernel_name):
+    """`NAME=VALUE` / `NAME_VALUE` -> [(NAME, VALUE), ...] readings to try (a constexpr pin)."""
+    if '=' in kernel_name:
+        name, _, value = kernel_name.partition('=')
+        return [(name.strip(), value.strip())]
+    parts = kernel_name.split('_')
+    return [('_'.join(parts[:i]), '_'.join(parts[i:])) for i in range(1, len(parts))]
+
+
+def _by_constexpr(cache, kernel_name):
+    """Groups whose logged constexprs (dump_ir.sh --all hook) contain the NAME=VALUE pin."""
+    logged = _constexpr_log(cache)
+    if not logged or not kernel_name:
+        return {}
+    every = _groups(cache)
+    for name, value in _constexpr_filter(kernel_name):
+        hit = {}
+        for key, arts in every.items():
+            ce, _ = _constexprs_for(logged, _meta(key), key[1])
+            if ce and name in ce and str(ce[name]).strip("'\"") == value:
+                hit[key] = arts
+        if hit:
+            print(f'  --kernel-name {kernel_name!r} matched no kernel name; selected the '
+                  f'{len(hit)} compilation(s) with constexpr {name}={value}')
+            return hit
+    return {}
+
+
+def _miss_message(cache, kernel_name):
+    """What to pass instead: the kernel names compiled, and the constexpr names logged."""
+    names = sorted({(_meta(k).get('name') or k[1]) for k in _groups(cache)})
+    keys = sorted({n for r in _constexpr_log(cache) for n in (r.get('constexprs') or {})})
+    return (f'no compilation matching {kernel_name!r}. --kernel-name matches the kernel base name '
+            f'(compiled: {", ".join(names) or "none"}); a constexpr value is not part of it. '
+            + (f'With --all it also takes a constexpr pin NAME=VALUE (logged constexprs: '
+               f'{", ".join(keys)}); or pick the row in ir_index.json.' if keys else
+               'Pass the base name with --all, then pick the compilation by its constexprs in ir_index.json.'))
+
+
 CONSTEXPR_LOG = '_constexprs.jsonl'   # written into the cache by dump_ir.sh's compile hook (--all)
 
 
@@ -59,9 +105,9 @@ def collect_all(cache, dest, variant, kernel_name=''):
     plus <dest>/ir_index.json. For multi-case benchmarks, where one command compiles several
     configurations: each is dumped instead of refusing; pick one by the index (num_warps,
     num_stages, shared, and the constexprs dump_ir.sh's compile hook logged)."""
-    groups = _groups(cache, kernel_name)
+    groups = _groups(cache, kernel_name) or _by_constexpr(cache, kernel_name)
     if not groups:
-        raise ValueError(f'no compilation matching {kernel_name!r}; cache retained at {cache}')
+        raise ValueError(_miss_message(cache, kernel_name))
     index = []
     logged = _constexpr_log(cache)
     for k, key in enumerate(sorted(groups, key=lambda g: str(g[0] / g[1]))):
@@ -93,11 +139,13 @@ def collect_all(cache, dest, variant, kernel_name=''):
 
 def collect(cache, dest, variant, kernel_name=''):
     groups = _groups(cache, kernel_name)
+    if not groups and kernel_name:
+        raise ValueError(_miss_message(cache, kernel_name))
     if len(groups) != 1:
         candidates = ', '.join(str(parent.relative_to(cache) / name) for parent, name in groups)
         raise ValueError(f'expected one compilation, found {len(groups)} matching {kernel_name!r}. '
                          'Use --kernel-name and a command pinned to one configuration. '
-                         f'Candidates: {candidates or "none"}; cache retained at {cache}. '
+                         f'Candidates: {candidates or "none"}. '
                          'Or pass --all to dump every compilation into its own directory.')
     key, artifacts = next(iter(groups.items()))
     _collect_one(cache, dest, variant, key, artifacts)

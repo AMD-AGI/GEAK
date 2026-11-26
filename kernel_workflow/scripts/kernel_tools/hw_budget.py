@@ -57,8 +57,11 @@ or below the measured sustained ceiling (ceiling inapplicable or bytes/FLOPs ove
 #   --dispatches N    N > 1 means the timed region is several kernels, so a per-kernel floor cannot be
 #                     compared against the region's total time.
 #
-# Usage (gfx950 first; the SKU key is a row of perf_knowledge/hardware/data/sku.json, and --sku is
-# required -- the tool never assumes a part):
+# Usage (gfx950 first). The part comes from the run hardware context (python3 $KT/hw_context.py
+# --output $EVAL_DIR/hardware_context.json, then --hardware-context that file); without one, --sku
+# names a sku.json row as a REFERENCE part, used as given and not checked against the local GPU
+# (a warning says so) -- the tool never assumes a part. Reference-part examples:
+#   hw_budget.py --hardware-context $EVAL_DIR/hardware_context.json --workload gemm --shapes M=4096,N=4096,K=8192 --dtype bf16
 #   hw_budget.py --sku MI355X
 #   hw_budget.py --sku MI355X --workload attn_bwd --shapes b=1,h=32,d=128,s=8192 --dtype bf16
 #   hw_budget.py --sku MI355X --workload gemm --shapes M=4096,N=4096,K=8192 --dtype fp4 [--json]
@@ -2599,7 +2602,8 @@ multiple is an upper bound; a measured sustained ceiling (MFMA rate, HBM stream 
 --tensors access mix), when sku.json has one, is printed beside it and sets the verdict; a vendor-GEMM
 rate is a comparison at its own shape only. No peak for the dtype: no room verdict, no lever.
 
-0. once per run: python3 $SKILL_DIR/../scripts/hardware_context.py --output $EVAL_DIR/hardware_context.json
+0. once per run (no GPU work): python3 $KT/hw_context.py --output $EVAL_DIR/hardware_context.json
+   ($KT = kernel_workflow/scripts/kernel_tools; it runs <GEAK root>/scripts/hardware_context.py)
 1. named archetype (--help-full lists them):
    hw_budget.py --hardware-context $EVAL_DIR/hardware_context.json --brief \\
        --workload gemm --shapes M=<M>,N=<N>,K=<K> --dtype fp8 --measured-ms <ms>
@@ -2688,7 +2692,11 @@ def main():
     except (OSError, ValueError, KeyError, TypeError) as e:
         ap.error(str(e))
     if not a.sku:
-        ap.error("--sku is required without a matched --hardware-context (or --selftest)")
+        ap.error("no SKU: pass --hardware-context $EVAL_DIR/hardware_context.json, created once per run "
+                 f"with: {_hwdata.context_command()}  (or --selftest). Do not guess --sku: MI350X and "
+                 "MI355X are both gfx950 with different clocks and peaks.")
+    if context is None:
+        print(_hwdata.sku_reference_warning(a.sku), file=sys.stderr)
     def _nums(raw, flag, cap):
         if not raw:
             return None

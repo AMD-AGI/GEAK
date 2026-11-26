@@ -111,8 +111,9 @@ it; a port that only reaches parity in a round is a step, not a failure, if step
 
 Run from the GEAK root (`SKILL=perf_knowledge/expert_skills/skills/gluon_authoring`,
 `KT=kernel_workflow/scripts/kernel_tools`). All optional; GPU commands go through GEAK's
-`GEAK_KERNEL_TOOLS=1 bash kernel_workflow/scripts/gpu_lock.sh <id>` (the variable lets nested kernel tools
-reuse the held lock); pass `--arch gfx950` (or `gfx942`) explicitly. Full usage:
+`bash kernel_workflow/scripts/gpu_lock.sh <id>`, run from the workspace (kernel tools started inside it
+detect the held lock); pass `--arch gfx950` (or `gfx942`) explicitly. Keep each tool's exit status
+visible: no `| tail` / `| head` without `set -o pipefail`, no `>/dev/null` on a setup step. Full usage:
 [`scripts/USAGE.md`](scripts/USAGE.md).
 
 Shared evidence tools (counters, IR/ISA dump, registers/occupancy, hot-loop audit, roofline, MFMA
@@ -151,7 +152,7 @@ Numbers live in [`hw_constants.json`](../../../hardware/data/hw_constants.json) 
 | buffer ops / wave size | `gl.amd.cdna4.buffer_load/store` (offsets in elements); wave64 | `gl.amd.cdna3.buffer_load/store`; wave64 |
 
 Look the rest up, do not recall it: `python3 kernel_workflow/scripts/kernel_tools/amd_isa.py --arch gfx950 search "<words>"`
-(MFMA shapes, layouts, waitcnt, hazards, LDS banking), `extract_sku.py --facts --hardware-context $EVAL_DIR/hardware_context.json` (CUs, XCDs, clocks, peaks; the file is written once by `python3 scripts/hardware_context.py --output $EVAL_DIR/hardware_context.json`),
+(MFMA shapes, layouts, waitcnt, hazards, LDS banking), `extract_sku.py --facts --hardware-context $EVAL_DIR/hardware_context.json` (CUs, XCDs, clocks, peaks; the file is written once per run, no GPU work, by `python3 kernel_workflow/scripts/kernel_tools/hw_context.py --output $EVAL_DIR/hardware_context.json` from the GEAK root; never guess `--sku`: MI350X and MI355X differ),
 `hw_budget.py --brief` (floor and headroom). Support level per target and Triton version:
 [`references/hardware/capability-matrix.md`](references/hardware/capability-matrix.md).
 

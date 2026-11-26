@@ -102,11 +102,32 @@ def load_json(name: str):
         return json.load(fh)
 
 
+HW_CONTEXT_CLI = REPO_ROOT / "scripts" / "hardware_context.py"
+
+
+def context_command(output="$EVAL_DIR/hardware_context.json"):
+    """The exact command that writes a run hardware context (no GPU work)."""
+    return f"python3 {HW_CONTEXT_CLI} --output {output}"
+
+
+def sku_reference_warning(sku):
+    """stderr note for a --sku given without a run context: it is used as named, never checked
+    against the GPU this run is on."""
+    return (f"NOTE: --sku {sku} is used as given and is NOT checked against this GPU (MI350X and "
+            f"MI355X are both gfx950 with different clocks and peaks; do not guess). For the GPU this "
+            f"run is on: {context_command()} , then pass --hardware-context with that file.")
+
+
 def run_context(value=None):
     """Validate a supplied run context through GEAK's shared identity contract."""
     value = value or os.environ.get("GEAK_HARDWARE_CONTEXT")
     if not value:
         return None
+    if isinstance(value, (str, Path)) and not Path(value).is_file():
+        raise FileNotFoundError(
+            f"hardware context {value} does not exist. Create it once per run (no GPU work): "
+            f"{context_command(value)}  -- a failed or skipped setup step is the usual cause; "
+            f"do not substitute a guessed --sku.")
     import sys
     shared = str(REPO_ROOT / "scripts")
     if shared not in sys.path:

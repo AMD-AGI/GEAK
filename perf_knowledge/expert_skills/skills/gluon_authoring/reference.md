@@ -118,7 +118,7 @@ downgrade. Mechanism menu and checked pitfalls: [`playbook.md`](playbook.md). Gr
 | MFMA for this dtype: shape, K, cycles, operand VGPRs | `python3 $KT/amd_isa.py --arch gfx950 list`, `... facts <V_MFMA_...>`; Gluon side: `references/gluon/matrix-reference.md ## Matrix-Family Details` |
 | operand lane / VGPR layout of an MFMA (`DotOperandLayout`, wrong elements) | `python3 $KT/amd_isa.py --arch gfx950 layout <V_MFMA_...> -A` (`-B`, `-D`), `... locate <V_MFMA_...> A <row> <k>` |
 | waitcnt / hazards / wait states / LDS banking / buffer addressing / register limits | `python3 $KT/amd_isa.py --arch gfx950 search "<words>"` (`waitcnt`, `hazard`, `waits`, `lds`, `mem`, `limits`) |
-| CUs, XCDs, clocks, L2 / MALL, per-dtype peaks of this part | `python3 $KT/extract_sku.py --facts --hardware-context $EVAL_DIR/hardware_context.json` |
+| CUs, XCDs, clocks, L2 / MALL, per-dtype peaks of this part | `python3 $KT/extract_sku.py --facts --hardware-context $EVAL_DIR/hardware_context.json`; the file, once per run: `python3 $KT/hw_context.py --output $EVAL_DIR/hardware_context.json` |
 | how much speed is left; compute- or memory-bound | `python3 $KT/hw_budget.py --hardware-context $EVAL_DIR/hardware_context.json --workload <archetype> --shapes ... --brief`; archetype rows: `references/workloads/index.md` |
 | registers, spills, LDS, occupancy limiter of the compiled kernel | `$KT/dump_ir.sh ... --all` then `python3 $KT/probe.py measure --dir <ir>`; will a bigger tile fit: `probe.py plan` |
 | full-drain waits, barriers, MFMA/VALU mix in the hot loop | `python3 $KT/asm_loop_audit.py <.s> --meta <dir> --arch gfx950`; reading it: `references/tile-programming/compiler-contract.md ### Auditing the hot-loop schedule` |

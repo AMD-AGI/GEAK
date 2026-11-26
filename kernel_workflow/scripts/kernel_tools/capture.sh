@@ -135,7 +135,7 @@ while [ $# -gt 0 ]; do
     --dev) DEV_ARG="$2"; shift 2;;
     --cmd) CMD=(bash -c "$2"); shift 2;;
     --no-att) WANT_ATT="no"; shift;;
-    --lite) LITE="yes"; WANT_ATT="no"; shift;;   # fast: kernel-trace timing + static ISA only
+    --lite) LITE="yes"; WANT_ATT="no"; shift;;   # fast: kernel-trace timing + static ISA only (NO ATT)
     # --isa-only is the MANDATORY per-round tier: dump the IR and audit the ISA, nothing else. No
     # profiler runs at all, so it costs seconds and cannot hang. A tiered read is only honest if
     # its bottom tier is genuinely cheap enough to run consistently; a mandatory layer that is
@@ -436,6 +436,9 @@ print(f"[capture] branch={branch}  sol={state}  att={bool(attdir)}  "
       f"static={bool(cap['asm_audit'])}  -> {out}/capture.json")
 if why:
     print(f"[capture]   SOL: {why}")
+if branch in ("lite", "isa-only"):
+    print(f"[capture]   ATT skipped (--{'lite' if branch == 'lite' else 'isa-only'}): hotspot_analyzer.py, "
+          f"att_opclass.py and mfma_efficiency.py need a capture run without --lite / --isa-only")
 PY
 # The profiler layers could not run at all in this image: say so in the exit code (capture.json
 # trace_state=llvm_dual_load), so a caller does not file the round as a clean capture.

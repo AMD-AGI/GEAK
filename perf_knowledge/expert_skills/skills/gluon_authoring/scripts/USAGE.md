@@ -10,8 +10,9 @@ KT=kernel_workflow/scripts/kernel_tools                       # GEAK's shared ke
 Three owners, and the skill defers to the first two:
 
 - **GEAK infrastructure** — `kernel_workflow/scripts/gpu_lock.sh` (shared GPU ownership; lock dir
-  `/tmp/team_gpu_locks`; with `GEAK_KERNEL_TOOLS=1` it also honours `GEAK_GPU_LOCK_DIR` and exports
-  `GEAK_GPU_LOCK_HELD` so nested kernel tools reuse the lock), `kernel_workflow/scripts/profile_kernel.sh` +
+  `/tmp/team_gpu_locks`; a kernel tool started inside it detects the lock a parent holds and reuses it;
+  with `GEAK_KERNEL_TOOLS=1` the lock also honours `GEAK_GPU_LOCK_DIR` (hermetic tests) and exports
+  `GEAK_GPU_LOCK_HELD`), `kernel_workflow/scripts/profile_kernel.sh` +
   `profile_policy.sh` (the profiler entry), the frozen task runner (acceptance; `harness_lib.py` for extracted tasks), `scripts/gpu_identity.py` (`gfx`, `target`, `sku`).
 - **`$KT`** — shared diagnostics and search helpers, including tools promoted from existing Gluon entry points. Their data is
   `perf_knowledge/hardware/data/` (resolved by `$KT/_hwdata.py`; override `GEAK_HW_DATA_DIR`).
@@ -40,7 +41,7 @@ acceptance replace them.
 | command | gives you |
 | --- | --- |
 | **`$KT/hw_budget.py --hardware-context $EVAL_DIR/hardware_context.json --workload <archetype> --shapes k=v,… --dtype bf16 --brief`** (`--help`: 3-step card) | no GPU. Intensity vs the SKU ridge → bound-class prior with `bound_direction`; the MFMA-only floor and your multiple over it; the `references/workloads/index.md` row for the archetype (read it); `numerator_basis` / `denominator_basis`, `analysis_role: planning`, `may_gate: false` on every ratio. Calibrate with `--measured-dram-mb`, `--measured-hbm-tb-s`, `--measured-tflops lo,hi`; declare what the kernel moves with `--tensors`, `--flops`, `--flops-engine`; C0 with `--grid`, `--footprint-mb`, `--dispatches` |
-| `$KT/mem_bw_probe.py --sku <SKU> --runlen … --stride … --rw-mix …` | the **in-shape** memory ceiling (a range, with its program count) — a separately requested diagnostic, not native TraceLens calibration or an acceptance gate |
+| `$KT/mem_bw_probe.py --hardware-context $EVAL_DIR/hardware_context.json --runlen … --stride … --rw-mix …` (the file, once per run: `python3 $KT/hw_context.py --output $EVAL_DIR/hardware_context.json`) | the **in-shape** memory ceiling (a range, with its program count) — a separately requested diagnostic, not native TraceLens calibration or an acceptance gate |
 | `$KT/extract_sku.py --facts <SKU> \| --print <SKU> \| --check \| --render … \| --check-docs \| --sync-docs` | reads, validates and renders `perf_knowledge/hardware/data/sku.json` (the single per-SKU source); every SKU table in the docs is generated from it |
 
 ## Transcription

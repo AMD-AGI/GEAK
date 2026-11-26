@@ -7,6 +7,7 @@ Agent routing (signal -> tool) is `kernel_workflow/scripts/kernel_tools/CARD.md`
 
 | Tool | Answers | Needs |
 | --- | --- | --- |
+| `hw_context.py` | writes the run hardware context once (runs `<GEAK root>/scripts/hardware_context.py`) | rocminfo, no GPU work |
 | `hw_budget.py` | floor, bound and measured/floor multiple for a kernel | SKU or hardware context |
 | `extract_sku.py` | per-SKU facts (CUs, XCDs, caches, peaks, ridge); renders SKU tables | `perf_knowledge/hardware/data/sku.json` |
 | `mem_bw_probe.py` | in-shape HBM ceiling for an access pattern | GPU (under `gpu_lock.sh`) |
@@ -24,7 +25,7 @@ Agent routing (signal -> tool) is `kernel_workflow/scripts/kernel_tools/CARD.md`
 
 Libraries (imported or sourced, not commands): `_hwdata.py`, `_quickhelp.py`, `amd_resources.py`,
 `amd_artifacts.py`, `amd_targets.py`, `_amd_isa_db.py`, `_amd_matrix.py`, `_kt_common.sh`,
-`locus.sh`, `rocprofv3_env.sh`, `profiler_deps.py`, `profiler_artifacts.py`, `_att_fixture.py`.
+`locus.sh`, `rocprofv3_env.sh`, `profiler_deps.py`, `profiler_artifacts.py`, `_att_fixture.py`, `held_lock.py`.
 Hardware data lives in `perf_knowledge/hardware/data/` (override with `GEAK_HW_DATA_DIR`).
 Profiler setup and the known rocprofv3 abort: [profiling-dependencies.md](profiling-dependencies.md);
 ISA data maintenance: [isa_tools.md](isa_tools.md).

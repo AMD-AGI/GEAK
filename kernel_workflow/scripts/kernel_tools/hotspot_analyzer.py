@@ -509,6 +509,25 @@ def arch_from_agent_info(dispatch_dir):
     return None
 
 
+def _lite_branch(capture_json):
+    try:
+        with open(capture_json) as fh:
+            return json.load(fh).get("branch")
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def _lite_capture(path):
+    """capture.json of a capture.sh --lite / --isa-only run at or above path (up to 3 levels), else None."""
+    d = os.path.abspath(path)
+    for _ in range(4):
+        cj = os.path.join(d, "capture.json")
+        if os.path.isfile(cj) and _lite_branch(cj) in ("lite", "isa-only"):
+            return cj
+        d = os.path.dirname(d)
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description="GPU kernel hotspot analyzer")
     parser.add_argument("dispatch_dir", help="Path to ATT dispatch output directory")
@@ -533,6 +552,11 @@ def main():
     parser.add_argument("--wave-size", type=int, choices=(32, 64), help="Actual compiled wave mode")
     args = parser.parse_args()
 
+    lite = _lite_capture(args.dispatch_dir)
+    if lite and not os.path.isfile(os.path.join(args.dispatch_dir, "code.json")):
+        print(f"Error: {lite} records branch={_lite_branch(lite)}: that capture skipped ATT, so there is no "
+              "dispatch to analyze. Re-run capture.sh without --lite / --isa-only.", file=sys.stderr)
+        return 1
     if not os.path.isdir(args.dispatch_dir):
         print(f"Error: directory not found: {args.dispatch_dir}")
         return 1

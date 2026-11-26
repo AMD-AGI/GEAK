@@ -23,7 +23,10 @@ Design notes (kept here, not in --help):
   independent tiled stream on MI350X, and 32-bit offsets wrapped at runlen <= 256 with a 4 KiB
   stride (span > 8 GiB).
 
-Usage:
+Usage (the part comes from --hardware-context, written once per run by
+`python3 $KT/hw_context.py --output $EVAL_DIR/hardware_context.json`; --sku names a reference part
+used as given, not checked against this GPU -- do not guess it):
+  mem_bw_probe.py --hardware-context $EVAL_DIR/hardware_context.json --footprint-mb 2048
   mem_bw_probe.py --sku MI355X --footprint-mb 2048                       # linear read
   mem_bw_probe.py --sku MI355X --runlen 2048 --stride 32768 --rw-mix 40:60
   mem_bw_probe.py --sku MI355X --nprog-sweep 1000,2000,4000,8000
@@ -541,6 +544,7 @@ mem_bw_probe.py -- HBM bandwidth this GPU reaches at a kernel's access shape  (G
 Useful when hw_budget.py reports `bound: memory` and the stop/continue call rests on that axis:
 the datasheet HBM peak is an upper bound no real stream reaches.
 
+  python3 $KT/hw_context.py --output $EVAL_DIR/hardware_context.json    # once per run, no GPU work
   bash $SKILL_DIR/scripts/gpu_lock.sh $GPU_ID python3 $KT/mem_bw_probe.py \\
       --hardware-context $EVAL_DIR/hardware_context.json --footprint-mb 2048 --json $EVAL_DIR/mem_bw.json
   shape options:
@@ -658,8 +662,12 @@ def main():
     except (OSError, ValueError, KeyError, TypeError, RuntimeError) as e:
         ap.error(str(e))
     if not a.sku:
-        ap.error("--sku is required: the physical-limit and cache-residency refusals are not "
-                 "optional, and both need the SKU's peak/L2 (or --selftest)")
+        ap.error("no SKU: the physical-limit and cache-residency refusals need the SKU's peak/L2. Pass "
+                 "--hardware-context $EVAL_DIR/hardware_context.json, created once per run with: "
+                 f"{_hwdata.context_command()}  (or --selftest). Do not guess --sku: MI350X and MI355X "
+                 "are both gfx950 with different clocks and peaks.")
+    if context is None:
+        print(_hwdata.sku_reference_warning(a.sku), file=sys.stderr)
     sku = load_sku(a.sku)
     if a.eager and not a.rmw:
         ap.error("--eager applies to --rmw only")

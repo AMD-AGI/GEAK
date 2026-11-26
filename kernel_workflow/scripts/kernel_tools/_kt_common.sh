@@ -4,8 +4,10 @@
 # GEAK conventions every profiler wrapper here follows:
 #   * GPU work runs under GEAK's gpu_lock.sh (kernel_workflow/scripts/gpu_lock.sh). A wrapper started
 #     outside the lock re-execs itself under it when given a GPU id, and refuses otherwise. Inside
-#     the lock (GEAK_GPU_LOCK_HELD set) it never locks again: a nested gpu_lock.sh on the same id would
-#     deadlock on its own flock.
+#     the lock it never locks again: a nested gpu_lock.sh on the same id would deadlock on its own
+#     flock. "Inside" = GEAK_GPU_LOCK_HELD / a lease exported, or (held_lock.py) a parent process
+#     holds the team flock for the one GPU in HIP_VISIBLE_DEVICES -- so `gpu_lock.sh <ids> bash
+#     <tool>` works without GEAK_KERNEL_TOOLS=1 set first.
 #   * No inline HIP_VISIBLE_DEVICES: the device is whatever gpu_lock.sh exported.
 #   * No `rm`: stale artifact dirs are moved aside (kt_move_aside), as profile_kernel.sh does.
 #   * The profiled command may be argv (`-- cmd args...`) or one shell string (`--cmd "<string>"`,
@@ -47,18 +49,46 @@ kt_kill_tree() {
 # kt_under_lock: rc 0 when this process already runs inside gpu_lock.sh.
 kt_under_lock() { [ -n "${GEAK_GPU_LOCK_HELD:-}" ] || [ "${GEAK_GPU_LEASE_ACTIVE:-0}" = "1" ]; }
 
+# kt_adopt_outer_lock <self>: gpu_lock.sh exports GEAK_GPU_LOCK_HELD only when GEAK_KERNEL_TOOLS=1
+# was set before it. Without it, a tool run as `gpu_lock.sh <ids> bash <tool>` is still inside the
+# lock: adopt it when a parent process holds the team flock for the one GPU in HIP_VISIBLE_DEVICES
+# (held_lock.py). Nothing is adopted outside a real held lock.
+kt_adopt_outer_lock() {
+  [ -z "${GEAK_GPU_LOCK_HELD:-}${GEAK_GPU_LOCKED_SET:-}" ] || return 0
+  [ "${GEAK_GPU_LEASE_ACTIVE:-0}" != "1" ] || return 0
+  local held
+  held="$(python3 "$KT_DIR/held_lock.py" 2>/dev/null)" || return 0
+  [ -n "$held" ] || return 0
+  export GEAK_GPU_LOCK_HELD="$held"
+  echo "[$(basename "${1:-kernel_tools}")] under gpu_lock.sh: GPU $held is held by a parent process; using it." >&2
+}
+
 # kt_ensure_lock <gpu_id|""> <self> <args...>: return if already under the lock; else re-exec
 # `bash <self> <args...>` under gpu_lock.sh <gpu_id>; with no id, refuse (exit 2).
 kt_ensure_lock() {
   local gpu="$1" self="$2"; shift 2
   local ownership_rc=0
-  python3 "$KT_DIR/../gpu_ownership.py" --gpu-spec "$gpu" || ownership_rc=$?
+  kt_adopt_outer_lock "$self"
+  python3 "$KT_DIR/../gpu_ownership.py" --gpu-spec "$gpu" 2>/dev/null || ownership_rc=$?
+  if [ "$ownership_rc" = 2 ] && [ -n "$gpu" ] && [ -n "${GEAK_GPU_LOCK_HELD:-}" ] \
+     && [ -z "${GEAK_GPU_LOCKED_SET:-}" ] && [ "${GEAK_GPU_LEASE_ACTIVE:-0}" != 1 ] \
+     && [ "${GEAK_GPU_LOCK_HELD}" = "${HIP_VISIBLE_DEVICES:-}" ] \
+     && [[ "$gpu" =~ ^[0-9]+(,[0-9]+)*$ ]] \
+     && python3 "$KT_DIR/../gpu_ownership.py" --gpu-spec "" 2>/dev/null; then
+    # Already inside a valid single-GPU lock, but --dev/--gpu names another id (e.g. the pool's
+    # other member: `gpu_lock.sh 4,5` took 5, the script says --dev 4). The work runs on the
+    # held, locked GPU; the id passed is not used for anything else.
+    echo "[$(basename "$self")] NOTE: already under gpu_lock.sh holding GPU ${GEAK_GPU_LOCK_HELD};" \
+         "--dev/--gpu $gpu is ignored and the held GPU is used (inside a lock, omit --dev/--gpu)." >&2
+    ownership_rc=0
+  fi
   case "$ownership_rc" in
     0)
       python3 "$KT_DIR/../workspace_sources.py" check --workspace "$PWD" || exit 2
       return 0 ;;
     1) ;;  # No inherited ownership: acquire the outer lock below.
     *)  # Never bypass a conflicting allocation, even in test mode.
+      python3 "$KT_DIR/../gpu_ownership.py" --gpu-spec "$gpu" || true   # print the reason
       if [ -n "${GEAK_GPU_LOCK_HELD:-}" ] && [ -z "${GEAK_GPU_LOCKED_SET:-}" ] \
          && [ "${GEAK_GPU_LEASE_ACTIVE:-0}" != 1 ] && [ "${GEAK_GPU_LOCK_HELD}" != "${HIP_VISIBLE_DEVICES:-}" ]; then
         echo "[$(basename "$self")] GEAK_GPU_LOCK_HELD must be the GPU id gpu_lock.sh exported (not a flag):" \
@@ -76,8 +106,9 @@ kt_ensure_lock() {
     export GEAK_KERNEL_TOOLS=1   # the lock exports GEAK_GPU_LOCK_HELD for the re-exec'd tool
     exec bash "$KT_GPU_LOCK" "$gpu" bash "$self" "$@"
   fi
-  echo "[$(basename "$self")] REFUSING: GPU work must run under GEAK's gpu_lock.sh. Either" >&2
-  echo "  cd <workspace> && GEAK_KERNEL_TOOLS=1 bash $KT_GPU_LOCK <gpu_id> bash $self ..." >&2
+  echo "[$(basename "$self")] REFUSING: no GEAK GPU lock is held by this process or a parent" \
+       "(HIP_VISIBLE_DEVICES='${HIP_VISIBLE_DEVICES:-}'; GEAK_KERNEL_TOOLS=1 alone is not a lock). Either" >&2
+  echo "  cd <workspace> && bash $KT_GPU_LOCK <gpu_id> bash $self ..." >&2
   echo "  or pass the GPU id this run was allocated (--dev/--gpu <id>) and this script locks itself." >&2
   exit 2
 }

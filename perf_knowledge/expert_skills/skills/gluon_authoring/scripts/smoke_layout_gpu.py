@@ -73,7 +73,11 @@ def gpu_case(case, out, compile_only=False):
     else:
         if not any(os.environ.get(k) for k in
                    ("GEAK_GPU_LOCK_HELD", "GEAK_GPU_LOCKED_SET", "GEAK_GPU_LEASE_ACTIVE")):
-            raise RuntimeError("Run under kernel_workflow/scripts/gpu_lock.sh; propagate ownership into containers")
+            # a default gpu_lock.sh exports no marker: accept the flock a parent process holds
+            sys.path.insert(0, str(Path(__file__).resolve().parents[5] / "kernel_workflow/scripts/kernel_tools"))
+            import held_lock
+            if held_lock.held_gpu() is None:
+                raise RuntimeError("Run under kernel_workflow/scripts/gpu_lock.sh; propagate ownership into containers")
         target = triton.runtime.driver.active.get_current_target()
         if target.backend != "hip" or target.arch != "gfx950":
             raise RuntimeError(f"gfx950 required, got {target}")

@@ -153,7 +153,33 @@ def test_missing_dtype_is_refused_not_fp16(name, dtype):
 
 def test_hw_budget_refuses_without_a_sku():
     r = run(sys.executable, KT / "hw_budget.py", "--workload", "gemm", "--shapes", "M=64,N=64,K=64")
-    assert r.returncode != 0 and "--sku is required" in r.stderr
+    # the refusal names the exact command that writes the run context, and says not to guess a SKU
+    assert r.returncode != 0 and "no SKU" in r.stderr
+    assert f"python3 {REPO / 'scripts/hardware_context.py'} --output" in r.stderr
+    assert "Do not guess --sku" in r.stderr
+
+
+def test_missing_hardware_context_names_the_command_that_creates_it(tmp_path):
+    missing = tmp_path / "round_1" / "hardware_context.json"
+    for tool in ("hw_budget.py", "mem_bw_probe.py"):
+        r = run(sys.executable, KT / tool, "--hardware-context", str(missing), "--footprint-mb", "64")
+        assert r.returncode != 0, tool
+        assert f"hardware context {missing} does not exist" in r.stderr, (tool, r.stderr)
+        assert f"python3 {REPO / 'scripts/hardware_context.py'} --output {missing}" in r.stderr, tool
+    r = run(sys.executable, KT / "extract_sku.py", "--facts", "--hardware-context", str(missing))
+    assert r.returncode != 0 and "does not exist" in r.stderr and "hardware_context.py --output" in r.stderr
+
+
+def test_a_named_sku_without_context_is_flagged_as_unchecked():
+    r = run(sys.executable, KT / "hw_budget.py", "--sku", "MI355X", "--workload", "gemm",
+            "--shapes", "M=64,N=64,K=64", "--dtype", "bf16")
+    assert r.returncode == 0, r.stderr
+    assert "--sku MI355X is used as given and is NOT checked against this GPU" in r.stderr
+
+
+def test_kt_hw_context_shim_runs_the_shared_cli():
+    r = run(sys.executable, KT / "hw_context.py", "--help")
+    assert r.returncode == 0 and "--output" in (r.stdout + r.stderr)
 
 
 

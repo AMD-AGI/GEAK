@@ -56,7 +56,9 @@ def resolve_ideal_cadence(override, arch, dtype):
             raise ValueError("--ideal-cadence must be positive and finite")
         return override, "--ideal-cadence (explicit; caller must establish instruction/arch scope)"
     return None, (f"UNRESOLVED (arch={arch or '?'}, dtype={dtype or '?'}; "
-                  "dtype-only hardware constants do not establish a per-instruction cadence)")
+                  "dtype-only hardware constants do not establish a per-instruction cadence; for one: "
+                  "amd_isa.py --arch <gfx> facts <MFMA opcode> [--as fp8|fp4] -> issue_interval_measured, "
+                  "then --ideal-cadence N)")
 
 
 def _pct(xs, p):
@@ -117,9 +119,13 @@ def report(r, label, ideal, ideal_src="", dtype=None):
     print(f"\n=== {label} ===")
     n, span = r["n_mfma"], r["span"]
     med, mean, p10 = r["cadence_median"], r["cadence_mean"], r["cadence_p10"]
+    mn = r.get("mfma_mnemonics") or []
+    f8f6f4 = not dtype and mn and all("f8f6f4" in m.lower() for m in mn)
     print(f"  MFMA: {n} in span {span} cyc"
-          + (f"  dtype={dtype}" if dtype else "  dtype=? (mnemonics: "
-             + ",".join(r.get("mfma_mnemonics") or ["none"])[:60] + ")"))
+          + (f"  dtype={dtype}" if dtype else
+             "  dtype=f8f6f4 family (operand format set by cbsz/blgp, not in the mnemonic: "
+             + ",".join(sorted(set(mn)))[:80] + ")" if f8f6f4 else
+             "  dtype=? (mnemonics: " + ",".join(mn or ["none"])[:60] + ")"))
     if med is None:
         print("  MFMA cadence UNKNOWN: fewer than two matrix instructions; no inter-MFMA interval.")
         return

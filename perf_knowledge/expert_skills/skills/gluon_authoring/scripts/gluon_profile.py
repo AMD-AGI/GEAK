@@ -22,7 +22,7 @@ tenant is on the GPU is retried after a wait (--busy-wait), never run on the bus
 reason (never as zeros); the exit code says whether every requested layer is usable.
 
 GPU: pass --gpu <id> (each tool takes the GEAK lock itself) or run the whole call under
-`GEAK_KERNEL_TOOLS=1 bash kernel_workflow/scripts/gpu_lock.sh <id>` (the tools reuse the held lock).
+`bash kernel_workflow/scripts/gpu_lock.sh <id>` (the tools reuse the held lock).
 
 Usage:
   gluon_profile.py <out_dir> --kernel <substr> --source <kernel.py> [--gpu N] [--arch gfx942]
@@ -614,7 +614,11 @@ def main(argv=None):
     if not Path(a.source).is_file():
         ap.error(f"--source not found: {a.source}")
     if a.gpu is None and not os.environ.get("GEAK_GPU_LOCK_HELD"):
-        ap.error("pass --gpu <id> or run under kernel_workflow/scripts/gpu_lock.sh <id>")
+        import held_lock   # kernel_tools: a parent gpu_lock.sh holding the one visible GPU
+        held = held_lock.held_gpu()
+        if held is None:
+            ap.error("pass --gpu <id> or run under kernel_workflow/scripts/gpu_lock.sh <id>")
+        os.environ["GEAK_GPU_LOCK_HELD"] = held   # the tools below reuse the held lock
     return profile(a, cmd)
 
 

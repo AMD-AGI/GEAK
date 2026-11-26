@@ -113,10 +113,11 @@ _check_sources_on_exit() {
 }
 trap _check_sources_on_exit EXIT
 
-# Kernel-tools extras, opt-in (GEAK_KERNEL_TOOLS=1 from the kernel-tools card / kernel_tools wrappers,
+# Kernel-tools extras, opt-in (GEAK_KERNEL_TOOLS=1 from the kernel_tools wrappers' self-lock,
 # or KERNEL_TOOLS_PROFILE=1 from profile_kernel.sh's opt-in counter pass, both only under
 # use_expert_skills): honour GEAK_GPU_LOCK_DIR and export GEAK_GPU_LOCK_HELD for nested tools.
-# Without either, the lock directory and the exported env are exactly the default behaviour.
+# Without either, the lock directory and the exported env are exactly the default behaviour (a kernel
+# tool run inside this default lock finds it from the held flock: kernel_tools/held_lock.py).
 _KT_LOCK_EXTRAS=0
 if [ "${GEAK_KERNEL_TOOLS:-0}" = "1" ] || [ "${KERNEL_TOOLS_PROFILE:-0}" = "1" ]; then _KT_LOCK_EXTRAS=1; fi
 # ONE team-wide namespace: two runs serialize only if they flock the SAME file. GEAK_GPU_LOCK_DIR

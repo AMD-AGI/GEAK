@@ -568,7 +568,10 @@ def summarize(cell_ms, baseline, band=None, min_improve_pct=MIN_IMPROVE_PCT):
         if not r["resolved"]:
             r["note"] = (f"delta {delta_pct:.2f}% <= {src} band {noise:.2f}% (widest: {arm} arm) -- "
                          f"NOT RESOLVED in this window. Add cells, or discriminate with a "
-                         f"clock-insensitive counter. Record it as `--verdict null`, not as a small win."
+                         f"clock-insensitive counter. Record it as `--verdict null`, not as a small win. "
+                         f"On a GPU shared with other work, if a second window is also unresolved, more "
+                         f"cells rarely help: report a tie at this band and let a counter or the task's "
+                         f"own verify decide."
                          + (" The baseline arm carries the spread: re-measure (more --cells, --preload) "
                             "before reading this as a null." if arm == "baseline" else ""))
         elif not r["clears_min_improve"] and sp_med and sp_med >= 1.0:

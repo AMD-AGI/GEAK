@@ -26,10 +26,21 @@ showed that exact stall.
 
 Numbered for reference, not a try-first order: a lever is a candidate when its *signal* is in the evidence.
 
-1. **8-warp warp-pipeline ping-pong + `amdgpu-agpr-alloc=0`** — *signal:* a large compute-bound
-   tile (prefill GEMM) whose loop serializes LDS/VALU work and MFMA within a wave, or a 4-warp tile
-   that cannot grow without spilling. *Precondition seen in the wins:* the tile count filled at least
-   about one full wave at 1 WG/CU; below that, an exact-fill tile is the other candidate to A/B.
+1. **8-warp warp-pipeline ping-pong + `amdgpu-agpr-alloc=0`** — a family of builds (tile, ring depth,
+   warp split, attributes), not one recipe, and not a first try: it is a candidate only when its signal
+   and conditions hold. *Signal:* a large compute-bound tile (prefill GEMM) whose loop serializes
+   LDS/VALU work and MFMA within a wave, or a 4-warp tile that cannot grow without spilling.
+   *Where it paid (gfx950 / Triton 3.8.0):* GEMM tiles that stay spill-free at 8 warps and whose tile
+   count fills at least about one full wave at 1 WG/CU; attention only where a 256-row 8-warp tile is
+   kept anyway, with the pin of #6.
+   *Where it loses or ties (re-test when the condition changes):* fewer tiles than one full wave at
+   1 WG/CU (an exact-fill tile is the candidate to A/B); a ring with no LDS room for the extra stage
+   (bf16 256×256×64: two stages already take 128 KiB of gfx950's 160 KiB); bodies bound by VALU latency
+   (dequant, a serial fold), where the lockstep barrier waits; a tile that spills at 8 warps. No
+   recorded result for fp4 / MXFP4 GEMM tiles or for gfx942.
+   **A build that measures flat or slower closes that build, not the family:** record which condition
+   above it violated, and if none did, A/B the nearest variant that removes the suspected cause (a tile
+   that fills the grid, a separate scale ring, a different `agpr-alloc`) before dropping the direction.
    *Recipe:* `num_warps=8` (two 4-warp groups; every layout's `warps_per_cta` must be rewritten for 8 —
    a layout sized for 4 warps fails to compile at 8 on Triton 3.8.0 / gfx950), an
    authored `async_copy` ring, and in the loop `with gl.amd.warp_pipeline_stage("mem", priority=1)` (LDS reads + next copies + address math)
@@ -95,8 +106,9 @@ Numbered for reference, not a try-first order: a lever is a candidate when its *
    [`inline-asm-reference.md`](references/gluon/inline-asm-reference.md).
 6. **Attention: classify the scenario, then read the per-scenario signal → lever table** —
    *softmax attention (MHA/GQA prefill)*, levers measured by leave-one-out on one MLA/MHA prefill family
-   (unordered; pick by signal): register budget (*signal:* a wide head spilling at 2 waves → 1
-   wave/SIMD with AGPRs usable); every head slice (PE/rope) on the pipelined loop (*signal:* an extra MFMA
+   (unordered; pick by signal; bf16 evidence): register budget (*signal:* a wide head spilling at 2
+   waves → 1 wave/SIMD with AGPRs usable; measured on bf16 only — on fp8 / scaled MFMA it is a
+   hypothesis to A/B, not a prior); every head slice (PE/rope) on the pipelined loop (*signal:* an extra MFMA
    chain gated off the loop); LPT grid, then split-KV with an in-kernel last-arriver merge (*signal:* an
    under-filled grid); at `num_warps=4` stage markers replaced by `wait_group` + one barrier (*signal:*
    extra `s_barrier` per border); tile per (causal, length) bucket. Each of these measured larger than
@@ -108,7 +120,8 @@ Numbered for reference, not a try-first order: a lever is a candidate when its *
    *DSA indexer (MQA logits, no softmax):* not flash attention — the levers that paid there were grid
    fill, K reuse across rows, register diet, and a scalar (non-`v_pk`) head fold plus 3-4
    waves/SIMD via `iterative-minreg` + `agpr-alloc=0` (with the packed fold or the default scheduler
-   the extra waves lost); the 8-warp ping-pong lost in the indexer runs recorded (H32/H64 prefill).
+   the extra waves lost); the 8-warp ping-pong lost in the indexer runs recorded (H32/H64 prefill) —
+   that negative does not cover a 4-warp in-wave interleave of tile *t+1*'s MFMAs with tile *t*'s fold.
    *Sparse MLA / DSA indexer decode:* own tables (prefill on-chip bound; decode = split count for one
    residency round). Measured on Triton 3.8 / gfx950 on the families named.
    [`attention.md ## Prefill levers by signal`](references/workloads/attention.md#prefill-levers-by-signal-gfx950-triton-380-bf16-varlen-prefill),
