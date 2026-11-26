@@ -2504,6 +2504,8 @@ const POOL_SCHEMA = obj({
   note: STR,
 }, ['verdict']);
 
+// mode=mega reply schemas. Where a lane schema exists, the mega one spreads it and adds or redefines only
+// what a mega role reports beyond it.
 const MEGA_SETUP_SCHEMA = obj({
   eval_dir: STR, workspace: STR, baseline_dir: STR,
   kernel_name: STR, source_files: STRS, notes: STR,
@@ -2671,9 +2673,7 @@ const MEGA_TOPOLOGY_SCHEMA = obj({
 });
 
 const MEGA_ANALYZE_BASE_SCHEMA = obj({
-  kernel_type: STR, kernel_file: STR, entry_point: STR,
-  modifiable_files: STRS,
-  bottleneck_guess: STR, roadmap_summary: STR,
+  ...ANALYZE_SCHEMA.properties,
   // The ladder: Analyze's ranked rungs and what each is conditional on.
   candidate_directions: { type: 'array', items: obj({
     id: STR,              // short, stable, quotable: D0, D1, ...
@@ -2708,9 +2708,6 @@ const MEGA_ANALYZE_BASE_SCHEMA = obj({
     },
     target_topology: MEGA_TOPOLOGY_SCHEMA,
   }, ['id', 'title', 'gated_on']) },
-  // perf_knowledge mapping (reference only): operator/language and the most relevant card paths.
-  kk_operator: STR_N, kk_language: STR_N,
-  kk_refs: STRS,
   baseline_operator_map: { type: 'array', items: obj({
     role: STR,
     file: STR,
@@ -2965,15 +2962,7 @@ const MEGA_ANALYZE_SCHEMA = {
 };
 
 const MEGA_BENCH_SCHEMA = obj({
-  commandment_path: STR, correctness_cmd: STR,
-  benchmark_cmd: STR, profile_cmd: STR, parse_hint: STR,
-  baseline_per_case: ANYOBJS,
-  baseline_geomean_ms: NUM, num_test_cases: NUM,
-  // Workload-aligned outputs (present with a workload spec): metric = Σweight / Σ(weight/speedup);
-  // baseline_weighted_total_ms is the baseline time the weights represent.
-  workload_aligned: BOOL,
-  baseline_weighted_total_ms: NUM,
-  weights_provenance: STR, // e.g. "trace" | "regime" | "regime_floor" | "prior" | "caller" | "mixed"
+  ...BENCH_SCHEMA.properties,
   positive_control: obj({
     ran: BOOL,
     claim_complete: BOOL,
@@ -2990,7 +2979,6 @@ const MEGA_BENCH_SCHEMA = obj({
     note: STR,
     // Required only when the object exists at all: a run with no control omits it entirely.
   }, ['ran', 'claim_complete', 'switch_present', 'measured_pct']),
-  reliable: BOOL, notes: STR,
 }, ['commandment_path', 'baseline_per_case', 'baseline_geomean_ms']);
 
 const ANALYSIS_RESULT_SCHEMA = obj({
@@ -3013,7 +3001,7 @@ const ANALYSIS_RESULT_SCHEMA = obj({
 ]);
 
 const MEGA_PLAN_BASE_SCHEMA = obj({
-  stop: BOOL, reasoning: STR,
+  ...PLAN_SCHEMA.properties,
   directions: {
     type: 'array',
     items: obj({
@@ -3085,7 +3073,7 @@ const MEGA_PLAN_SCHEMA = {
 };
 
 const MEGA_VERIFY_SCHEMA = obj({
-  status: STR, correctness: STR,
+  ...VERIFY_SCHEMA.properties,
   claim_complete: BOOL, attempt_id: STR,
   timeout_recovery_safe: BOOL,
   active_gpu_processes: NUM,
@@ -3103,9 +3091,7 @@ const MEGA_VERIFY_SCHEMA = obj({
     },
   }, []),
   verified_geomean: NUM_N, verified_arithmetic: NUM_N,
-  verified_weighted: NUM_N, // time-weighted ratio-of-sums (PRIMARY when workload_aligned)
-  per_case: perCase, variance_note: STR, notes: STR,
-  graph_safe: STR,
+  verified_weighted: NUM_N,
   liveness: STR, // pass|fail|n/a — deadlock/stale-read stress (distributed specialty)
   replay_count: NUM,
   replay_results: { type: 'array', items: obj({
@@ -3178,7 +3164,7 @@ const MEGA_VERIFY_SCHEMA = obj({
 }, ['status', 'verified_geomean', 'touched_files']);
 
 const MEGA_MEMORY_SCHEMA = obj({
-  insights: STRS,
+  ...MEMORY_SCHEMA.properties,
   candidate_registry: ANYOBJS,
   measurement_calibration: ANYOBJ,
   state_written: BOOL, state_round: NUM,
@@ -3209,7 +3195,6 @@ const MEGA_MEMORY_SCHEMA = obj({
     // true = holds for any kernel on this target; false = this operator's shape.
     generalizes: BOOL,
   }, ['fact', 'evidence', 'generalizes']) },
-  bottleneck_now: STR, suggest_next: STR,
 }, ['insights']);
 
 const MEGA_SELECTION_SCHEMA = obj({
