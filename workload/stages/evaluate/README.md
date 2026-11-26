@@ -16,8 +16,7 @@ cannot repair a systematic mismatch.
 
 Use paired GSM8K final-answer exact match for model correctness. Score the unchanged
 reference and the deployed candidate against gold answers on the same test questions.
-Token IDs, generated text and conditioning-prompt hashes are diagnostic only. A
-throughput-only screen leaves correctness unevaluated.
+A throughput-only screen leaves correctness unevaluated.
 
 Use the merged config's `gsm8k` policy or the [workload defaults](../../config/default.json)
 for a direct call. Use `screen_questions` for a quality screen and `finalist_questions`
