@@ -8,16 +8,18 @@ hipcc harness, numeric ONNX-vs-CPU framework, or a selfcheck template), and
 emits a task dir GEAK can drive via mode=optimize with zero JS changes.
 
 Usage:
-  python3 tools/gen_ep_task.py --op matmul_nbits --arch gfx1151 \
-      --ep-repo <hip-ep checkout> \
-      --out examples/tasks/hip_ep_matmul_nbits
+  python3 tools/gen_ep_task.py --op matmul_nbits_fast --arch gfx1151 \
+      --ep-repo <hip-ep-2bit-fpzp checkout> \
+      --out examples/tasks/hip_ep_matmul_nbits_fast
 
-  python3 tools/gen_ep_task.py --op layer_norm --arch gfx1151 \
+  python3 tools/gen_ep_task.py --op matmul_nbits --arch gfx1151 \
       --ep-repo <hip-ep checkout> --ep-dll <install>/lib/libhipgpu.so \
       --ep-option config_file=<install>/bin/morphizen_config.json \
       --ep-kernel-lib <build>/lib/Runtime/Kernels/libcustom_kernels_gfx1151.so \
       --ep-build-cmd "cmake --build <build> --target custom_kernels_gfx1151" \
-      --out examples/tasks/hip_ep_layer_norm
+      --out examples/tasks/hip_ep_matmul_nbits
+
+  (layer_norm takes the same flags.)
 
   python3 tools/gen_ep_task.py --op layernorm_selfcheck --arch gfx950 \
       --out /tmp/hip_ep_layernorm_selfcheck
@@ -26,14 +28,19 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import sys
 
+import ep_abi
 import yaml
 
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 GEAK_ROOT = os.path.dirname(TOOLS_DIR)
 REGISTRY = os.path.join(TOOLS_DIR, "ep_op_registry.yaml")
 RUNNER_SRC = os.path.join(TOOLS_DIR, "ep_task_runner.py")
+ABI_SRC = os.path.join(TOOLS_DIR, "ep_abi.py")
+PERF_DRIVER_SRC = os.path.join(TOOLS_DIR, "ep_perf_driver.py")
+DEFAULT_UPSTREAM_REF = "origin/main"
 
 # Named shape presets. (M, K, N, gs, no_zeros). K must be % 32 == 0 for the
 # matmul_nbits fast path. Covers prefill (M>=16 -> WMMA) + decode (M=1 -> GEMV),
@@ -86,6 +93,11 @@ def validate_row(row):
         sys.exit(f"op '{row['op']}' ({oracle} oracle) is missing registry fields: {missing}")
     if "shapes_preset" in row and row["shapes_preset"] not in SHAPE_PRESETS:
         sys.exit(f"op '{row['op']}': unknown shapes_preset '{row['shapes_preset']}'")
+    ids = [c.get("id") for c in (row.get("perf") or {}).get("cases", [])]
+    dup = sorted({str(i) for i in ids if ids.count(i) > 1})
+    if dup:
+        sys.exit(f"op '{row['op']}': perf case ids {dup} are not unique; the runner keys "
+                 f"results by id")
 
 
 def _require_dir(path, what):
@@ -166,16 +178,81 @@ def gen_fast(row, arch, ep_repo, out):
     return meta, os.path.join("kernel_src", row["kernel_hip"])
 
 
+def _git(root, *args):
+    r = subprocess.run(["git", "-C", root, *args], capture_output=True, text=True, check=False)
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def ep_base_sha(ep_root, kernel):
+    """HEAD of the EP checkout the kernel is vendored from, or None when ep_root
+    is not a git tree. The vendored kernel must equal HEAD's copy: export-patch
+    diffs the candidate against this commit."""
+    top = _git(ep_root, "rev-parse", "--show-toplevel")
+    if not top:
+        return None
+    rel = os.path.relpath(os.path.realpath(kernel), os.path.realpath(top))
+    if _git(top, "status", "--porcelain", "--", rel):
+        sys.exit(f"{kernel} has uncommitted changes; commit or stash them so the task's "
+                 f"baseline is a commit the exported patch can apply to")
+    return _git(top, "rev-parse", "HEAD")
+
+
+def abi_manifest(row, kernel, inc_dir, kernel_lib):
+    """Frozen contract of the vendored kernel: every extern "C" signature, the
+    row's frozen_functions/constants, the EP ABI headers it includes, and (when
+    the kernel library is already built) its exported C symbols."""
+    with open(kernel, encoding="utf-8", errors="replace") as f:
+        src = f.read()
+    headers = set(os.listdir(inc_dir))
+    try:
+        man = ep_abi.manifest(src, row.get("frozen_functions", ()),
+                              row.get("frozen_constants", ()),
+                              [h for h in ep_abi.quoted_includes(src) if h in headers])
+    except ValueError as e:
+        sys.exit(f"op '{row['op']}': {e}; update {REGISTRY}")
+    stale = [s for s in row["frozen_symbols"] if s not in man["extern_c"]]
+    if stale:
+        sys.exit(f"op '{row['op']}': frozen_symbols {stale} are not extern \"C\" definitions "
+                 f"in {row['kernel_hip']}; update {REGISTRY}")
+    stale = [e for e in row["entry_points"] if not ep_abi.function_definitions(src, e)]
+    if stale:
+        sys.exit(f"op '{row['op']}': entry_points {stale} have no definition in "
+                 f"{row['kernel_hip']}; update {REGISTRY}")
+    if kernel_lib and os.path.isfile(kernel_lib):
+        try:
+            man["exports"] = ep_abi.exported_c_symbols(kernel_lib)
+        except (OSError, RuntimeError) as e:
+            sys.exit(f"cannot list the exports of {kernel_lib}: {e}")
+    else:
+        what = f"--ep-kernel-lib {kernel_lib} is not built yet" if kernel_lib else \
+            "no --ep-kernel-lib given"
+        print(f"warning: {what}, so compile will not check the rebuilt kernel library's "
+              f"exported C symbols; build the EP and pass it to freeze them", file=sys.stderr)
+    return man
+
+
 def gen_numeric(row, arch, ep_repo, out, ep_dll, ep_build_cmd, ep_options,
-                ep_kernel_lib=None):
+                ep_kernel_lib=None, upstream_ref=DEFAULT_UPSTREAM_REF, ep_env=None, python=None):
     kernel_dst = _vendor_ep_kernel(row, ep_repo, out)
+    inc_dir = os.path.join(ep_kernels_dir(ep_repo), "include")
+    abi = abi_manifest(row, kernel_dst, inc_dir, ep_kernel_lib)
+    os.makedirs(os.path.join(out, "scripts"), exist_ok=True)
+    shutil.copy2(ABI_SRC, os.path.join(out, "scripts", "ep_abi.py"))
+    if row.get("perf"):
+        os.makedirs(os.path.join(out, "harness"), exist_ok=True)
+        shutil.copy2(PERF_DRIVER_SRC, os.path.join(out, "harness", "ep_perf_driver.py"))
 
     meta = {
         "op": row["op"], "oracle": "numeric", "arch": arch,
         "kernel_file": row["kernel_hip"],
         "target_functions": row["entry_points"],
         "frozen_symbols": row["frozen_symbols"],
+        "frozen_functions": row.get("frozen_functions", []),
+        "frozen_constants": list(abi["constants"]),
+        "frozen_variables": list(abi["variables"]),
         "numeric_test": row["numeric_test"],
+        "ep_base_sha": ep_base_sha(ep_repo, kernel_dst),
+        "abi": abi,
         "numeric": {
             "ep_repo": os.path.abspath(ep_repo),
             "kernel_dst": os.path.abspath(kernel_dst),
@@ -185,6 +262,10 @@ def gen_numeric(row, arch, ep_repo, out, ep_dll, ep_build_cmd, ep_options,
             "backend": "ort_ep",
             "ep_name": "AMDGPUExecutionProvider",
             "ep_options": ep_options,
+            "ep_env": {**row.get("ep_env", {}), **(ep_env or {})},
+            "perf": row.get("perf"),
+            "upstream_ref": upstream_ref,
+            "python": python,
         },
         "shapes": [],
     }
@@ -231,29 +312,76 @@ def _readme(row, meta, source_rel):
         title = f"# GEAK task: {row['op']} ({oracle} oracle, {meta['arch']})\n\n"
         intro = f"Optimizes the HIP EP `{row['op']}` kernel. GEAK edits ONLY `{source_rel}`.\n\n"
         caller = "the generated EP code"
-    notes = ""
+    notes, gates, export = "", "", ""
+    fns = (meta.get("frozen_functions", []) + meta.get("frozen_constants", [])
+           + meta.get("frozen_variables", []))
     if oracle == "numeric":
+        perf = meta["numeric"].get("perf")
+        if perf:
+            cases = "\n".join(
+                f"  - `{c['id']}`: M={c['M']} K={c['K']} N={c['N']} "
+                f"block_size={c.get('block_size', 128)} zp={c.get('zp', 'none')}"
+                for c in perf["cases"])
+            perf_note = (
+                "- `performance` reports, per case below, the median per-op GPU time from "
+                "the EP's own trace (`HIPDNN_EP_TRACE_FILE`), measured by the frozen "
+                "`harness/ep_perf_driver.py` on a graph of independent ops with distinct "
+                "weights (so weights stream from DRAM as in a real model). The first op of "
+                "each inference and the warmup inferences are dropped. An op's time runs "
+                "from the end of the previous op, so it includes the GPU's dispatch gap "
+                "before each of its kernels: a launch removed counts as well as a faster "
+                "kernel, unless that launch is written in a frozen definition. Every case "
+                "is also checked against ORT's CPU EP, in `correctness` "
+                "too.\n" + cases + "\n")
+        else:
+            perf_note = ("- `performance` reports pytest `--durations` wall time per test "
+                         "(ORT session setup + graph execution), NOT kernel latency. Treat "
+                         "it as a coarse signal.\n")
+        env = ", ".join(f"`{k}={v}`" for k, v in meta["numeric"].get("ep_env", {}).items())
         notes = (
             "## Notes\n"
-            "- `compile` overlays the candidate onto the EP tree, runs the configured "
-            "EP build, checks the kernel library was rebuilt, copies the shared libraries "
-            "next to the EP library plus the rebuilt kernel library into `build/ep/`, and "
-            "restores the EP tree's original kernel. Correctness/performance load only "
-            "that snapshot.\n"
-            "- `performance` reports pytest `--durations` wall time per test (ORT session "
-            "setup + graph execution), NOT kernel latency. Treat it as a coarse signal.\n\n"
-        )
+            "- `compile` first rejects a candidate that changes any frozen item above "
+            "(comments and whitespace are ignored), then overlays it onto the EP tree, "
+            "runs the configured EP build, checks the kernel library was rebuilt"
+            + (" and exports the same C symbols as the baseline" if meta["abi"].get("exports")
+               is not None else "") +
+            ", copies the shared libraries next to the EP library plus the rebuilt kernel "
+            "library into `build/ep/` with a manifest of the kernel source they came from, "
+            "and restores the EP tree's original kernel. Correctness/performance load only "
+            "that snapshot, and refuse it if `kernel_src/` changed since.\n"
+            "- EP runs drop every inherited `HIPDNN_*` variable"
+            + (f" and set {env}" if env else "") + ".\n"
+            + (f"- pytest and the perf driver run under `{meta['numeric']['python']}`, "
+               "whatever `python3` runs `task_runner.py`.\n"
+               if meta["numeric"].get("python") else "")
+            + perf_note + "\n")
+        gates = ("Every `extern \"C\"` signature in the kernel file is frozen, and so are "
+                 "these whole definitions (dispatch gates, the helpers they call, and the "
+                 "namespace-scope constants, config tables and state they read): they "
+                 "decide which kernel a shape reaches. A launch written in one of these "
+                 "bodies stays as it is; the launchers, autotuning and kernels they call "
+                 "are editable unless listed. State only these functions touch may not be "
+                 "used anywhere else, no `#define`/`#undef` may be added or changed for a "
+                 "name they use, and no call that sets an environment variable may be "
+                 "added.\n"
+                 + "".join(f"  - `{s}`\n" for s in fns) + "\n") if fns else ""
+        export = ("\n`export-patch` writes `build/hip_ep.patch`, the candidate as a diff "
+                  f"against EP commit `{meta['ep_base_sha']}`, and checks it applies there "
+                  f"and to `{meta['numeric']['upstream_ref']}`:\n"
+                  "```\npython3 scripts/task_runner.py export-patch\n```\n"
+                  if meta.get("ep_base_sha") else "")
     return (
         title + intro +
         f"## Optimization targets (editable)\n{targets}\n\n"
         f"## FROZEN contract\n"
         f"These signatures (declared in `include/`) are what {caller} calls; they must "
-        f"NOT change. Their implementations in `kernel_src/` remain editable.\n"
+        f"NOT change. Their implementations in `kernel_src/` remain editable"
+        + (", except the definitions frozen whole below" if gates else "") + ".\n"
         f"{frozen}\n\n"
-        + notes +
+        + gates + notes +
         "## Run\n```\npython3 scripts/task_runner.py compile\n"
         "python3 scripts/task_runner.py correctness\n"
-        "python3 scripts/task_runner.py performance\n```\n"
+        "python3 scripts/task_runner.py performance\n```\n" + export
     )
 
 
@@ -299,7 +427,26 @@ def main():
                     "are unchanged. Defaults to --ep-dll")
     ap.add_argument("--ep-option", action="append", default=[],
                     help="(numeric) repeatable KEY=VALUE for the EP")
+    ap.add_argument("--ep-upstream-ref", default=DEFAULT_UPSTREAM_REF,
+                    help="(numeric) ref in the EP checkout that export-patch also checks "
+                    "the patch against (besides the commit the task was generated from)")
+    ap.add_argument("--ep-env", action="append", default=[], metavar="KEY=VALUE",
+                    help="(numeric) repeatable; env var set for every EP run, on top of the "
+                    "registry's ep_env (e.g. LD_LIBRARY_PATH=<the HIP runtime the EP was "
+                    "built against>)")
+    ap.add_argument("--ep-python", default=None,
+                    help="(numeric) interpreter with the EP test suite's requirements (pytest, "
+                    "onnxruntime, onnx, numpy); pytest and the perf driver run under it instead "
+                    "of the one running task_runner.py")
     args = ap.parse_args()
+    if args.ep_python and not os.access(args.ep_python, os.X_OK):
+        sys.exit(f"--ep-python {args.ep_python}: not an executable")
+    ep_env = {}
+    for entry in args.ep_env:
+        key, sep, value = entry.partition("=")
+        if not sep or not key:
+            sys.exit(f"--ep-env {entry!r}: expected KEY=VALUE")
+        ep_env[key] = value
 
     row = find_op(load_registry(), args.op)
     validate_row(row)
@@ -328,7 +475,8 @@ def main():
     else:
         meta, source_rel = gen_numeric(row, args.arch, args.ep_repo, out,
                                        args.ep_dll, args.ep_build_cmd, args.ep_option,
-                                       args.ep_kernel_lib)
+                                       args.ep_kernel_lib, args.ep_upstream_ref, ep_env,
+                                       args.ep_python and os.path.abspath(args.ep_python))
     write_task(out, row, meta, source_rel)
     print(f"Generated {oracle} task for '{args.op}' at {out}")
     print(f"  source_file_path: {source_rel}")

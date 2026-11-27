@@ -25,9 +25,23 @@ Per op, the task's `task_meta.json.frozen_symbols` lists the invariants. Always:
   — signature + name must stay byte-identical.
 - op parameter structs / packing conventions (e.g. `ZeroPointsU2`).
 - dispatch gates that pick a kernel variant (e.g. `zp_elem_size` 1=uint8-packed /
-  2=fp16; the `M>=16 && K%32==0` WMMA gate).
-Rewrite kernel bodies, tiling, shared-memory layout, dequant decode, and autotune
-tables freely; keep the boundary above fixed.
+  2=fp16; the `wmmaMinM()` M threshold for the WMMA path).
+Rewrite kernel bodies, tiling, shared-memory layout, dequant decode, launchers and
+autotuning freely; keep the boundary above fixed, including the config tables and
+state a gate reads.
+
+Numeric tasks enforce this in `compile`, before the EP build, with
+`tools/ep_abi.py` (comments and whitespace ignored). A candidate is rejected if it
+changes: an `extern "C"` signature or the contents of an `extern "C"` block; any
+whole definition in `task_meta.json.frozen_functions` (the gates plus the helpers
+they call: calls are not followed); a namespace-scope constant in
+`frozen_constants` or read by a frozen function; any other namespace-scope
+variable a frozen function reads (config tables, latches, caches); a required
+`#include`; a `#define`/`#undef` of any name a frozen definition uses; or the
+kernel library's exported C symbols (`nm`). It also rejects naming, anywhere
+else, mutable state that only frozen functions touch, and any new call that sets
+an environment variable, since the gates read the environment. The task README
+lists every frozen item.
 
 ## Hardware note (matters for correctness, not just speed)
 - **Client (gfx1151/gfx1150, RDNA3.5): WMMA, wave32.** The kernels here are
@@ -39,21 +53,42 @@ tables freely; keep the boundary above fixed.
 ## Oracles (how a task is judged)
 - **fast**: a standalone hipcc build of `<op>_kernel.hip` + a `test_*.cpp` driver
   that calls the C ABI directly and checks a NumPy reference — seconds/iteration,
-  no ORT/CMake. Available today for the GEMM family (`matmul_nbits` bits 2/3/4).
+  no ORT/CMake. Available for the 2-bit fork's GEMM harness
+  (`matmul_nbits_fast`, bits 2/3/4); upstream hip-ep has no such harness.
 - **numeric**: `test/numeric` pytest builds a small ONNX graph, runs it
   through the built EP shared lib, and compares to the ORT CPU reference. General
-  (any op) but heavy: every `compile` overlays the candidate kernel onto the EP
-  tree, runs the EP build (`--ep-build-cmd`, required at generation time), and
-  copies the shared libraries next to the EP library (`--ep-dll`, e.g. an install
-  `lib/` holding `libhipgpu.so` + `libhip-compiler.so`) into the task's
-  `build/ep/`, with the rebuilt kernel library (`--ep-kernel-lib`: its link
-  output, e.g. `<build>/lib/Runtime/Kernels/libcustom_kernels_<arch>.so`, which
-  the EP loads from its own directory) replacing any same-named copy. Its "performance" is
-  the pytest `--durations` wall time per test (ORT session setup + graph
-  execution), not kernel latency. Same framework serves the `cpu_ep` target via
-  `--backend ort_cpu`. On Linux the EP must include ROCm/hip-ep#1350: without
-  it the EP's JIT aborts with a `__dso_handle ... Delta32` relocation error under
-  pytest, failing every case.
+  (any op) but heavy. `matmul_nbits` on gfx1151 uses it.
+  - `compile` checks the frozen contract, overlays the candidate kernel onto the
+    EP tree, runs the EP build (`--ep-build-cmd`, required at generation time),
+    and copies the shared libraries next to the EP library (`--ep-dll`, e.g. an
+    install `lib/` holding `libhipgpu.so` + `libhip-compiler.so`) into the task's
+    `build/ep/`, with the rebuilt kernel library (`--ep-kernel-lib`: its link
+    output, e.g. `<build>/lib/Runtime/Kernels/libcustom_kernels_<arch>.so`,
+    which the EP loads from its own directory) replacing any same-named copy.
+    The snapshot carries a manifest of the kernel source it was built from;
+    `correctness`/`performance` refuse it once `kernel_src/` changes, so rerun
+    `compile` after every edit. The build runs in its own process group, which
+    an interrupted `compile` stops (SIGTERM, then SIGKILL) before it restores
+    the EP tree, so a containerized build must exit on SIGTERM (e.g.
+    `docker run --init`).
+  - With a registry `perf` block, `performance` is the median per-op GPU time
+    from the EP's own trace (`HIPDNN_EP_TRACE_FILE`), taken by the frozen
+    `harness/ep_perf_driver.py` on a graph of independent ops with distinct
+    weights; each case is also checked against ORT's CPU EP. An op's time starts
+    at the end of the previous op, so it includes the dispatch gap before each
+    of its kernels (about 2–4 µs per op on gfx1151): dropping a launch counts as
+    much as a faster kernel, as long as the launch is not written in a frozen
+    definition. In `matmul_nbits`' five dp4a cases (all but `m1_o_proj_fp16zp`
+    and `m8_down_proj_nozp`), the frozen `hip_matmul_nbits_dp4a` launches
+    `matmul_nbits_quant_act_i8_kernel` itself, so that kernel can get faster but
+    cannot be dropped or fused into the GEMV. Without a `perf` block it falls
+    back to pytest `--durations` wall time (ORT session setup + graph
+    execution), not kernel latency.
+  - `export-patch` writes `build/hip_ep.patch`, the candidate as a diff against
+    the pinned EP commit, and checks it applies there and upstream.
+  - Same framework serves the `cpu_ep` target via `--backend ort_cpu`. On Linux
+    the EP must include ROCm/hip-ep#1350: without it the EP's JIT aborts with a
+    `__dso_handle ... Delta32` relocation error under pytest, failing every case.
 - **selfcheck**: a self-contained editable-kernel + frozen-harness pair
   (`tools/selfcheck_templates/<op>/`). The harness carries its own CPU reference
   and GPU timing — no ORT, NumPy, or external harness dir. The lightest oracle
@@ -61,3 +96,9 @@ tables freely; keep the boundary above fixed.
   standalone HIP microbenchmark, so a PASS does not validate EP integration.
   Generate an example with
   `python3 tools/gen_ep_task.py --op layernorm_selfcheck --arch <gfx> --out <dir>`.
+
+## Follow-ups (not covered yet)
+- **`layer_norm` and more ops.** Their rows still score with pytest wall time.
+  Each needs a `perf` block, entry points checked against the kernels its perf
+  cases actually launch, and the gates and helpers that pick those kernels listed
+  in `frozen_functions`.
