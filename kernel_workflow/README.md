@@ -252,6 +252,90 @@ in the sibling **`kernel_lane.js` worker**:
      with `update_experience: 'off'`, and the lesson worth keeping is the cross-language routing outcome
      the dispatcher alone can see.
 
+### Config-aware operator family (opt-in)
+`config_aware: "true"` (or `"on"`) optimizes several configurations of one operator, such as the
+`M` buckets of one GEMM, in one call. Every other value, including absent, leaves the optimize,
+author and bakeoff paths above unchanged, including the `kernel_path` requirement.
+
+Pass the family as `args.family_spec`, an already-parsed object (not a path or a JSON string). The
+dispatcher validates it before starting anything, asks `roles/operator_family_planner.md` once for
+groups and a strategy hint per group, then runs **one unchanged `kernel_lane.js` per config**. All
+lanes start together over `gpu_ids` (one GPU id per lane, concurrency `min(configs, gpu_ids)`; one id
+serializes them), exactly like bake-off lanes. A group is a hint in each lane's `task`; it never
+merges configs into one kernel, and the TechLead may drop it after profiling. An invalid plan falls
+back to one group per config. A lane that throws or returns a malformed result is recorded and its
+siblings finish.
+
+```
+Workflow({ scriptPath: "<WF_DIR>/kernel_workflow.js", args: {
+  workflow_dir: "<WF_DIR>",
+  config_aware: "true",
+  gpu_ids: "0,1,2",
+  eval_dir: "/abs/exp/family_gemm_n2048_k1024",   // optional; default <exp_root>/family_<family_id>_<time>_<pid>
+  family_spec: {
+    schema_version: 1,
+    family_id: "gemm_n2048_k1024",
+    operator: "gemm",
+    deployment: { architecture: "Qwen3NextForCausalLM", tensor_parallel_size: 4, signature_axes: ["M", "N", "K"] },
+    target: { expected_gfx: "gfx950", expected_target: "unknown" },   // optional expectation; each lane still detects on-box
+    defaults: { mode: "optimize", target_language: "triton", budget: 6 },
+    configs: [
+      { id: "m1", kernel_path: "/abs/tasks/gemm_m1",
+        op_spec: { op_kind: "gemm", dtype: "bf16", shapes: { M: 1, N: 2048, K: 1024 } },
+        signature: [1, 2048, 1024],
+        contract: { semantics: { precision: "bf16" }, graph: { capture_safe: true } } },
+      { id: "m16", kernel_path: "/abs/tasks/gemm_m16",
+        op_spec: { op_kind: "gemm", dtype: "bf16", shapes: { M: 16, N: 2048, K: 1024 } },
+        signature: [16, 2048, 1024],
+        contract: { semantics: { precision: "bf16" }, graph: { capture_safe: true } },
+        incumbent: { source_file: "gemm_n2048_k1024_m16.py" } },
+      { id: "prefill", kernel_path: "/abs/tasks/gemm_prefill",
+        op_spec: { op_kind: "gemm", dtype: "bf16", shapes: { M: 4096, N: 2048, K: 1024 } },
+        signature: [4096, 2048, 1024],
+        overrides: { mode: "author", target_language: "flydsl", budget: 4 } },
+    ],
+  },
+}})
+```
+
+Rules the dispatcher enforces:
+- Lane arguments resolve as `configs[].overrides` → `family_spec.defaults` → the lane default. Only
+  `mode`, `target_language`, `budget`, `gpu_mode`, `task`, `use_learned_kb`, `update_experience`,
+  `warm_start` and `apply_to_original` are accepted there (`defaults` may also carry `gpu_ids`, used
+  when the call has none). Parent `mode`, `target_language`, `budget`, `task` and the KB switches are
+  ignored on this path and logged. `target_language` must resolve for every config: it selects the
+  warm-start KB page, so the lane's `triton` default is not inherited.
+- `mode` is `optimize` or `author` per config. Parent `mode: "bakeoff"` is rejected.
+- `apply_to_original` is always `"false"`; any other value is rejected. Each lane writes only to
+  `<eval_dir>/configs/<id>`.
+- `signature` (when given) must match `deployment.signature_axes` in rank. The planner may not group
+  configs whose `contract.semantics` or `contract.graph` differ.
+- Budget is per config: N configs cost about N lane budgets. `family_plan.json` records the
+  per-config budgets and their total.
+- The planner reads the learned KB only when no config sets `use_learned_kb: "false"` and the
+  expected GPU family is not isolated (it receives `LEARNED_KB: on|off`, like the lane roles).
+
+A config is `optimized` only when its lane returns `validation_status: "accepted"` and a primary
+speedup above 1.0. Other statuses are `accepted_no_improvement`, the lane's own terminal statuses
+(`flagged`, `author_failed`, `no_baseline`, `failed`), `not_accepted` (any other lane status),
+`lane_failed` (the lane threw) and `invalid_result` (malformed return). The run writes, and returns
+as the same objects:
+
+| File | Content |
+|---|---|
+| `family_plan.json` | groups, strategy hints, planner or fallback source, report order, GPU pool, budget policy |
+| `family_results.json` | one normalized record per config, summary counts, family aggregate |
+| `family_report.md` | config table, plan, results, selection, aggregate, KB outcomes, failures (rendered by the writer from the two JSON files; the JSON is authoritative) |
+| `implementation_catalog.json` | `optimized` configs under `implementations`, every other config under `fallback` (`incumbent` when one was supplied, else `stock`) |
+
+The catalog covers each config's own exact signature only (no ranges), points at the lane's
+`final_patch.diff`, and sets `deployment_ready: false` and `speedup_vs_incumbent: null`: no incumbent
+and no sibling config is executed in this version, and cross-config evaluation is reported as
+`unsupported`. The family aggregate is the geomean of per-config speedups over accepted configs, and
+only when they share one metric kind and one known `timing_basis`; otherwise it is `null` with the reason.
+Unless `llm_stats: "false"`, the family eval dir also gets one token/time/cost run report under
+`reports/` and `report/` that nests every lane's agent timeline, as bake-off does.
+
 ### Learned knowledge (every run, not just bake-off)
 `kernel_lane.js` curates a card at the end of **every** lane run that earned a measured win — standalone,
 dispatcher passthrough (`mode=optimize|author`), or a lane opened by `e2e_workflow`. The sink is always
@@ -333,14 +417,16 @@ Director/TechLead/Engineer orchestration is identical.
 
 ## Files
 ```
-kernel_workflow.js     ENTRY POINT / dispatcher (mode=optimize|author -> kernel_lane; mode=bakeoff -> multi-language bake-off)
+kernel_workflow.js     ENTRY POINT / dispatcher (mode=optimize|author -> kernel_lane; mode=bakeoff -> multi-language bake-off;
+                       config_aware=true -> one kernel_lane per operator-family config)
 kernel_lane.js         single-language WORKER (the deterministic optimize/author pipeline; called per lane)
 kernel_workflow_bmk.js batch orchestrator (runs kernel_lane on a list of kernels, one batch per GPU)
 roles/               director, tech_lead, engineer, deep_engineer (deep_explore),
                      author_engineer, benchmark_engineer, profile_engineer,
                      verify_engineer, integrator, oracle_freezer (bake-off freeze),
                      update_experience (learned-card curation, every run),
-                     researcher (DRA, opt-in)
+                     researcher (DRA, opt-in),
+                     operator_family_planner (config_aware grouping + strategy hints)
 knowledge/           optimization_strategies, hip/triton/wrapper, profiling_guide,
                      amd_instinct (CDNA gfx942/gfx950), amd_rdna4 (RDNA4 gfx1201),
                      self_monitoring, geomean_levers
@@ -356,7 +442,8 @@ scripts/             gpu_lock.sh (single-GPU, pool and multi-GPU group leases), 
                      frontmatter; sink-agnostic -- takes the dir, so it also serves
                      e2e_workflow/knowledge/learned; `--check` for CI), test_learned_index.js (its guard),
                      test_mode_dispatch.js (regression guard: mode dispatch + bake-off lane
-                     routing; stubs the runtime, no GPU/agent — `node scripts/test_mode_dispatch.js`)
+                     routing; stubs the runtime, no GPU/agent — `node scripts/test_mode_dispatch.js`),
+                     test_config_aware.js (same harness for the config_aware family path)
 ```
 The bake-off references e2e's `op_benchmarker` role + `harness_lib.py` **in place** at
 `../e2e_workflow/` (single source, no copy).
