@@ -116,14 +116,12 @@ class DriverTimingTest(unittest.TestCase):
         (bad, _) = D.timing_basis_defects(T, [dict(eager, sig='small', regime='DECODE')])
         self.assertIn('deploys under a CUDA graph', bad)
 
-    def test_important_cases_skip_the_reference_unless_a_bound_reads_it(self):
-        specs = [{'sig': 'pt', 'axes': {}}, {'sig': 'imp', 'kind': 'important', 'axes': {}}]
-        U = SimpleNamespace(BOUNDS_NEEDING_REFERENCE=('dot_product',))
-        T = SimpleNamespace(random_specs=lambda: specs, U=U,
-                            doc={'outputs': {'out': {'bound': {'kind': 'sqnr'}}}})
-        self.assertEqual(D.oracle_case_sigs(T, {'cases': 'all'}), ['pt'])
-        T.doc = {'outputs': {'out': {'bound': {'kind': 'dot_product'}}}}
-        self.assertFalse(D._important(T, specs[1]))
+    def test_oracle_scope_includes_unweighted_shapes(self):
+        specs = [{'sig': 'pt', 'axes': {'rows': 4, 'context': 64}},
+                 {'sig': 'imp', 'kind': 'important', 'axes': {'rows': 4, 'context': 16}}]
+        task = SimpleNamespace(random_specs=lambda: specs)
+        self.assertEqual(D.oracle_case_sigs(task, {'cases': 'all'}), ['pt', 'imp'])
+        self.assertEqual(D.oracle_case_sigs(task, {'cases': 'per_width_smallest'}), ['imp'])
 
     def test_host_bound_buckets_are_measured_again_before_refusal(self):
         T = self.task([{'sig': 'a'}, {'sig': 'b'}], {'DECODE': {'cuda_graph': True}})

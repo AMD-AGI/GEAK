@@ -212,6 +212,14 @@ lean one way (a dropped scale, a truncating cast) fails even inside the elementw
 expressions over the case's axes. Every draw comes from the leg's seeded generator, so the
 baseline leg, the candidate leg and the driver rebuild identical operands.
 
+Correctness includes every random case, including unweighted `important` shapes.
+Use an independent reference that implements the deployed operation, including its
+quantization and rounding semantics. A tolerance comparison records its comparison
+target, number of violations, number of compared elements and worst bound multiple.
+For a baseline-only contract these describe agreement with the installed kernel.
+Use an independent reference on the affected rows to calibrate a proposed change
+to the tolerance.
+
 ## Gates (`ut_driver.py`)
 
 | Gate | Process | Fails when |

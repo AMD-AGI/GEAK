@@ -1389,6 +1389,7 @@ def compare_one(bound, cand, base, *, ref=None, magnitude=None, base_noise=None,
         return res
 
     if kind == "tolerance":
+        res["against"] = "reference" if ref is not None else "baseline"
         y = ref if ref is not None else b
         limit = float(bound["atol"]) + (float(bound["rtol"]) + u_out) * y.abs()
         if stored is not None:
@@ -1437,10 +1438,11 @@ def compare_one(bound, cand, base, *, ref=None, magnitude=None, base_noise=None,
     err = diff[keep]
     lim = limit[keep]
     n = err.numel()
-    viol = float((err.abs() > lim).double().mean()) if n else 0.0
+    violations = int(over.sum())
+    viol = violations / n if n else 0.0
     multiples = (err.abs() / lim.clamp_min(1e-300)).masked_fill(err == 0, 0.0)
     peak = float(multiples.max()) if n else 0.0
-    res.update(violation_fraction=viol, peak_bound_multiple=peak,
+    res.update(violations=violations, compared_elements=n, violation_fraction=viol, peak_bound_multiple=peak,
                max_abs_err=float(err.abs().max()) if n else 0.0)
     ok = viol <= max_violation_fraction and nonfinite_mismatch == 0
     if bound.get("per_row") and a.dim():
