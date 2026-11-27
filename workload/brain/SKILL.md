@@ -48,6 +48,13 @@ preserve the inputs and evidence of in-flight calls.
    operator or system route suggested by experience with the next local improvement.
    Use current coverage, prerequisites and cost to choose a measurement that could change
    the ranking. Keep unknown bounds and existing commitments explicit.
+   When a measured fast path misses requests that drive an objective, weigh improving
+   the fallback against a policy trial, even with an empty reference queue. Choose an
+   admission, batching or routing change expected to move that work across the actual
+   dispatch boundary. Hold offered traffic and implementation fixed. If the effect on
+   worker shapes is uncertain, check route hits before a costly serving run. Measure
+   the serving objectives and first-token wait. Add a matched control for the other
+   implementation at the new policy if their interaction matters to the decision.
    Missing evidence can justify a bounded probe, not a claim that the opportunity is absent.
    Keep user/native requirements and their owners distinct from optional investigations;
    a generated plan does not make diagnostic completeness an acceptance requirement.
