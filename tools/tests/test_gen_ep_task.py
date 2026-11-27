@@ -29,7 +29,7 @@ RUNNER_SRC = os.path.join(TOOLS, "ep_task_runner.py")
 def test_registry_loads_and_has_selfcheck_op():
     reg = gen.load_registry()
     ops = {r["op"] for r in reg["ops"]}
-    assert {"matmul_nbits", "layer_norm", "layernorm_selfcheck"} <= ops
+    assert {"matmul_nbits", "matmul_nbits_fast", "layer_norm", "layernorm_selfcheck"} <= ops
 
 
 def test_find_op_returns_matching_row():
@@ -176,12 +176,26 @@ def test_main_rejects_missing_ep_repo(monkeypatch, tmp_path):
               "--out", str(tmp_path / "o"))
 
 
+def _fake_kernel(op):
+    """A kernel file defining what the registry row freezes, like the real one."""
+    row = gen.find_op(gen.load_registry(), op)
+    lines = ['#include "hip_custom_kernels.h"', "#include <hip/hip_runtime.h>"]
+    lines += [f"static constexpr int {c} = 16;" for c in row.get("frozen_constants", [])]
+    lines += [f"__global__ void {e}(float* y) {{ y[0] = 1.0f; }}" for e in row["entry_points"]]
+    externs = set(row["frozen_symbols"])
+    for fn in row.get("frozen_functions", []):
+        if fn not in externs:
+            lines.append(f"static bool {fn}(int m) {{ return m > 1; }}")
+    lines += [f'extern "C" int {s}(void* stream, int m) {{ return m; }}' for s in sorted(externs)]
+    return "\n".join(lines) + "\n"
+
+
 @pytest.fixture
 def ep_repo(tmp_path):
     kdir = tmp_path / "ep" / "hip-ep" / "lib" / "Runtime" / "Kernels"
     (kdir / "hip").mkdir(parents=True)
-    (kdir / "hip" / "layer_norm_kernel.hip").write_text("// k\n")
-    (kdir / "hip" / "matmul_nbits_kernel.hip").write_text("// k\n")
+    (kdir / "hip" / "layer_norm_kernel.hip").write_text(_fake_kernel("layer_norm"))
+    (kdir / "hip" / "matmul_nbits_kernel.hip").write_text(_fake_kernel("matmul_nbits"))
     (kdir / "include").mkdir()
     (kdir / "include" / "hip_custom_kernels.h").write_text("// h\n")
     (kdir / "test" / "example" / "gemm_fp16u2").mkdir(parents=True)
@@ -240,8 +254,215 @@ def test_numeric_meta_records_separate_kernel_lib(monkeypatch, tmp_path, ep_repo
 
 def test_fast_harness_without_test_cpp_exits_cleanly(monkeypatch, tmp_path, ep_repo):
     with pytest.raises(SystemExit, match="test_\\*.cpp"):
-        _main(monkeypatch, "--op", "matmul_nbits", "--ep-repo", str(ep_repo),
+        _main(monkeypatch, "--op", "matmul_nbits_fast", "--ep-repo", str(ep_repo),
               "--out", str(tmp_path / "o"))
+
+
+# -- matmul_nbits: numeric target with frozen gates + device-time perf ----------
+
+def test_matmul_nbits_row_is_a_gfx1151_numeric_target():
+    row = gen.find_op(gen.load_registry(), "matmul_nbits")
+    assert row["oracle"] == "numeric" and row["arches"] == ["gfx1151"]
+    assert "hip_matmul_nbits" in row["frozen_functions"]
+    assert row["ep_env"] == {"HIPDNN_MATMUL_AUTOTUNE_MODE": "lookup"}
+    ids = [c["id"] for c in row["perf"]["cases"]]
+    assert len(ids) == len(set(ids)) >= 1
+    for c in row["perf"]["cases"]:
+        assert c["K"] % 32 == 0 and c.get("zp", "none") in ("none", "u8", "fp16")
+    fast = gen.find_op(gen.load_registry(), "matmul_nbits_fast")
+    assert fast["oracle"] == "fast"
+
+
+def _numeric_args(ep_repo, out, *extra):
+    return ("--op", "matmul_nbits", "--ep-repo", str(ep_repo), "--ep-dll", "/x/ep.so",
+            "--ep-build-cmd", "make k", "--out", str(out), *extra)
+
+
+def test_numeric_task_vendors_abi_checker_and_perf_driver(monkeypatch, tmp_path, ep_repo):
+    out = tmp_path / "o"
+    _main(monkeypatch, *_numeric_args(ep_repo, out))
+    assert _read(out / "scripts" / "ep_abi.py") == _read(os.path.join(TOOLS, "ep_abi.py"))
+    assert _read(out / "harness" / "ep_perf_driver.py") == \
+        _read(os.path.join(TOOLS, "ep_perf_driver.py"))
+    meta = json.loads((out / "task_meta.json").read_text())
+    row = gen.find_op(gen.load_registry(), "matmul_nbits")
+    assert meta["numeric"]["perf"] == row["perf"]
+    assert meta["numeric"]["ep_env"] == row["ep_env"]
+    assert meta["numeric"]["upstream_ref"] == "origin/main"
+    assert meta["frozen_functions"] == row["frozen_functions"]
+
+
+def test_ep_env_flags_extend_the_registry_env(monkeypatch, tmp_path, ep_repo):
+    out = tmp_path / "o"
+    _main(monkeypatch, *_numeric_args(ep_repo, out, "--ep-env", "LD_LIBRARY_PATH=/rock/lib",
+                                      "--ep-env", "HIPDNN_MATMUL_AUTOTUNE_MODE=online"))
+    env = json.loads((out / "task_meta.json").read_text())["numeric"]["ep_env"]
+    assert env == {"HIPDNN_MATMUL_AUTOTUNE_MODE": "online", "LD_LIBRARY_PATH": "/rock/lib"}
+    assert "`LD_LIBRARY_PATH=/rock/lib`" in (out / "README.md").read_text()
+
+
+def test_malformed_ep_env_is_rejected(monkeypatch, tmp_path, ep_repo):
+    with pytest.raises(SystemExit, match="KEY=VALUE"):
+        _main(monkeypatch, *_numeric_args(ep_repo, tmp_path / "o", "--ep-env", "NOVALUE"))
+
+
+def test_ep_python_is_recorded(monkeypatch, tmp_path, ep_repo):
+    out = tmp_path / "o"
+    _main(monkeypatch, *_numeric_args(ep_repo, out, "--ep-python", sys.executable))
+    assert json.loads((out / "task_meta.json").read_text())["numeric"]["python"] == \
+        os.path.abspath(sys.executable)
+    assert f"run under `{os.path.abspath(sys.executable)}`" in (out / "README.md").read_text()
+    _main(monkeypatch, *_numeric_args(ep_repo, tmp_path / "d"))
+    assert json.loads((tmp_path / "d" / "task_meta.json").read_text())["numeric"]["python"] is None
+    assert "run under" not in (tmp_path / "d" / "README.md").read_text()
+
+
+def test_non_executable_ep_python_is_rejected(monkeypatch, tmp_path, ep_repo):
+    with pytest.raises(SystemExit, match="not an executable"):
+        _main(monkeypatch, *_numeric_args(ep_repo, tmp_path / "o",
+                                          "--ep-python", str(tmp_path / "nope")))
+
+
+def test_numeric_meta_carries_the_abi_manifest(monkeypatch, tmp_path, ep_repo):
+    out = tmp_path / "o"
+    _main(monkeypatch, *_numeric_args(ep_repo, out))
+    abi = json.loads((out / "task_meta.json").read_text())["abi"]
+    row = gen.find_op(gen.load_registry(), "matmul_nbits")
+    assert set(row["frozen_symbols"]) <= set(abi["extern_c"])
+    assert set(abi["functions"]) == set(row["frozen_functions"])
+    assert set(abi["constants"]) == set(row["frozen_constants"])  # no gate reads another
+    assert abi["required_includes"] == ["hip_custom_kernels.h"]
+    assert abi["exports"] is None  # no --ep-kernel-lib given
+    kernel = (out / "kernel_src" / "matmul_nbits_kernel.hip").read_text()
+    import ep_abi
+    assert ep_abi.check_source(kernel, abi) == []
+
+
+def test_constants_a_gate_reads_are_frozen_and_listed(monkeypatch, tmp_path, ep_repo):
+    kernel = ep_repo / "hip-ep" / "lib" / "Runtime" / "Kernels" / "hip" / "matmul_nbits_kernel.hip"
+    kernel.write_text(kernel.read_text().replace(
+        "static bool wmmaMinM(int m) { return m > 1; }",
+        "static constexpr int kWmmaMinMDefault = 8;\n"
+        "static bool wmmaMinM(int m) { return m > kWmmaMinMDefault; }"))
+    out = tmp_path / "o"
+    _main(monkeypatch, *_numeric_args(ep_repo, out))
+    meta = json.loads((out / "task_meta.json").read_text())
+    assert meta["abi"]["constants"]["kWmmaMinMDefault"] == \
+        "static constexpr int kWmmaMinMDefault=8;"
+    assert meta["frozen_constants"] == ["kBlockDim", "kWmmaMinMDefault"]
+    assert "  - `kWmmaMinMDefault`" in (out / "README.md").read_text()
+
+
+def test_variables_a_gate_reads_are_frozen_and_listed(monkeypatch, tmp_path, ep_repo):
+    kernel = ep_repo / "hip-ep" / "lib" / "Runtime" / "Kernels" / "hip" / "matmul_nbits_kernel.hip"
+    kernel.write_text(kernel.read_text().replace(
+        "static bool wmmaMinM(int m) { return m > 1; }",
+        "static int g_min_m = -1;\n"
+        "static bool wmmaMinM(int m) { if (g_min_m < 0) g_min_m = 8; return m > g_min_m; }"))
+    out = tmp_path / "o"
+    _main(monkeypatch, *_numeric_args(ep_repo, out))
+    meta = json.loads((out / "task_meta.json").read_text())
+    assert meta["abi"]["variables"] == {"g_min_m": "static int g_min_m=-1;"}
+    assert meta["abi"]["mutable"] == ["g_min_m"]
+    assert meta["frozen_variables"] == ["g_min_m"]
+    assert "  - `g_min_m`" in (out / "README.md").read_text()
+
+
+def test_missing_kernel_lib_warns_that_exports_are_not_checked(monkeypatch, tmp_path, ep_repo,
+                                                               capsys):
+    _main(monkeypatch, *_numeric_args(ep_repo, tmp_path / "o"))
+    assert "no --ep-kernel-lib given" in capsys.readouterr().err
+    klib = tmp_path / "libk.so"
+    _main(monkeypatch, *_numeric_args(ep_repo, tmp_path / "p", "--ep-kernel-lib", str(klib)))
+    assert f"--ep-kernel-lib {klib} is not built yet" in capsys.readouterr().err
+
+
+def test_duplicate_perf_case_ids_are_rejected():
+    row = json.loads(json.dumps(gen.find_op(gen.load_registry(), "matmul_nbits")))
+    row["perf"]["cases"].append(dict(row["perf"]["cases"][0]))
+    with pytest.raises(SystemExit, match="not unique"):
+        gen.validate_row(row)
+
+
+def test_numeric_meta_records_kernel_lib_exports(monkeypatch, tmp_path, ep_repo):
+    out, klib = tmp_path / "o", tmp_path / "libk.so"
+    klib.write_text("ELF")
+    monkeypatch.setattr(gen.ep_abi, "exported_c_symbols", lambda lib, nm="nm": ["hip_matmul_nbits"])
+    _main(monkeypatch, *_numeric_args(ep_repo, out, "--ep-kernel-lib", str(klib)))
+    meta = json.loads((out / "task_meta.json").read_text())
+    assert meta["abi"]["exports"] == ["hip_matmul_nbits"]
+    assert "same C symbols as the baseline" in (out / "README.md").read_text()
+
+
+def test_stale_frozen_symbol_is_rejected(tmp_path, ep_repo):
+    row = dict(gen.find_op(gen.load_registry(), "layer_norm"), frozen_symbols=["ZeroPointsU2"])
+    with pytest.raises(SystemExit, match="ZeroPointsU2"):
+        gen.gen_numeric(row, "gfx1151", str(ep_repo / "hip-ep"), str(tmp_path / "o"),
+                        "/x/ep.so", "make k", [])
+
+
+def test_stale_entry_point_is_rejected(tmp_path, ep_repo):
+    row = dict(gen.find_op(gen.load_registry(), "matmul_nbits"),
+               entry_points=["matmul_nbits_gemv_dp4a_kernel", "renamed_kernel"])
+    with pytest.raises(SystemExit, match="renamed_kernel"):
+        gen.gen_numeric(row, "gfx1151", str(ep_repo / "hip-ep"), str(tmp_path / "o"),
+                        "/x/ep.so", "make k", [])
+
+
+def test_missing_frozen_gate_is_rejected(tmp_path, ep_repo):
+    row = dict(gen.find_op(gen.load_registry(), "layer_norm"), frozen_functions=["noSuchGate"])
+    with pytest.raises(SystemExit, match="noSuchGate"):
+        gen.gen_numeric(row, "gfx1151", str(ep_repo / "hip-ep"), str(tmp_path / "o"),
+                        "/x/ep.so", "make k", [])
+
+
+def _git(cwd, *args):
+    import subprocess
+    return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t",
+                           "-c", "commit.gpgsign=false", *args], cwd=cwd, check=True,
+                          capture_output=True, text=True).stdout.strip()
+
+
+def test_numeric_meta_records_the_ep_base_commit(monkeypatch, tmp_path, ep_repo):
+    _git(ep_repo, "init", "-q")
+    _git(ep_repo, "add", ".")
+    _git(ep_repo, "commit", "-q", "-m", "base")
+    out = tmp_path / "o"
+    _main(monkeypatch, *_numeric_args(ep_repo, out, "--ep-upstream-ref", "upstream/main"))
+    meta = json.loads((out / "task_meta.json").read_text())
+    assert meta["ep_base_sha"] == _git(ep_repo, "rev-parse", "HEAD")
+    assert meta["numeric"]["upstream_ref"] == "upstream/main"
+    readme = (out / "README.md").read_text()
+    assert "export-patch" in readme and meta["ep_base_sha"] in readme
+
+
+def test_dirty_ep_kernel_is_refused(monkeypatch, tmp_path, ep_repo):
+    _git(ep_repo, "init", "-q")
+    _git(ep_repo, "add", ".")
+    _git(ep_repo, "commit", "-q", "-m", "base")
+    kernel = ep_repo / "hip-ep" / "lib" / "Runtime" / "Kernels" / "hip" / "matmul_nbits_kernel.hip"
+    kernel.write_text(kernel.read_text() + "// local edit\n")
+    with pytest.raises(SystemExit, match="uncommitted changes"):
+        _main(monkeypatch, *_numeric_args(ep_repo, tmp_path / "o"))
+
+
+def test_non_git_ep_tree_has_no_base_and_no_export_section(monkeypatch, tmp_path, ep_repo):
+    out = tmp_path / "o"
+    _main(monkeypatch, *_numeric_args(ep_repo, out))
+    assert json.loads((out / "task_meta.json").read_text())["ep_base_sha"] is None
+    assert "export-patch" not in (out / "README.md").read_text()
+
+
+def test_numeric_readme_describes_device_time_gates_and_env(monkeypatch, tmp_path, ep_repo):
+    out = tmp_path / "o"
+    _main(monkeypatch, *_numeric_args(ep_repo, out))
+    readme = (out / "README.md").read_text()
+    assert "median per-op GPU time" in readme and "--durations" not in readme
+    assert "`HIPDNN_MATMUL_AUTOTUNE_MODE=lookup`" in readme
+    assert "`preferWmmaTier`" in readme and "`kBlockDim`" in readme
+    assert "m1_q_proj_u8zp" in readme
+    # hip_matmul_nbits is both an ABI entry and a frozen definition
+    assert "remain editable, except the definitions frozen whole below." in readme
 
 
 if __name__ == "__main__":
