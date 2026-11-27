@@ -1,0 +1,30 @@
+Execution provider: follow_config
+Batch size: 1, prompt tokens: 128, tokens to generate: 16
+Model Creation Latency: 2136.82 ms
+Tokenizer Creation Latency: 191.58 ms
+Generator Creation Latency: 2.84584 ms
+First Warmup AppendTokenSequences Latency: 48.0419 ms
+Prompt processing (time to first token):
+	avg (us):       16305.7
+	avg (tokens/s): 7850.01
+	p50 (us):       17046.1
+	stddev (us):    1047
+	n:              2 * 128 token(s)
+Token generation:
+	avg (us):       4127.89
+	avg (tokens/s): 242.255
+	p50 (us):       3944.39
+	stddev (us):    718.401
+	n:              30 * 1 token(s)
+Token sampling:
+	avg (us):       66.4145
+	avg (tokens/s): 15057
+	p50 (us):       66.63
+	stddev (us):    0.304763
+	n:              2 * 1 token(s)
+E2E generation (entire generation loop):
+	avg (ms):       78.2914
+	p50 (ms):       79.2158
+	stddev (ms):    1.30727
+	n:              2
+Peak working set size: 810745856 bytes (773.19 MB)
