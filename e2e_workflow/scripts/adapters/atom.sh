@@ -212,7 +212,8 @@ adapter_pd_lb_launch() {
 }
 
 # ATOM can answer /health before request-triggered Triton/aiter JIT work has quiesced. The dispatcher
-# calls this after its untimed warmup. Isolated replicas intentionally skip that outer warmup, so give
+# calls this after its untimed warmup (an AgentX trace replay has none: aiperf's own warmup phase runs
+# before its measured window). Isolated replicas intentionally skip that outer warmup, so give
 # ATOM one explicit untimed request round here; the native client's own warmups are not a readiness
 # proof because they happen inside the later timed invocation.
 adapter_prepare_measurement() {

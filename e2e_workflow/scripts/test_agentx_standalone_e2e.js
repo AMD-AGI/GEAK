@@ -337,9 +337,9 @@ try {
     && near((optIn.summary || {}).throughput_tok_s_median, p50For(2)),
   'GEAK_AGENTX_OUTER_WARMUP=1 restores the discarded full replay, and the timed one is still the number');
   const atom = bench(EVAL_DIR, wf.WORKLOAD, { BACKEND: 'atom', OUT_DIR: path.join(EVAL_DIR, 'atom_leg') });
-  ok(atom.proc.status === 0 && aiperfCalls(atom).length === 2
-    && (atom.summary || {}).warmup_protocol === 'outer_round',
-  "ATOM keeps it: its measurement-ready check is defined to run after a warmup");
+  ok(atom.proc.status === 0 && aiperfCalls(atom).length === 1
+    && (atom.summary || {}).warmup_protocol === 'replay_per_lane',
+  'an ATOM server is measured the same way: aiperf warms it before the measured window');
   const shape = legacyLeg({ REPEATS: '0', OUT_DIR: path.join(EVAL_DIR, 'legacy_shape_capture') });
   ok(aiperfCalls(shape).length === 1, 'a REPEATS=0 shape capture keeps it: it is the only traffic');
 
