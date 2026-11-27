@@ -193,11 +193,11 @@ _resolve_samples() {   # _resolve_samples VALIDATION_DEFAULT NOUN MODE -> sets _
 # baseline and rebench are exactly that -- a fresh server and ONE pass.  The client ignores the prompt
 # count, so an outer round in front of it is one more full window (3600s on a parity or validation
 # leg), and on GLM-5.2 it moved the timed pass by only -1.3%..+2.7%.  So a trace replay with a timed
-# round to follow runs none.  It is kept where it is the only traffic (REPEATS=0 shape capture), for
-# ATOM (whose readiness check is defined to run after it), and when GEAK_AGENTX_OUTER_WARMUP=1.
+# round to follow runs none, on every backend: aiperf's own warmup phase runs before its measured
+# window, so ATOM's request-triggered JIT settles there as well.  It is kept where it is the only
+# traffic (REPEATS=0 shape capture) and when GEAK_AGENTX_OUTER_WARMUP=1.
 _agentx_self_warm() {   # _agentx_self_warm TIMED_ROUNDS -> rc 0 when the replay is its own warmup
   [ "${BENCH_CLIENT:-native}" = "agentx" ] || return 1
-  [ "${BACKEND:-sglang}" != "atom" ] || return 1
   [ "${GEAK_AGENTX_OUTER_WARMUP:-0}" != "1" ] || return 1
   case "${1:-}" in ''|*[!0-9]*|0) return 1 ;; esac
 }
