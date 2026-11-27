@@ -44,7 +44,7 @@ jobs:
       # dependency, so the job keeps its no-install-beyond-ruff shape.
       - name: bash syntax check (e2e shell contract)
         run: |
-          find e2e_workflow/scripts kernel_workflow/scripts -name '*.sh' -print0 \
+          find e2e_workflow/scripts kernel_workflow/scripts tools/hip_ep_e2e -name '*.sh' -print0 \
             | xargs -0 -n1 bash -n
 
   pytest:
@@ -62,7 +62,8 @@ jobs:
       # The experience-store tests read/write the on-disk meta.yaml format (that
       # module degrades to JSON without pyyaml, but then the test would be
       # asserting a format the real store never uses).
-      - run: pip install pytest pytest-cov coverage pyyaml
+      # numpy: tools/hip_ep_e2e/parity.py compares the logits dumps of two hip-ep packages.
+      - run: pip install pytest pytest-cov coverage pyyaml numpy
       # Node is required, not incidental: the Eikos decision-registry lint evaluates the workflow
       # schema expressions in a node vm context. Pinned here rather than relying on whatever the
       # runner image happens to ship.
@@ -188,6 +189,12 @@ jobs:
             e2e_workflow/routing/test_route_review.py \
             tools/tests/test_ep_task_runner.py \
             tools/tests/test_gen_ep_task.py \
+            tools/hip_ep_e2e/tests/test_hipep_env.py \
+            tools/hip_ep_e2e/tests/test_bench.py \
+            tools/hip_ep_e2e/tests/test_parity.py \
+            tools/hip_ep_e2e/tests/test_kprof.py \
+            tools/hip_ep_e2e/tests/test_build_kernels.py \
+            tools/hip_ep_e2e/tests/test_make_pkg.py \
             geak/test_bootstrap.py
 
       - name: expert skill static validation
@@ -469,6 +476,9 @@ jobs:
       # runner image; no GPU, no model, no network.
       - name: standalone AgentX trace replay end to end
         run: node e2e_workflow/scripts/test_agentx_standalone_e2e.js
+      # The hip-ep workflow on stub agents, and its long-command template run through bash.
+      - name: hip-ep end-to-end workflow orchestration
+        run: node tools/hip_ep_e2e/tests/test_workflow.js
 
   tuning-skillset-integrity:
     name: Vendored tuning skillset matches its manifest
