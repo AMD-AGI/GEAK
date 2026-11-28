@@ -114,8 +114,8 @@ _MN_PD_HEALTH_TIMEOUT_S=10
 # series, summed); empty when it serves no /metrics (sglang without --enable-metrics).
 _mn_load() {
   curl -sf -m 5 "$1/metrics" 2>/dev/null \
-    | awk '/^(vllm:num_requests_running|sglang:num_running_reqs)[{ ]/ {s += $NF; n = 1}
-           /^(vllm|sglang):prompt_tokens_total[{ ]/ {p += $NF}
+    | awk '/^(vllm:num_requests_running|sglang:num_running_reqs|atom:requests_running)[{ ]/ {s += $NF; n = 1}
+           /^(vllm|sglang|atom):prompt_tokens_total[{ ]/ {p += $NF}
            END {if (n) printf "%d %.0f\n", s, p}'
 }
 
@@ -150,6 +150,20 @@ _mn_wait_load() {
   done
 }
 
+# The profiler window in seconds. ATOM keeps the size guard adapters/atom.sh applies on one
+# node (ATOM_PROFILE_WINDOW_MAX_SEC, default 6): with ATOM_PROFILER_MORE every rank buffers its
+# whole window in host RAM and exports it at /stop_profile, and a long window on a decode engine
+# has run a node out of memory.
+_mn_window_s() {
+  local _w="${PROFILE_WINDOW_SEC:-20}" _max="${ATOM_PROFILE_WINDOW_MAX_SEC:-6}"
+  if [ "${BACKEND:-}" = "atom" ] && [ "$_w" -gt "$_max" ] 2>/dev/null; then
+    echo ">>> multinode: clamping the ATOM profile window ${_w}->${_max}s" \
+         "(set ATOM_PROFILE_WINDOW_MAX_SEC to override)" >&2
+    _w="$_max"
+  fi
+  echo "$_w"
+}
+
 # pd_disagg window: both engines are opened first and closed
 # together, so their GPU-time totals describe the same interval. Prints role=url
 # for every engine that opened one. Payload knobs read the backend adapter's env names.
@@ -161,9 +175,11 @@ _mn_pd_window() {
   while IFS='=' read -r _role _url; do
     [ -n "$_url" ] || continue
     mkdir -p "$PROFILE_DIR/$_role"
-    if curl -sf -X POST "${_url}/start_profile" -H 'Content-Type: application/json' \
-        -d "{\"output_dir\":\"${PROFILE_DIR}/${_role}\",\"num_steps\":${PROFILE_NUM_STEPS},\"record_shapes\":true,\"with_stack\":${_stack},\"activities\":${_acts}}" \
-        >/dev/null 2>&1; then
+    # ATOM takes no request body: its output dir is fixed at launch (mn.py gives each role its
+    # own ATOM_TORCH_PROFILER_DIR) and the window is closed by /stop_profile, not by a step count.
+    local _body=(-H 'Content-Type: application/json' -d "{\"output_dir\":\"${PROFILE_DIR}/${_role}\",\"num_steps\":${PROFILE_NUM_STEPS},\"record_shapes\":true,\"with_stack\":${_stack},\"activities\":${_acts}}")
+    [ "${BACKEND:-}" = "atom" ] && _body=()
+    if curl -sf -X POST "${_url}/start_profile" ${_body[@]+"${_body[@]}"} >/dev/null 2>&1; then
       _windowed="${_windowed}${_role}=${_url}"$'\n'
     else
       echo "!!! multinode: /start_profile failed on the $_role engine ($_url)" >&2
@@ -173,20 +189,27 @@ _mn_pd_window() {
   # Bounded by TIME and closed explicitly: num_steps counts forward steps, and
   # decode runs ~10x more of them than prefill, so prefill's window would still
   # be open at teardown and write nothing.
-  sleep "${PROFILE_WINDOW_SEC:-20}"
-  # Bounded: a wedged scheduler never answers /stop_profile.
+  sleep "$(_mn_window_s)"
+  # Bounded: a wedged scheduler never answers /stop_profile. Closed on every engine at once:
+  # ATOM answers /stop_profile only after its export, so closing one engine after the other
+  # keeps the later engine's window open for the whole export of the first.
+  local _stops=() _pid
   while IFS='=' read -r _role _url; do
     [ -n "$_url" ] || continue
-    _stop_rc=0
-    curl -sf -m "$_MN_STOP_PROFILE_TIMEOUT_S" -X POST "${_url}/stop_profile" \
-      >/dev/null 2>&1 || _stop_rc=$?
-    if [ "$_stop_rc" -eq 28 ]; then
-      echo "!!! multinode: the $_role engine did not answer /stop_profile within" \
-           "${_MN_STOP_PROFILE_TIMEOUT_S}s; its traces will be missing" >&2
-    elif [ "$_stop_rc" -ne 0 ]; then
-      echo ">>> multinode: the $_role engine had already closed its window" >&2
-    fi
+    (
+      _stop_rc=0
+      curl -sf -m "$_MN_STOP_PROFILE_TIMEOUT_S" -X POST "${_url}/stop_profile" \
+        >/dev/null 2>&1 || _stop_rc=$?
+      if [ "$_stop_rc" -eq 28 ]; then
+        echo "!!! multinode: the $_role engine did not answer /stop_profile within" \
+             "${_MN_STOP_PROFILE_TIMEOUT_S}s; its traces will be missing" >&2
+      elif [ "$_stop_rc" -ne 0 ]; then
+        echo ">>> multinode: the $_role engine had already closed its window" >&2
+      fi
+    ) &
+    _stops+=("$!")
   done <<< "$_windowed"
+  for _pid in "${_stops[@]}"; do wait "$_pid"; done
   printf '%s' "$_windowed"
 }
 
@@ -244,6 +267,8 @@ adapter_profile_window() {
   local _expect="$TP"
   local _before _after _deadline _depth=1 _windowed=""
   [ "$_MN_TOPOLOGY" = "pd_disagg" ] && _depth=2
+  # ATOM: <profile>/<role>/rank_<N>/<trace>, one directory deeper than sglang's.
+  [ "${BACKEND:-}" = "atom" ] && _depth=$(( _depth + 1 ))
   _mn_traces() { find "$PROFILE_DIR" -maxdepth "$_depth" -name '*.trace.json*' "$@" 2>/dev/null; }
   _before=$(_mn_traces | wc -l)
 
@@ -301,7 +326,7 @@ adapter_profile_window() {
     python3 "$_MN_TRACES" trace-gate \
       --profile-dir "$PROFILE_DIR" --expect-ranks "$_expect" \
       --nodes "$_MN_NNODES" \
-      ${_launch_json:+--launch-json "$_launch_json" --window-s "${PROFILE_WINDOW_SEC:-20}"}
+      ${_launch_json:+--launch-json "$_launch_json" --window-s "$(_mn_window_s 2>/dev/null)"}
   local _rc=$?
   # Non-fatal: a partial set still ranks; the verdict is on disk.
   if [ "$_rc" -ne 0 ]; then
