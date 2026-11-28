@@ -111,8 +111,11 @@ adapter_launch() {
   # --max-model-len: mirror the InferenceX fixed_seq_len recipes, which pin 10240 for every shape
   # EXCEPT 1k/1k (where they leave the model default). Explicit MAX_MODEL_LEN always wins. This keeps
   # GEAK numbers comparable to the InferenceX baseline instead of silently sizing KV differently.
+  # Only for a known fixed-length sweep: a trace replay (AgentX) sends 100k+ prompts, and a
+  # multinode rank is not told ISL/OSL -- both keep the model's own limit.
   local _mml="${MAX_MODEL_LEN:-}"
-  if [ -z "$_mml" ] && ! { [ "${ISL:-}" = "1024" ] && [ "${OSL:-}" = "1024" ]; }; then
+  if [ -z "$_mml" ] && [ -n "${ISL:-}" ] && [ -n "${OSL:-}" ] && [ "${BENCH_CLIENT:-}" != "agentx" ] \
+     && ! { [ "$ISL" = "1024" ] && [ "$OSL" = "1024" ]; }; then
     _mml=10240
   fi
 
@@ -133,7 +136,10 @@ adapter_launch() {
   if [ -n "${PROFILE_DIR:-}" ]; then
     mkdir -p "$PROFILE_DIR"
     _prof=(--torch-profiler-dir "$PROFILE_DIR")
-    _prof_env=(ATOM_PROFILER_MORE="${ATOM_PROFILER_MORE:-1}")
+    # Shapes yes, Python stacks / memory no -- what sglang.sh and vllm.sh ask for: stacks are most
+    # of the events and slow the profiled steps. An ATOM without the split flags falls back to MORE.
+    _prof_env=(ATOM_PROFILER_MORE="${ATOM_PROFILER_MORE:-1}" ATOM_PROFILER_RECORD_SHAPES="${ATOM_PROFILER_RECORD_SHAPES:-1}"
+               ATOM_PROFILER_WITH_STACK="${ATOM_PROFILER_WITH_STACK:-0}" ATOM_PROFILER_PROFILE_MEMORY="${ATOM_PROFILER_PROFILE_MEMORY:-0}")
   fi
 
   _atom_server_argv "${EXTRA_SERVER_ARGS:-}" || return 2
@@ -161,8 +167,53 @@ adapter_launch() {
 
 adapter_health() { curl -sf "${BASE_URL}/health" >/dev/null 2>&1; }
 
+# ---- multi-node P/D (read by adapters/launchers/multinode.sh, generated mode) ----
+# ATOM has no --nnodes, so there is no adapter_dist_args: TP cannot span nodes, only P/D can.
+# pd_roles: one complete TP-closed server per role, joined by Mooncake.
+adapter_pd_mode() { echo pd_roles; }
+
+# adapter_pd_args ROLE HANDSHAKE_PORT TRANSFER_BACKEND [IB_DEVICE]
+# Output is shell-quoted: _atom_server_argv splits it with shell rules and the JSON has quotes.
+# proxy_ip is this node's cluster IP (mn.py exports GEAK_NODE_IP in the rank head); the peer
+# connects to it. TRANSFER_BACKEND / IB_DEVICE are sglang's knobs: ATOM's Mooncake takes its
+# protocol from the environment (MC_* in EXTRA_ENV), so they are accepted and ignored.
+adapter_pd_args() {
+  local role="$1" hs="$2" kvrole
+  case "$role" in
+    prefill) kvrole=kv_producer ;;
+    decode)  kvrole=kv_consumer ;;
+    *) echo "!!! atom adapter: unknown PD role '$role'" >&2; return 2 ;;
+  esac
+  [ -n "${GEAK_NODE_IP:-}" ] || { echo "!!! atom adapter: GEAK_NODE_IP unset; Mooncake needs the node IP" >&2; return 2; }
+  local cfg
+  cfg=$(printf '{"kv_role":"%s","kv_connector":"mooncake","proxy_ip":"%s","handshake_port":%s}' \
+        "$kvrole" "$GEAK_NODE_IP" "$hs")
+  printf -- '--kv-transfer-config %q\n' "$cfg"
+}
+
+# adapter_pd_lb_launch HOST PORT PREFILL_URLS BOOTSTRAP_PORT DECODE_URLS
+# atomesh takes no bootstrap port; URL lists are space-separated (xPyD: one per replica).
+# Flags as in ATOM's pd_disaggregation_guide.md.
+adapter_pd_lb_launch() {
+  local host="$1" port="$2" u
+  local workers=()
+  for u in $3; do workers+=(--prefill "$u"); done
+  for u in $5; do workers+=(--decode "$u"); done
+  # shellcheck disable=SC2086
+  ${SERVER_LAUNCH_PREFIX:-} env $EXTRA_ENV \
+    atomesh launch \
+      --host "$host" --port "$port" \
+      --pd-disaggregation "${workers[@]}" \
+      --policy "${PD_LB_POLICY:-random}" --backend atom \
+      --log-level info --disable-health-check --disable-circuit-breaker \
+      ${LB_EXTRA_ARGS:-} \
+      > "$LOG" 2>&1 &
+  SERVER_PID=$!
+}
+
 # ATOM can answer /health before request-triggered Triton/aiter JIT work has quiesced. The dispatcher
-# calls this after its untimed warmup. Isolated replicas intentionally skip that outer warmup, so give
+# calls this after its untimed warmup (an AgentX trace replay has none: aiperf's own warmup phase runs
+# before its measured window). Isolated replicas intentionally skip that outer warmup, so give
 # ATOM one explicit untimed request round here; the native client's own warmups are not a readiness
 # proof because they happen inside the later timed invocation.
 adapter_prepare_measurement() {
