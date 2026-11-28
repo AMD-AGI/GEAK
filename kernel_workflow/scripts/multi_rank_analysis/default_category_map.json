@@ -1,0 +1,5 @@
+{
+  "gemm": "gemm|_gemm_|xdl|cshuffle",
+  "communication": "nccl|rccl|all_reduce|all_gather|broadcast|barrier|p2p|combine|scatter",
+  "elementwise": "elementwise|quant|cast|copy|fill_"
+}

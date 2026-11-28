@@ -1,0 +1,49 @@
+{
+  "schema_version": "geak-collector-v1",
+  "id": "hardware_identity",
+  "maturity": "ready",
+  "tool": "amd-smi + rocminfo + torch device properties",
+  "purpose": "Cross-checked static device, runtime, memory, execution-unit, and topology context",
+  "capability_probe": [
+    "amd-smi version",
+    "amd-smi list --json",
+    "rocminfo",
+    "python -c \"import torch; print(torch.__version__, torch.version.hip, torch.cuda.device_count())\""
+  ],
+  "command_template": "amd-smi static --asic --bus --ifwi --driver --vram --board --limit --json > {output_dir}/amd_smi_static.json; rocminfo > {output_dir}/rocminfo.txt; python {collector_script} > {output_dir}/torch_device_properties.json",
+  "preconditions": [
+    "run under the same GPU visibility/lease as the benchmark",
+    "record visible-to-physical device mapping",
+    "cross-check device count, architecture, VRAM, execution units, wave size, and local memory across at least two sources"
+  ],
+  "outputs": [
+    {
+      "artifact": "amd_smi_static.json",
+      "information": "board, driver, VRAM, bus and physical-device identity"
+    },
+    {
+      "artifact": "rocminfo.txt",
+      "information": "gfx target and HSA agent properties"
+    },
+    {
+      "artifact": "torch_device_properties.json",
+      "information": "runtime-visible count, architecture, multiprocessor count, warp size and memory properties"
+    }
+  ],
+  "helps_diagnose": [
+    "counter normalization context",
+    "residency resource limits",
+    "visible-rank topology assumptions",
+    "runtime/tool compatibility"
+  ],
+  "not_measured": [
+    "sustained HBM or XGMI ceiling",
+    "launch overhead",
+    "kernel residency",
+    "dynamic traffic"
+  ],
+  "provenance": {
+    "reference": "ROCm amd-smi/rocminfo and PyTorch device-properties interfaces",
+    "notes": "Probe exact amd-smi subcommands on the installed version; field-level hardware provenance is mandatory."
+  }
+}

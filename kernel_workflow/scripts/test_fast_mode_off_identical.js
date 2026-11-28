@@ -49,7 +49,7 @@ ok(block.includes('/E/round_1/engineer_0/.t0') && block.includes('/E/round_1/eng
 ok(load({ fast_mode: 'true' }).fastModeEngineerBlock('/x').includes('>= 360 (6 min)'), 'engineer_minutes defaults to 6');
 
 console.log('\n# wiring');
-ok(src.includes('while (!skipLoop && dispatched < BUDGET && noImprove < MAX_NO_IMPROVE && round < MAX_ROUNDS) {'),
+ok(src.includes('while (!skipLoop && dispatched < BUDGET && (MEGA || noImprove < MAX_NO_IMPROVE) && round < MAX_ROUNDS) {'),
   'round loop is bounded by MAX_ROUNDS');
 ok((src.match(/FAST_MODE && \(dispatched >= BUDGET \|\| round >= MAX_ROUNDS\)/g) || []).length === 2,
   'final re-profile and memory update are skipped only under FAST_MODE on the last round');

@@ -476,8 +476,10 @@ async function main() {
     // The engineer pipeline carries the context from dispatch through verify to the outcome call.
     const eng = SRC.slice(SRC.indexOf('const results = await pipeline('), SRC.indexOf('// --- (d) Build candidate list'));
     ok('the engineer site passes a host-owned context to agentT, keeps it through verify, and reports its id',
-      /const route = ROUTING_ON \? \{\} : null;/.test(eng) && /schema: ENG_SCHEMA \}, route\s*\)\.then\(\(eng\) => \(\{ d, eng, route \}\)\)/.test(eng) &&
-      /const \{ d, eng, route \} = prev;/.test(eng) && /return \{ d, eng, ver: null, route \};/.test(eng) &&
+      // mode=mega shares these calls but never routes (route stays null) and has its own `after` steps.
+      /const route = ROUTING_ON && !MEGA \? \{\} : null;/.test(eng) &&
+      /schema: ENG_SCHEMA \},\s*route\s*\)\.then\(\(eng\) => MEGA \? mt\.after\(eng\) : \(\{ d, eng, route \}\)\)/.test(eng) &&
+      /\(\{ d, eng, route \} = prev\);/.test(eng) && /return \{ d, eng, ver: null, route \};/.test(eng) &&
       // R2 residual: the verify `.then` is now a BLOCK body (it first feeds the verifier's own terminal
       // outcome to P1's shadow), still returning the host-owned ctx { d, eng, ver, patch, route }.
       /\.then\(\(ver\) => \{/.test(eng) && /return \{ d, eng, ver, patch, route \};/.test(eng) &&

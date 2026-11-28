@@ -2,8 +2,8 @@
 // Regression guard for the kernel_workflow.js DISPATCHER (no GPU, no agent, no network).
 //
 // Three invariants under test, all exercised against the REAL kernel_workflow.js source:
-//   A-D) mode dispatch — args.mode routes to the single-language worker (optimize|author) or to the
-//        multi-language bake-off (bakeoff); it normalizes case/whitespace, defaults to optimize, throws
+//   A-D) mode dispatch — args.mode routes to the single-language worker (optimize|author), to the
+//        mega worker (mega) or to the multi-language bake-off (bakeoff); it normalizes case/whitespace, defaults to optimize, throws
 //        on anything else (never silently downgrades), and forwards every arg to the worker untouched.
 //   E-J) bake-off LANE ROUTING — the live language optimizes its existing impl, other languages follow
 //        Discover's author_plan.route (rewrite -> optimize, author -> author), explicit args.backends
@@ -106,6 +106,8 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
     ['mode="OPTIMIZE" (uppercase)', 'OPTIMIZE', 'lane'],
     ['mode="" (empty string)', '', 'lane'],
     ['mode=null', null, 'lane'],
+    ['mode=mega', 'mega', 'lane'],
+    ['mode=" MEGA " (trim + lowercase)', ' MEGA ', 'lane'],
   ];
   for (const [label, mode, expect] of ROUTES) {
     const a = { ...BASE };
@@ -114,7 +116,8 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
     let err = null;
     try { await run(); } catch (e) { err = e; }
     const toLane = trace.workflowCalls.some((c) => String(c.scriptPath).endsWith('kernel_lane.js'));
-    const got = err ? `throw(${err.message})` : (toLane ? 'lane' : (trace.phases.includes('Freeze') ? 'bakeoff' : 'none'));
+    const got = err ? `throw(${err.message})` : (toLane ? 'lane'
+      : (trace.phases.includes('Freeze') ? 'bakeoff' : 'none'));
     ok(got === expect, `${label} -> ${expect}`, got);
   }
 
@@ -143,6 +146,28 @@ const lanesOf = (trace) => trace.lanes.map((l) => `${l.lang}:${l.mode}`).sort().
       ok(JSON.stringify(c.args[k]) === JSON.stringify(a[k]), `forwards ${k}`, JSON.stringify(c.args[k]));
     }
     ok(trace.agentLabels.length === 0, 'no agent spawned on pass-through', `n=${trace.agentLabels.length}`);
+  }
+
+  // -------------------------------------------------------------------------
+  console.log('\n# C2. mode=mega forwards every arg to the same lane worker unchanged');
+  {
+    const a = { ...BASE, mode: 'mega', gpu_ids: '0,1,2,3,4,5,6,7', gpus_per_job: 8, budget: 4,
+                task: 'fuse it' };
+    const { run, trace } = build(a, {});
+    await run();
+    const c = trace.workflowCalls[0];
+    ok(trace.workflowCalls.length === 1, 'exactly one workflow() call', `n=${trace.workflowCalls.length}`);
+    ok(String(c.scriptPath).endsWith(path.sep + 'kernel_lane.js'), 'scriptPath = kernel_lane.js', c.scriptPath);
+    for (const k of ['mode', 'gpu_ids', 'gpus_per_job', 'budget', 'task', 'kernel_path']) {
+      ok(JSON.stringify(c.args[k]) === JSON.stringify(a[k]), `forwards ${k}`, JSON.stringify(c.args[k]));
+    }
+    ok(c.args.workflow_dir === WF_DIR, 'forwards workflow_dir', c.args.workflow_dir);
+    ok(trace.agentLabels.length === 0, 'no agent spawned on pass-through', `n=${trace.agentLabels.length}`);
+    const lane = fs.readFileSync(path.join(WF_DIR, 'kernel_lane.js'), 'utf8');
+    ok(/\nconst MEGA = MODE === 'mega';/.test(lane) && /if \(MEGA\) \{\n  const r = await megaAfterSetup\(\);/.test(lane) &&
+       /while \(!skipLoop && dispatched < BUDGET && \(MEGA \|\| noImprove < MAX_NO_IMPROVE\) && round < MAX_ROUNDS\)/.test(lane),
+       'kernel_lane.js runs mode=mega through its own phases (mega hooks under MEGA)');
+    ok(!fs.existsSync(path.join(WF_DIR, 'kernel_mega.js')), 'there is no separate mega worker script');
   }
 
   // -------------------------------------------------------------------------
