@@ -1,34 +1,28 @@
 # Experience
 
-Brain owns experience retrieval and its effect on planning. Start with [INDEX.md](INDEX.md),
-or the external index selected in `BRIEF.md`; record its version and allowed origins there.
-The index exposes origins and search tags, not scores or recommendations. Filter origins
-before opening cases/routes and their linked raw evidence. Keep information exclusions
-separate from permitted changes.
+To consult history, search the origin tags in [INDEX.md](INDEX.md) or the brief's external
+index. Record its revision and allowed origins in `BRIEF.md`. Filter cases, routes and
+linked evidence by origin before reading. Keep information exclusions separate from
+permitted changes.
 
 For a moving performance target, refresh the permitted source and select a point with the
 same external workload, resources and metric definitions. Pin its date and reuse it until
 the target or operating conditions change. Differences in engine, parallel layout or
 scheduling are hypotheses for the observed gap.
 
-When improving a supplied image, pin it as the candidate's base. Trace a later
-release to the changed call sites, activation conditions and dependencies. Port a
-measurable change onto the supplied stack and compare it there. Keep the published
-release score as a reference for the remaining gap.
+Keep the supplied image as the candidate's base. Check whether the current revision
+already includes the fix and whether the caller reaches it. Measure any port on that base.
 
-Retrieve by the cause of cost. Match the hardware, layout and operator semantics.
-Estimate coverage in the requests and phases that drive each objective. A common
-batch shape can be rare among slow requests. Where outcomes differ, use a losing
-case to identify a transfer condition. An unavailable
-implementation can still suggest a compatible probe or a scoped port.
+Retrieve by the suspected cause. Match hardware, layout, operator semantics and coverage
+in the requests driving each objective. A common shape can be rare among slow requests.
+A losing case can reveal a condition for transfer.
 
-Combine current Profile hotspots with relevant mechanisms, retaining hotspots without a
-historical match. Rank plausible serving impact and remaining headroom against the full
-incremental delivery cost and usable parallel resources. A high-impact unknown can justify
-a bounded discriminator. History retrieval is not a gate for ready independent work.
+Keep current hotspots without a historical match in the ranking. When matched local
+measurements contradict a case, revise or drop its hypothesis. Probe an uncertain
+assumption when the answer would change the plan. Ready work can proceed meanwhile.
 
-In `PLAN.md`, connect the observation and case to the next module call. For a bundle,
-name what changes together and isolate a phase when that would change the choice.
+When a case informs `PLAN.md`, connect it to a current observation and the next call.
+For a bundle, name what changes together and isolate a phase when it would change the choice.
 When policy controls dispatch, compare implementations at fixed policy or policies at
 fixed code. Add the other matched control if the interaction matters. Read actual path
 hits, each serving objective and the cost in queueing or time to first token.

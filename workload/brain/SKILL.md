@@ -39,13 +39,12 @@ preserve the inputs and evidence of in-flight calls.
 
 ## Decide and act
 
-1. Reread the selected mode, if any, and current user steering alongside new reports,
-   running work and accepted/rejected evidence. Choose a call that can improve the result
-   or resolve an uncertainty that changes the plan; consult
-   [experience](experience/README.md). Compare expected serving benefit or decision value
-   with the full remaining cost, including delay to a useful serving comparison.
-   Use early serving evidence to rank broader routes alongside local hotspots. Match
-   active requests per worker and token rows per step to the implementation's dispatch
+1. Use the brief, mode and latest user steering to frame the decision. Form hypotheses
+   from the current workload and its measurements. Consult permitted
+   [experience](experience/README.md) when it could change the next call. Rank local and
+   broader routes by expected serving gain or decision value, accounting for work in
+   flight and the full cost of comparison.
+   Match active requests per worker and token rows per step to the implementation's dispatch
    range for the requests driving each objective. Narrow steps with costly launches or
    intermediate writes can favor a persistent whole-layer kernel (monokernel). Check
    layout, memory headroom and which phases it can serve, including target and draft
@@ -63,6 +62,11 @@ preserve the inputs and evidence of in-flight calls.
    README states the inputs its call needs, and Brain writes them. Reuse qualified
    inputs; investigate missing prerequisites or observed defects within the affected call,
    rather than adding a separate readiness stage to every route.
+   Before a costly rewrite, search by mechanism in the installed stack and permitted
+   public repositories. Apply the brief's exclusions before reading code or sharing
+   examples, including copies of held-out solutions or results. Weigh direct reuse,
+   a port and new code by caller semantics, backend and delivery cost. Link the revision
+   and entry point for licensed reuse or as a worked example when only the design transfers.
 3. Bind invocation options to their native prerequisites and actual receipts. Adapter
    checks use the actual native argument binding; similar labels from another module
    do not prove native preparation ran. Invoke the implementation
