@@ -28,8 +28,10 @@ incremental delivery cost and usable parallel resources. A high-impact unknown c
 a bounded discriminator. History retrieval is not a gate for ready independent work.
 
 In `PLAN.md`, connect the observation and case to the next module call. For a bundle,
-choose the smallest comparison the runtime supports and name the dependencies that
-change with it. An intermediate can distinguish which phase merits development.
+name what changes together and isolate a phase when that would change the choice.
+When policy controls dispatch, compare implementations at fixed policy or policies at
+fixed code. Add the other matched control if the interaction matters. Read actual path
+hits, each serving objective and the cost in queueing or time to first token.
 State the outcome that changes priority. If a promising route must wait, identify
 which report or observation will reopen it. Pass the relevant evidence by reference.
 

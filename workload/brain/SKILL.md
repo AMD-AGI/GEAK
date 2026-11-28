@@ -44,10 +44,17 @@ preserve the inputs and evidence of in-flight calls.
    or resolve an uncertainty that changes the plan; consult
    [experience](experience/README.md). Compare expected serving benefit or decision value
    with the full remaining cost, including delay to a useful serving comparison.
-   If the ranked hotspots leave a gap to the serving objectives, compare the best broader
-   operator or system route suggested by experience with the next local improvement.
-   Use current coverage, prerequisites and cost to choose a measurement that could change
-   the ranking. Keep unknown bounds and existing commitments explicit.
+   Use early serving evidence to rank broader routes alongside local hotspots. Match
+   active requests per worker and token rows per step to the implementation's dispatch
+   range for the requests driving each objective. Narrow steps with costly launches or
+   intermediate writes can favor a persistent whole-layer kernel (monokernel). Check
+   layout, memory headroom and which phases it can serve, including target and draft
+   separately when relevant. At unsupported widths, prioritize the ordinary path's
+   hotspots. Mixed traffic can justify both routes.
+   If changing server admission or batching is in scope, consider whether it would move
+   enough work into the fast path to pay for waiting and lost parallelism, even when
+   the reference queue is empty. Keep offered traffic fixed and choose the trial from
+   the observed widths and the dispatch boundary.
    Missing evidence can justify a bounded probe, not a claim that the opportunity is absent.
    Keep user/native requirements and their owners distinct from optional investigations;
    a generated plan does not make diagnostic completeness an acceptance requirement.
@@ -73,7 +80,9 @@ preserve the inputs and evidence of in-flight calls.
    `STATE.md`, then write `PLAN.md` for a chosen call. Preserve failed and superseded calls;
    stale evidence cannot qualify a replacement. When a repair grows costly without answering
    the question, reconsider its method, scope or place in the plan before adding time.
-   Call termination alone does not rule out an untested opportunity.
+   Scope a negative result to the implementation, phases and widths actually tested.
+   If a proxy covered only part of the opportunity, weigh the cost and reach of the
+   remaining route against the next candidate.
 
 Act on new evidence while other calls run. An implementation failure leaves a capability
 gap to resolve, not a closed optimization path. Choose bounded repair, another suitable
