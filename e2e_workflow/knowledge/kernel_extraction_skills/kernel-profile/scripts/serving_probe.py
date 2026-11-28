@@ -77,6 +77,8 @@ ITERATION_LOG_DIR = None
 ID_HI = 150000
 CACHE_SALT = None
 VLLM_SOURCE = None
+ATOM_ROOT, ATOM_BEFORE = None, set()   # ATOM writes every window into its launch-time profiler dir
+ATOM_DECODE_WINDOW_S = 0.5   # ~50-100 decode steps (sglang takes 32); inside one generation
 
 
 def scrape_metrics(base, timeout=30):
@@ -97,10 +99,15 @@ def scrape_metrics(base, timeout=30):
         return {}, str(exc)
     out, realtime = {}, {}
     for line in text.splitlines():
-        if FRAMEWORK == "vllm":
-            for metric, key in (("vllm:num_requests_running", "num_running_reqs"),
-                                ("vllm:generation_tokens_total", "generation_tokens_total"),
-                                ("vllm:prompt_tokens_total", "prompt_tokens_total")):
+        if FRAMEWORK in ("vllm", "atom"):
+            for metric, key in ((FRAMEWORK + ":num_requests_running", "num_running_reqs"),
+                                ("atom:requests_running", "num_running_reqs"),
+                                (FRAMEWORK + ":generation_tokens_total", "generation_tokens_total"),
+                                (FRAMEWORK + ":prompt_tokens_total", "prompt_tokens_total"),
+                                # ATOM's per-step histograms: its *_tokens_total only move as
+                                # requests finish or arrive, and only at each ~1 s snapshot.
+                                ("atom:decode_batch_size_sum", "atom_decode"),
+                                ("atom:prefill_batch_tokens_sum", "atom_prefill")):
                 if line.startswith(metric + "{") or line.startswith(metric + " "):
                     out[key] = out.get(key, 0.0) + float(line.rsplit(" ", 1)[1])
         m = _REALTIME_RE.match(line)
@@ -120,7 +127,11 @@ def scrape_metrics(base, timeout=30):
                         out[key] = float(line.rsplit(" ", 1)[1])
                     except ValueError:
                         pass
-    if "decode" in realtime:
+    if "atom_decode" in out:
+        out["decode_tokens"] = out["atom_decode"]
+        out["prefill_tokens"] = out.get("atom_prefill", 0.0)
+        out["phase_counters"] = "atom decode_batch_size / prefill_batch_tokens histograms"
+    elif "decode" in realtime:
         out["decode_tokens"] = realtime["decode"]
         out["prefill_tokens"] = (realtime.get("prefill_compute", 0.0)
                                  + realtime.get("prefill_cache", 0.0))
@@ -151,10 +162,13 @@ def generate(base, ids, max_new_tokens, journal, label, timeout=1800, rid=None):
     if rid:
         body["rid"] = rid
     endpoint = "/generate"
-    if FRAMEWORK == "vllm":
+    if FRAMEWORK in ("vllm", "atom"):
         endpoint = "/v1/completions"
         body = {"model": SERVED_MODEL, "prompt": ids, "max_tokens": max_new_tokens,
                 "temperature": 0.0, "ignore_eos": True}
+        if FRAMEWORK == "atom":
+            # The atomesh router takes only text prompts; it passes prompt_token_ids through.
+            body.update(prompt="x", prompt_token_ids=ids)
         if CACHE_SALT is not None:
             # Isolate this invocation without flushing the live server's prefix cache.
             # The seed stays reproducible, including when retrying the same point.
@@ -349,7 +363,19 @@ def link_vllm_traces(trace_dir, keep):
             os.symlink(os.path.abspath(src), dst)
 
 
+def link_atom_traces(trace_dir):
+    """ATOM has no per-window prefix: link the finished (.gz) files its profiler dir gained since
+    the probe began into the point's dir, keeping the rank_<N>/ layout the trace gate reads."""
+    for src in glob.glob(os.path.join(ATOM_ROOT, "**", "*.trace.json.gz"), recursive=True):
+        dst = os.path.join(trace_dir, os.path.relpath(src, ATOM_ROOT))
+        if src not in ATOM_BEFORE and os.path.isfile(src) and not os.path.lexists(dst):
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            os.symlink(os.path.abspath(src), dst)
+
+
 def traces_written(trace_dir, since_ts):
+    if FRAMEWORK == "atom":
+        link_atom_traces(trace_dir)
     if FRAMEWORK == "vllm":
         link_vllm_traces(trace_dir, lambda src: os.path.getmtime(src) >= since_ts)
     out = []
@@ -371,6 +397,8 @@ def trace_files(trace_dir):
 def new_trace_files(trace_dir, before):
     """Files not present when the probe began. Not mtime: on a shared mount the writer's
     clock is another machine's."""
+    if FRAMEWORK == "atom":
+        link_atom_traces(trace_dir)
     if FRAMEWORK == "vllm":
         link_vllm_traces(trace_dir, lambda src: src not in before)
     out = [{"path": p, "bytes": os.path.getsize(p)}
@@ -648,7 +676,7 @@ def build_parser():
                          "defaults to a new one per run, recorded in the journal: a seed "
                          "already sent to that server is answered from its prefix cache")
     ap.add_argument("--out", required=True, help="journal JSON for this point")
-    ap.add_argument("--framework", choices=["sglang", "vllm"], default="sglang")
+    ap.add_argument("--framework", choices=["sglang", "vllm", "atom"], default="sglang")
     ap.add_argument("--served-model")
     ap.add_argument("--profiler-root",
                     help="vLLM's launch-time profiler directory, if not --trace-dir's parent "
@@ -662,9 +690,14 @@ def build_parser():
 def main():
     ap = build_parser()
     args = ap.parse_args()
-    global FRAMEWORK, SERVED_MODEL, ITERATION_LOG_DIR, ID_HI, CACHE_SALT, VLLM_SOURCE
+    global FRAMEWORK, SERVED_MODEL, ITERATION_LOG_DIR, ID_HI, CACHE_SALT, VLLM_SOURCE, ATOM_ROOT, ATOM_BEFORE
     FRAMEWORK, SERVED_MODEL = args.framework, args.served_model
-    VLLM_SOURCE = (args.profiler_root, args.point_id) if args.profiler_root else None
+    if FRAMEWORK == "atom":
+        if not (args.profiler_root and SERVED_MODEL):
+            ap.error("--profiler-root and --served-model are required for ATOM")
+        ATOM_ROOT = args.profiler_root
+        ATOM_BEFORE = set(glob.glob(os.path.join(ATOM_ROOT, "**", "*.trace.json.gz"), recursive=True))
+    VLLM_SOURCE = (args.profiler_root, args.point_id) if args.profiler_root and FRAMEWORK == "vllm" else None
     ITERATION_LOG_DIR = args.iteration_log_dir
     CACHE_SALT = secrets.token_hex(16) if FRAMEWORK == "vllm" else None
     if FRAMEWORK == "vllm" and not SERVED_MODEL:
@@ -729,11 +762,14 @@ def main():
                 # exports, well inside one generation; a server whose profiler has no step
                 # counter is stopped once every resident request has turned over.
                 done0 = decode_requests_done(journal)
+                if FRAMEWORK == "atom":
+                    # No step counter and no pause: a short timed window inside one generation.
+                    deadline = min(deadline, time.time() + ATOM_DECODE_WINDOW_S)
                 while (time.time() < deadline and not new_trace_files(args.trace_dir, before)
                        and decode_requests_done(journal) - done0 < want):
                     if decode_requests_failed(journal):
                         raise RuntimeError("a decode request failed while the window was open")
-                    time.sleep(5)
+                    time.sleep(min(5, max(0.1, deadline - time.time())))
             elif FRAMEWORK == "vllm":
                 if not wait_traces_settled(lambda: traces_written(args.trace_dir, t_start),
                                            journal, args.window_timeout, args.expect_files):

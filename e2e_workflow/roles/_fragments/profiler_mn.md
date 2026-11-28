@@ -30,7 +30,7 @@ TRACE=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("pars
 
 ## PD (`SERVING_TOPOLOGY=pd_disagg`)
 
-**Step 1, with `BACKEND=sglang`: the same leg also probes sampling points**, which is where the two
+**Step 1, with `BACKEND=sglang` or `atom`: the same leg also probes sampling points**, which is where the two
 engines' weights come from (step 3). Plan them from the BASELINE leg's engine logs, then add three
 variables to the step 1 command:
 ```bash

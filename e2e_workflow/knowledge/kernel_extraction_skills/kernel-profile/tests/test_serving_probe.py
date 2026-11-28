@@ -221,6 +221,27 @@ class VllmProfilerRootTest(unittest.TestCase):
         self.assertEqual(serving_probe.vllm_source(str(trace_dir))[1], 'pf_2')
 
 
+class AtomProfilerRootTest(unittest.TestCase):
+    """Multinode ATOM: rank_<N>/ files land in the launch-time root; only the probe's own are linked."""
+
+    def test_new_files_are_linked_with_their_rank_dir(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root, trace_dir = Path(tmp.name) / 'decode', Path(tmp.name) / 'de_4' / 'decode'
+        (root / 'rank_0').mkdir(parents=True)
+        trace_dir.mkdir(parents=True)
+        (root / 'rank_0' / 'old.trace.json.gz').write_text('{}')
+        for name, value in (('FRAMEWORK', 'atom'), ('ATOM_ROOT', str(root)),
+                            ('ATOM_BEFORE', {str(root / 'rank_0' / 'old.trace.json.gz')})):
+            self.addCleanup(setattr, serving_probe, name, getattr(serving_probe, name))
+            setattr(serving_probe, name, value)
+        before = serving_probe.trace_files(str(trace_dir))
+        (root / 'rank_0' / 'new.trace.json.gz').write_text('{}')
+        (root / 'rank_0' / 'busy.trace.json').write_text('{}')   # still being written
+        got = serving_probe.new_trace_files(str(trace_dir), before)
+        self.assertEqual([os.path.relpath(w['path'], trace_dir) for w in got], ['rank_0/new.trace.json.gz'])
+
+
 class DrivePrefillTest(unittest.TestCase):
     def test_sends_the_batch_as_its_sequences_not_running_copies_of_it(self):
         sent = []

@@ -66,6 +66,15 @@ instead, which is per-rank:
 every node runs `vllm serve --nnodes N --node-rank i --master-addr --master-port`,
 and ranks other than 0 add `--headless` (no HTTP front end; rank0 serves the client).
 
+ATOM's server takes no `--nnodes` / `--node-rank`, so `adapters/atom.sh` defines no
+`adapter_dist_args`: an ATOM engine is one TP world on one node's cards, and a generated
+`tp_span` launch is refused. It runs `pd_disagg` only. Generated, `adapter_pd_args` gives each
+role `--kv-transfer-config '{"kv_role": kv_producer|kv_consumer, "kv_connector": "mooncake",
+"proxy_ip": $GEAK_NODE_IP, "handshake_port": <pd bootstrap port>}'` (`mn.py` exports the node's
+cluster IP as `GEAK_NODE_IP`; Mooncake reads its protocol from `EXTRA_ENV`'s `MC_*`, not from
+`pd`), and `adapter_pd_lb_launch` starts `atomesh launch --pd-disaggregation --prefill <url>...
+--decode <url>... --backend atom` as in ATOM's `pd_disaggregation_guide.md`.
+
 Flags are layered in this order, the same one `launchers/magpie.sh` uses:
 GEAK's shared flags (`EXTRA_SERVER_ARGS`) → that engine's own accepted flags
 (`GEAK_MN_PD_SWEEP_ARGS_<ROLE>`, pd_disagg only) → the rank/world or
@@ -295,6 +304,16 @@ and EP ride in the server args and do not change it, so dp2 tp8 ep16 on two
 nodes is `tp: 16`. Plain DP replicas across nodes (a router in front of N
 independent non-PD engines) is not supported; PD replicas (xPyD) are.
 
+For `backend: atom` the command parser reads `--model`, `-tp` / `--tensor-parallel-size`, the
+role from `kv_role` in `--kv-transfer-config` (`kv_producer` is prefill, `kv_consumer` decode; no
+bootstrap port) and the HTTP port from `--server-port` (8000 when absent; `--port` is the engine's
+internal port, never the one a router dials). `--server-port`, `--port`, `-tp`,
+`--kv-transfer-config`, `--host` and the DP / PP width are the command's own, so a swept copy is
+dropped. The router is `atomesh launch --pd-disaggregation`, checked like sglang's: its `--port`
+is `serve_port` and its `--prefill` / `--decode` URLs are exactly the engines'. Replicas of one role
+may differ in `--server-port` only. Teardown finds atomesh by its recorded pid and by `atomesh launch`,
+and a defunct `ATOM::` child counts as a dead engine, like a defunct `sglang::` one.
+
 ## Running it
 
 ### 1. The environment check (automatic, before Setup)
@@ -318,7 +337,7 @@ nothing in it re-runs the check. The check:
   (another container's VRAM, a port held by something else) is refused by the rules below;
 - probes each node over ssh (the probe goes by content) and records its identity, its NIC for that IP (generated
   mode), its software stack and its GPU (gfx, target, product, CU count); nodes on
-  different sglang/vllm/torch/triton/aiter versions, or with different GPUs, are refused;
+  different sglang/vllm/atom/torch/triton/aiter versions, or with different GPUs, are refused;
 - provided mode: fingerprints every launch script on its node and refuses a missing one;
 - opens every port GEAK hands out that one node dials on another (generated: the
   dist-init port, PD's bootstrap port) on its node and dials it from the others, and
@@ -403,6 +422,8 @@ Everything about the machines is in the handoff's `multinode` block, read once b
 | `GEAK_MN_DRY_RUN` | — | `1` = render the per-rank scripts and stop, cluster untouched |
 | `MEM_FRACTION` | 0.90 | check: the free share of the fullest card's VRAM a node must have |
 | `SERVING_LOCK_WAIT` | 7200 | seconds a serving leg waits for a card a GEAK kernel task has leased |
+| `ATOM_PROFILE_WINDOW_MAX_SEC` | 6 | ATOM only: the cap on a profile window (see the trace gate) |
+| `ATOM_PROBE_DECODE_TOKENS` | 1024 | ATOM only: tokens each request of a DECODE sampling point generates, so none turns over inside the window |
 
 The trace wait is fixed: bytes quiet for 30 s count as exported, an incomplete set is
 given up after 180 s quiet, 1800 s at most, and the gate expects `TP` traces (under PD
@@ -446,6 +467,20 @@ Two things it exists to prevent, both of which look like a successful capture:
   parsed *as* the trace. The profiler therefore parses `parsed_trace` from
   `ranks/mn_trace_report.json` and only falls back to `ls -t` on a single box.
   No trace is moved.
+
+ATOM differs in where its traces land and how a window closes:
+
+- It fixes its trace directory at launch and `/start_profile` takes no body, so under PD
+  each role is launched with `<profile>/<role>/` (one shared directory would get both
+  engines' `rank_0/`). `PROFILE=1` records shapes without Python stacks or memory
+  (`ATOM_PROFILER_RECORD_SHAPES=1`, `ATOM_PROFILER_WITH_STACK=0`, `ATOM_PROFILER_PROFILE_MEMORY=0`).
+- A rank writes `<dir>/rank_<N>/<name>.pt.trace.json.gz` (`dp<D>_tp<N>/` under DP); the
+  name carries no rank, so the gate reads it from the directory and the wait looks one
+  level deeper.
+- `/stop_profile`, not a step count, closes the window, and ATOM answers it only after its
+  export, so both engines are stopped at once. Every rank holds its whole window in host
+  memory until then (a long decode window has run a node out of memory), so the window is
+  capped at `ATOM_PROFILE_WINDOW_MAX_SEC`, the cap `adapters/atom.sh` applies on one node.
 
 ### The ROCm runtime
 

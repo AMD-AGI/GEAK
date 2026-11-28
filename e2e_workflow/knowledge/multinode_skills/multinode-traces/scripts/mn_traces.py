@@ -54,12 +54,29 @@ COLLECTIVE_PATTERNS = {
 KERNEL_EVENT = rb'"cat": ?"kernel"'
 
 TRACE_RE = re.compile(r"(?:TP-|_tp)(\d+)")  # sglang ...-TP-3..., vllm <prefix>_dp0_pp0_tp3_...
+# ATOM names no rank in the file: each rank writes into its own directory under the profile
+# dir, `rank_<N>/`, or `dp<D>_tp<N>/` under data parallelism.
+ATOM_RANK_DIR_RE = re.compile(r"^(?:rank_(?P<rank>\d+)|dp(?P<dp>\d+)_tp(?P<tp>\d+))$")
+TRACE_PATTERNS = ("*.trace.json.gz", "*.trace.json", "*.json.gz")
 
 
 def discover(profile_dir: str) -> list[str]:
-    files = [f for pattern in ("*.trace.json.gz", "*.trace.json", "*.json.gz")
-             for f in glob.glob(os.path.join(profile_dir, pattern))]
+    dirs = [profile_dir] + [d for d in glob.glob(os.path.join(profile_dir, "*"))
+                            if os.path.isdir(d) and ATOM_RANK_DIR_RE.match(os.path.basename(d))]
+    files = [f for d in dirs for pattern in TRACE_PATTERNS for f in glob.glob(os.path.join(d, pattern))]
     return sorted(set(f for f in files if not os.path.basename(f).startswith("merged-")))
+
+
+def rank_of(path: str) -> int | None:
+    """TP rank of one trace, None where the path does not say. sglang puts it in the file name
+    (`...-TP-3-...`); ATOM in the directory the file sits in (`rank_3`, `dp1_tp3`)."""
+    tp = TRACE_RE.search(os.path.basename(path))
+    if tp:
+        return int(tp.group(1))
+    atom = ATOM_RANK_DIR_RE.match(os.path.basename(os.path.dirname(path)))
+    if atom:
+        return int(atom.group("rank") if atom.group("rank") is not None else atom.group("tp"))
+    return None
 
 
 def scan(path: str) -> dict:
@@ -165,15 +182,14 @@ def cmd_trace_gate(argv: list) -> int:
     per_rank, unranked = {}, []
     for role, directory, node, _exp in lanes:
         for path in discover(directory):
-            name = os.path.basename(path)
-            match = TRACE_RE.search(name)
+            tp_rank = rank_of(path)
             scanned = scan(path)
             if role:
                 scanned["role"] = role
-            if not match:
+            if tp_rank is None:
                 unranked.append(scanned)
                 continue
-            rank = int(match.group(1))
+            rank = tp_rank
             scanned["tp_rank"] = rank
             scanned["node_index"] = (lane_node(spans[role][0], rank, spans[role][1])
                                      if role in spans and len(spans[role][0]) > 1
@@ -517,16 +533,20 @@ def pd_points(engine_logs: dict, skill_root: str, per_phase: int, out_dir: str) 
         if not log or not os.path.isfile(log):
             raise ValueError(f"no --engine-log {engine}= (got {log!r})")
         info = server_info(log)
-        if not info.get("decode_log_interval"):
+        # ATOM logs no server-args line; its rows are observed_workload's `atom` format.
+        with open(log, encoding="utf-8", errors="replace") as handle:
+            atom = not info and any(line.startswith("[atom ") for line in handle)
+        if not atom and not info.get("decode_log_interval"):
             raise ValueError(f"{log} has no sglang server-args line with decode_log_interval")
         paths = {k: os.path.join(out_dir, f"{k}_{engine}.json") for k in ("server_info", "observed", "points")}
         _write_json(paths["server_info"], info)
+        source = ["--log-format", "atom"] if atom else ["--server-info", paths["server_info"]]
         for cmd in ([sys.executable, os.path.join(scripts, "observed_workload.py"), "--mode", "multinode", "--log", log,
-                     "--server-info", paths["server_info"], "--out", paths["observed"]],
+                     *source, "--out", paths["observed"]],
                     [sys.executable, os.path.join(scripts, "plan_sampling_points.py"),
                      "--observed", paths["observed"], "-n", str(2 * per_phase),
                      "--phase-budget", f"PREFILL={per_phase},DECODE={per_phase}",
-                     "--server-info", paths["server_info"], "--out", paths["points"]]):
+                     *source[atom * 2:], "--out", paths["points"]]):
             run = subprocess.run(cmd, capture_output=True, text=True)
             if run.returncode:
                 raise ValueError(f"{os.path.basename(cmd[1])} on the {engine} log failed: "

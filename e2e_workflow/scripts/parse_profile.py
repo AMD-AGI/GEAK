@@ -201,9 +201,25 @@ def _parse_vllm_detailed(name):
             gen[0] or gen[1], gen[2])
 
 
+# ATOM: atom/model_engine/run_labels.py
+#   prefill[bs=<n> tok=<new> ctx=...] / decode[bs=<running>[/<graph>] tok=... d=...] / eager_decode[...]
+# dummy_* (an idle DP rank's sync step) is not a forward of the workload.
+_ATOM_STEP_RE = re.compile(r"^(?P<kind>prefill|decode|eager_decode)\[bs=(?P<bs>\d+)(?:/\d+)?(?: tok=(?P<tok>\d+))?")
+
+
+def _parse_atom_step(name):
+    m = _ATOM_STEP_RE.match(name)
+    if not m:
+        return None
+    if m.group("kind") == "prefill":
+        return (True, int(m.group("tok") or 0), 0, 0)
+    return (False, 0, int(m.group("bs")), 0)
+
+
 STEP_DIALECTS = [
     ("sglang-step", lambda n: "step[" in n, _parse_sglang_step),
     ("vllm-detailed", lambda n: n.startswith("execute_"), _parse_vllm_detailed),
+    ("atom-step", lambda n: n.startswith(("prefill[", "decode[", "eager_decode[")), _parse_atom_step),
 ]
 
 

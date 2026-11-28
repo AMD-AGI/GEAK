@@ -139,6 +139,24 @@ def test_node_state_validates_as_two_prefill_and_two_decode_replicas(node_state)
     assert rx.map_args(_handoff(), timeout_s=3600)["gpu_ids"] == "0,1,2,3,4,5,6,7"
 
 
+def test_an_atom_deepseek_r1_node_state_validates_as_one_prefill_and_one_decode(node_state) -> None:
+    kv = lambda role: json.dumps({"kv_role": role, "kv_connector": "mooncake", "handshake_port": 6301})
+    cmd = lambda role, port: (
+        "AITER_LOG_LEVEL=WARNING MC_ENABLE_DEST_DEVICE_AFFINITY=1 python -m atom.entrypoints.openai_server "
+        f"--model /data/models/DeepSeek-R1/ --kv_cache_dtype fp8 -tp 8 --server-port {port} "
+        f"--kv-transfer-config '{kv(role)}'")
+    router = ("atomesh launch --host 0.0.0.0 --port 8000 --pd-disaggregation --prefill http://10.0.1.11:8010 "
+              "--decode http://10.0.2.21:8020 --policy random --backend atom")
+    node_state(_doc(backend="atom", nodes=3, pods=[
+        {"role": "router", "podIP": _ROUTER, "sshPort": 2222, "launch_command": router},
+        {"role": "prefill", "podIP": "10.0.1.11", "sshPort": 2222, "launch_command": cmd("kv_producer", 8010)},
+        {"role": "decode", "podIP": "10.0.2.21", "sshPort": 2222, "launch_command": cmd("kv_consumer", 8020)}]))
+    spec = rx._mn_spec(_handoff(framework="atom", model_path="/data/models/DeepSeek-R1"))
+    assert [(x["role"], x["tp"]) for x in spec["layout"]] == [("prefill", 8), ("decode", 8)]
+    assert [(n["host"], n["port"]) for n in spec["nodes"]] == [("10.0.1.11", 8010), ("10.0.2.21", 8020)]
+    assert spec["router"]["host"] == _ROUTER
+
+
 def test_the_repo_example_validates(monkeypatch) -> None:
     example = _HERE.parent.parent / "node_state.json"
     if not example.is_file():

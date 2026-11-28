@@ -515,6 +515,12 @@ class TestStepSpans(unittest.TestCase):
         self.assertEqual(pp._classify_step("step[TARGET_VERIFY bs=4]"), (False, 0, 4, 0))
         self.assertIsNone(pp._classify_step("step[malformed]"))
 
+    def test_atom_step_dialect_reads_prefill_tokens_and_decode_batch(self):
+        self.assertEqual(pp._classify_step("prefill[bs=2 tok=8192 ctx=1024]"), (True, 8192, 0, 0))
+        self.assertEqual(pp._classify_step("decode[bs=5/8 tok=5 d=1]"), (False, 0, 5, 0))
+        self.assertEqual(pp._classify_step("eager_decode[bs=3]"), (False, 0, 3, 0))
+        self.assertIsNone(pp._classify_step("dummy_prefill[bs=1]"))
+
     def test_agentx_strict_phase_mode_rejects_an_unknown_forward_dialect(self):
         from unittest.mock import patch
         events = [{"cat": "gpu_user_annotation", "name": "step[NEW_MODE bs=4]", "ts": 1, "dur": 5}]
