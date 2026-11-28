@@ -195,6 +195,20 @@ class BoundTest(unittest.TestCase):
         biased = (y + 5e-3).float()        # within 2x the error, but systematically shifted
         self.assertFalse(U.compare_one(b, biased, noisy, ref=y, out_dtype="float32")["ok"])
 
+    def test_tolerance_counts_use_the_values_compared_to_the_reference(self):
+        cand = torch.tensor([0., 1., float("nan"), float("nan")])
+        base = torch.tensor([0., 1., float("nan"), 0.])
+        bound = {"kind": "tolerance", "atol": 0.01, "rtol": 0.}
+        stock = U.compare_one(bound, cand, base)
+        self.assertEqual((stock["against"], stock["violations"], stock["compared_elements"]),
+                         ("baseline", 1, 3))
+        ref = torch.tensor([0., 0., float("nan"), 0.], dtype=torch.float64)
+        result = U.compare_one(bound, cand, base, ref=ref, max_violation_fraction=1.)
+        self.assertEqual((result["against"], result["violations"], result["compared_elements"]),
+                         ("reference", 2, 3))
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["nonfinite_mismatches"], 1)
+
     def test_noise_relative_uses_two_baseline_runs(self):
         g = torch.Generator().manual_seed(3)
         b0 = torch.randn(16, 128, generator=g)
@@ -538,6 +552,29 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual(p.returncode, 1)
         self.assertEqual(rep["gates"]["correctness"]["status"], "fail")
 
+    def test_important_case_catches_shared_error_against_builtin_reference(self):
+        from pathlib import Path
+        task = Path(self.task)
+        contract = task / "run/ut_contract.json"
+        doc = json.loads(contract.read_text())
+        doc["outputs"]["out"]["bound"] = {"kind": "tolerance", "atol": 1e-4, "rtol": .01}
+        contract.write_text(json.dumps(doc))
+        manifest = task / "run/ut_cases.json"
+        cases = json.loads(manifest.read_text())
+        cases["cases"][0].update(kind="important", timed=False, effective_calls=0)
+        manifest.write_text(json.dumps(cases))
+
+        wrong = TOY_KERNEL.replace("a.float() @ b.float().T", "2 * a.float() @ b.float().T")
+        (Path(self.tmp) / "site/toyk/ops.py").write_text(wrong)
+        (task / "kernel_src/ops.py").write_text(wrong)
+        _, report = self.ut("--gates", "correctness", "--draws", "1")
+        gate = report["gates"]["correctness"]
+        self.assertEqual(gate["status"], "fail")
+        row = next(r for r in gate["cases"] if r["case"] == "DECODE_m4|0")
+        self.assertEqual(row["out"]["against"], "reference")
+        self.assertGreater(row["out"]["violations"], 0)
+        self.assertFalse(row["ok"])
+
     def test_a_control_that_changes_nothing_fails_the_gate(self):
         with open(self.meta_path) as f:
             meta = json.load(f)
@@ -657,6 +694,7 @@ class EndToEndNoiseRelativeTest(EndToEndTest):
         ctrl = rep["gates"]["negative_controls"]["controls"][0]
         self.assertTrue(ctrl["caught"] and ctrl["margin"] >= 10, ctrl)
 
+    test_important_case_catches_shared_error_against_builtin_reference = None
     test_wrong_candidate_fails_correctness_and_stays_failed = None
     test_a_control_that_changes_nothing_fails_the_gate = None
     test_graph_phase_without_bundle_is_harness_incomplete_on_gpu_or_skipped_on_cpu = None
@@ -722,7 +760,8 @@ class MonoOracleCorrectnessTest(unittest.TestCase):
     each judged against the split and native oracle legs, never against each other."""
 
     CASES = [{"sig": "r2_c16", "axes": {"rows": 2, "context": 16}},
-             {"sig": "r2_c64", "axes": {"rows": 2, "context": 64}},
+             {"sig": "r2_c64", "kind": "important", "timed": False, "effective_calls": 0,
+              "axes": {"rows": 2, "context": 64}},
              {"sig": "r4_c32", "axes": {"rows": 4, "context": 32}}]
 
     def setUp(self):
@@ -747,8 +786,8 @@ class MonoOracleCorrectnessTest(unittest.TestCase):
                                      const_axes={"hidden": 16, "world": 2, "launches": 2, "pools": 2,
                                                  "kv_width": 4, "topk": 2})
         files = {"run/ut_contract.json": doc, "meta.json": {"ut_contract": {"oracle_timeout": 120}},
-                 "run/ut_cases.json": {"cases": [dict(c, regime="DECODE", random=True, timed=True,
-                                                      effective_calls=1) for c in self.CASES]}}
+                 "run/ut_cases.json": {"cases": [{"regime": "DECODE", "random": True, "timed": True,
+                                                 "effective_calls": 1, **c} for c in self.CASES]}}
         for rel, obj in files.items():
             with open(os.path.join(self.task, rel), "w") as f:
                 json.dump(obj, f)

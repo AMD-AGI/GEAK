@@ -70,9 +70,10 @@ reason, or a companion of a task with its reason.
      correctness case at the cell's own shape (`kind: important`, `random: true`,
      `timed: false`, `effective_calls: 0`, no `instances`); every case built from a cell names
      it (`important_cell`). A cell the task never runs at gets a reason in
-     `important_waivers`. Important cases widen what is checked, not what is weighted or
-     timed, and the driver judges them against the baseline unless a bound needs the
-     float64 reference.
+     `important_waivers`. Important cases use the same numerical contract as timed cases.
+     A named oracle follows its declared case scope. A built-in float64 reference uses
+     the task's reference row policy. A baseline-only contract measures agreement with
+     the installed implementation.
    - Copy the cell's `launch` into the case; a graph case's axes use `capture_bs` (the batch
      the server replays). A case without `launch` follows its phase's `phase_regimes`.
 7. **Case axes.** Derive each axis from the host-op dims in `evidence/shapes`, as an
