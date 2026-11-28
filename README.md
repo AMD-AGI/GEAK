@@ -199,6 +199,38 @@ Control flow — the budget loop, fan-out, verification, and stop conditions —
 `kernel_workflow.js` / `e2e_workflow.js`. LLM agents are called only for judgement (analysis, strategy,
 optimization). This makes runs reliable and reproducible.
 
+## Token-efficient model routing
+
+Optional, and **off by default.** When enabled, GEAK routes each sub-agent dispatch across a cost ladder of
+model lanes (Haiku → Sonnet → Opus) to cut token/$ cost at matches-or-beats quality, and records every
+routing decision for audit in the run result. Routing **changes nothing unless you opt in** — a default run
+is byte-identical to the pre-routing behaviour (no `route_*` args are added), and GEAK's own CI/CD runs never
+enable it.
+
+**Enable it** with a single explicit true value — the `GEAK_ROUTING` env var **or** the handoff `routing`
+field — equal (case-insensitively) to `1` / `true` / `on`. Unset / `false` / `0` / `off` (or anything else)
+stays off.
+
+```bash
+export GEAK_ROUTING=true        # env opt-in; equivalently, send the handoff field {"routing": true}
+```
+
+**Pick the decider** with `route_decider` (default `eikos`):
+
+- **`eikos`** (default) — the Eikos ladder. A sufficiency *estimator* service at `GEAK_EIKOS_URL` scores each
+  lane, and the host takes the cheapest lane whose estimate clears the per-class threshold. The URL is probed
+  **once** at startup; if it does not answer, the consults are skipped and a static ladder decision is used
+  for that run.
+- **`p1`** (opt-in) — a deterministic host router that performs **no model/estimator consult**. It holds
+  engineer `code_change` dispatches at the **Sonnet** class floor and escalates to **Opus** only on an
+  attributable *work-product* failure (non-improvement and infrastructure errors do not escalate).
+
+**Optional JSON knobs** (forwarded verbatim when present):
+
+- `route_floors` — per-scope minimum lane, e.g. `{"eng:memory": 2}` (`0` = Haiku, `1` = Sonnet, `2` = Opus).
+- `route_eikos_tau` — per-category sufficiency threshold for the `eikos` decider (`code_change` defaults to
+  `0.90`), e.g. `{"code_change": 0.99}`.
+
 ## Results — single-kernel
 
 12 HIP kernels, measured on AMD MI300X (gfx942) (excluding mla_decode; FAIL counted as 1.0x):
