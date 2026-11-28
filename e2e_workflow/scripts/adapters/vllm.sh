@@ -15,6 +15,10 @@
 
 adapter_default_port() { echo 8000; }
 
+# shellcheck source=shared/native_launch.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/shared/native_launch.sh" \
+  || echo "!!! vllm adapter: shared/native_launch.sh is missing next to this file; launches will be refused." >&2
+
 # adapter_profiler_args: the --profiler-config JSON for $PROFILE_DIR, or nothing when this build has
 # no ProfilerConfig (<0.19: the VLLM_TORCH_PROFILER_DIR env var is the only switch). The schema is strict
 # (extra=forbid) and aborts the server on an unknown key, so probe its fields and emit only what the
@@ -56,6 +60,8 @@ PY
 }
 
 adapter_launch() {
+  _native_server_argv vllm "${EXTRA_SERVER_ARGS:-}" || return 2
+  _native_gpu_env "${GPU:-}" "${EXTRA_ENV:-}" || return 2
   # Pin GPU_ARCHS so aiter's JIT skips rocm_agent_enumerator/_detect_native (see sglang.sh / gpu_lock.sh).
   local _ga="${GPU_ARCHS:-$(rocminfo 2>/dev/null | grep -m1 -oE 'gfx[0-9a-f]+' || true)}"
   # Enable the server-side torch profiler version-portably. No PROFILE_DIR -> off.
@@ -87,7 +93,7 @@ adapter_launch() {
   # shellcheck disable=SC2086
   ${SERVER_LAUNCH_PREFIX:-} env $EXTRA_ENV \
     ${_ga:+GPU_ARCHS=$_ga} \
-    HIP_VISIBLE_DEVICES=$GPU CUDA_VISIBLE_DEVICES=$GPU \
+    "${_NATIVE_GPU_ENV[@]}" \
     PYTHONSAFEPATH="${PYTHONSAFEPATH-1}" \
     "${_prof_env[@]}" \
     PYTHONPATH="$_pythonpath" \
@@ -96,7 +102,7 @@ adapter_launch() {
       --tensor-parallel-size "$TP" \
       --gpu-memory-utilization "$MEM_FRACTION" \
       "${_prof[@]}" \
-      $EXTRA_SERVER_ARGS \
+      "${_NATIVE_SERVER_ARGV[@]}" \
       > "$LOG" 2>&1 &
   SERVER_PID=$!
 }

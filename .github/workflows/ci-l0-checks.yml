@@ -181,6 +181,7 @@ jobs:
             e2e_workflow/scripts/tests/test_vllm_adapter_profiler_config.py \
             e2e_workflow/scripts/tests/test_sglang_adapter_profile.py \
             e2e_workflow/scripts/tests/test_profile_env_shim.py \
+            e2e_workflow/scripts/tests/test_native_adapter_launch.py \
             scripts/tests/test_gpu_identity.py \
             e2e_workflow/scripts/tests/test_eikos_registry_lint.py \
             e2e_workflow/scripts/tests/test_eikos_decide.py \
@@ -390,15 +391,31 @@ jobs:
         run: node e2e_workflow/scripts/test_kernel_canonicalization_parity.js
       - name: head entity_kind adopted from the profiled row
         run: node e2e_workflow/scripts/test_head_entity_kind_adoption.js
+      # A fused non-GEMM head (attention scorer + select) keeps its declared op_kind, so its prepared
+      # UT is not rejected at dispatch as an op_kind mismatch. No GPU, no model.
+      - name: op-identity guard keeps settled op kinds
+        run: node e2e_workflow/scripts/test_op_identity_guard.js
       # Structural guard on the TuningSkillset phase: the accept bars, the overlay
       # carry-forward, and the deploy-bundle handoff to finalize. Node + git only.
       - name: tuning skillset phase regression
         run: node e2e_workflow/scripts/test_tuning_skillset_phase.js
+      # A source-delivered prepared UT gates on its own editable leaves, so the head plan keeps only a
+      # rewrite of them and drops author lanes that cannot pass. No GPU, no model.
+      - name: head author plan under the UT's leaf gates
+        run: node e2e_workflow/scripts/test_head_plan_leaf_gates.js
       # The elapsed clock and the final reserve are the only thing standing between a
       # long run and a hard kill with no report (Hyperloom #1202). Only this job can
       # exercise the JS half, and the clock is pure time arithmetic — no GPU, no model.
       - name: wall-clock budget / final reserve regression
         run: node e2e_workflow/scripts/test_time_budget_reserve.js
+      # On a trace replay the default head track prepares every head at once, one card per job,
+      # then A/Bs serially in head order; fixed ISL/OSL stays serial. No GPU, no model.
+      - name: AgentX parallel head lanes regression
+        run: node e2e_workflow/scripts/test_agentx_parallel_head_lanes.js
+      # The last lane batch of an AgentX search spends the window less its A/Bs instead of handing it
+      # back to Finalize; every other lane keeps the ordinary deadline. No GPU, no model.
+      - name: AgentX window lanes regression
+        run: node e2e_workflow/scripts/test_agentx_window_lanes.js
       # The final phase measures on GPUs the search may still hold: the tuning window and the
       # run_reaper.py fence ahead of Finalize and Validate. No GPU, no model.
       - name: final-phase GPU handover regression

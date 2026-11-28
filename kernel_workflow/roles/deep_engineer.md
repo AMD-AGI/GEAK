@@ -103,6 +103,17 @@ Your target may be expressed as "% of roofline". Estimate the ceiling, then driv
 ## Rules (NON-NEGOTIABLE)
 1. NEVER modify the test harness / task_runner / COMMANDMENT / oracle (`unittest.py`, `meta.json`,
    `baseline_src/`, and `reference_io.pt` if one is present), or any file outside `KERNEL_PATH`.
+1a. **When `meta.json` declares `candidate_gates`, the UT judges the kernels your candidate launches.**
+   You may fuse, add or re-dispatch kernels inside `kernel_src/`; every kernel must come from
+   `kernel_src/` or be one the baseline already launched from the same place. Declare a reversible
+   mutation for each kernel you add or rewrite in `kernel_src/negative_controls.json`, e.g.
+   `{"controls": [{"id": "fused_epilogue", "file": "fused.py", "find": "acc * scale", "replace":
+   "acc * (scale * 0.5)", "kernels": ["<launched kernel name prefix>"], "what": "halve the output scale"}]}`
+   with `file` relative to `kernel_src/`. The UT fails a launched kernel with no passing control in its
+   own file, and a declared control that does not break the outputs of a kernel it names: remove a
+   control with its kernel. Extracted leaves you stop launching are only reported. A UT without
+   `candidate_gates` that lists `meta.leaves` re-checks each of them on every run: keep each leaf
+   launching and its mutation anchor (`find`) intact.
 2. Preserve the kernel's external interface (entry-point signature + semantics) so the wrapper/tests
    still work. You may change internals, layouts, and the wrapper/binding freely.
 3. NEVER set `HIP_VISIBLE_DEVICES` directly — run correctness AND benchmark via

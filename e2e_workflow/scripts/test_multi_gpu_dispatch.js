@@ -363,9 +363,12 @@ function singleGpu(name, phase = 'extract') {
   ok(/cannot be held by the 2-card pool/.test(threw), 'a group larger than GPU_LIST fails loudly, never on one GPU');
 
   // ------------------------------------------------------------------ 5. serial HeadKernel
+  // A trace replay on more than one card runs its heads at once (test_agentx_parallel_head_lanes.js
+  // covers a multi-GPU head there); a named ablation arm keeps this serial loop.
   console.log('\n# serial HeadKernel leases a whole group for a multi-GPU head');
   const headsMap = between('  const heads = headQueue.slice(0, HEAD_BUDGET)', '  if (DEEP) {');
-  const serial = between('  const headGpus = heads.some(', '  } // end serial head track');
+  const serial = between('  const headPool = ', '  } // end default head track');
+  const authorPlan = between('function headAuthorPlan(', '\n}\n') + '\n}\n';
   async function headTrack(headQueue, GPU_LIST) {
     const agents = [], lanes = [];
     const e = { headQueue, GPU_LIST, HEAD_BUDGET: headQueue.length, KERNEL_EXTRACT_ON: true, FAST_MODE: false,
@@ -376,14 +379,14 @@ function singleGpu(name, phase = 'extract') {
       KERNEL_KNOWLEDGE_DIR: '/pk', USE_EXPERT_SKILLS: false, EXPERT_SKILLS_DIR: '', KB_ARGS: {}, MATRIX_CORE_NAME: 'MFMA',
       // Serial HeadKernel's author-lane task string interpolates FP8_MMA (main since gfx115x).
       FP8_MMA: 'fp8 MFMA',
-      GRAPH_REQ: '', TASK: '', A: {}, ABL_IMPL_MS: 0, ABL: () => false, ablCandId: () => 'incumbent',
+      GRAPH_REQ: '', TASK: '', A: {}, ABLATION_ARM: 'A1', ABL_IMPL_MS: 0, ABL: () => false, ablCandId: () => 'incumbent',
       laneWindowShort: () => false, gemmSynthFor: () => 'false', flaggedHeads: [], history: { ledger: [] },
       ...SINGLE_NODE_ENV,
       roleAgent: (role, ph, intro, inputs) => ({ role, ph, intro, inputs }),
       safeAgent: async (p) => { agents.push(p); return { gate: 'author_recommended', author_plan: [{ language: 'hip', route: 'rewrite' }] }; },
       fastBoundedWorkflow: async (ref, args, label) => { lanes.push({ label, args }); return { final_weighted: 0.9, final_patch: '' }; } };
     await new AsyncFunction('env', `let {${Object.keys(e).join(',')}} = env;\n${singleNode}\n${reuse}\n${helpers}
-      ${headsMap}\n${serial}`)(e);
+      ${authorPlan}\n${headsMap}\n${serial}`)(e);
     return { agents, lanes };
   }
   const h4 = multiRank('mono_head', 'extract_op');

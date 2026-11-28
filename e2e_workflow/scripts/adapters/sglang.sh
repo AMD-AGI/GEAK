@@ -13,7 +13,13 @@ adapter_default_port() { echo 30000; }
 # when the dir is absent (non-sglang images).
 _SGL_PP="${SGLANG_SRC_PYTHONPATH-/sgl-workspace/sglang/python}"; [ -d "$_SGL_PP" ] || _SGL_PP=""
 
+# shellcheck source=shared/native_launch.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/shared/native_launch.sh" \
+  || echo "!!! sglang adapter: shared/native_launch.sh is missing next to this file; launches will be refused." >&2
+
 adapter_launch() {
+  _native_server_argv sglang "${EXTRA_SERVER_ARGS:-}" || return 2
+  _native_gpu_env "${GPU:-}" "${EXTRA_ENV:-}" || return 2
   # Raise the scheduler watchdog by default: an authored/JIT kernel (FlyDSL/triton-author) overlaid on
   # the path JIT-compiles on first prefill, which can exceed sglang's default watchdog and kill the
   # server before CUDA-graph capture. Harmless for stock runs. Only add it if the caller didn't already
@@ -33,7 +39,7 @@ adapter_launch() {
   # shellcheck disable=SC2086
   ${SERVER_LAUNCH_PREFIX:-} env $EXTRA_ENV \
     ${_ga:+GPU_ARCHS=$_ga} \
-    HIP_VISIBLE_DEVICES=$GPU CUDA_VISIBLE_DEVICES=$GPU \
+    "${_NATIVE_GPU_ENV[@]}" \
     SGLANG_TORCH_PROFILER_DIR="$PROFILE_DIR" \
     PYTHONPATH="${_SGL_PP:+$_SGL_PP:}${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \
     python -m sglang.launch_server \
@@ -42,7 +48,7 @@ adapter_launch() {
       --tp-size "$TP" \
       --mem-fraction-static "$MEM_FRACTION" \
       $_wd \
-      $EXTRA_SERVER_ARGS \
+      "${_NATIVE_SERVER_ARGV[@]}" \
       > "$LOG" 2>&1 &
   SERVER_PID=$!
 }

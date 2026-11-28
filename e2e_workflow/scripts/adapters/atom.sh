@@ -43,6 +43,9 @@ adapter_default_port() { echo 8888; }
 # Resolved at source time: inside a function BASH_SOURCE is still this file, but resolving once keeps
 # the lookup independent of the caller's cwd.
 _ATOM_ADAPTER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=shared/native_launch.sh
+source "$_ATOM_ADAPTER_DIR/shared/native_launch.sh" \
+  || echo "!!! atom adapter: shared/native_launch.sh is missing next to this file; launches will be refused." >&2
 
 # _atom_server_argv ARGS -> fills the global array _ATOM_EXTRA_ARGV with ARGS split by shell quoting
 # rules. An unquoted $EXTRA_SERVER_ARGS keeps quotes as literal characters and glob-expands `*`/`[..]`,
@@ -137,13 +140,14 @@ adapter_launch() {
   fi
 
   _atom_server_argv "${EXTRA_SERVER_ARGS:-}" || return 2
+  _native_gpu_env "${GPU:-}" "${EXTRA_ENV:-}" || return 2
 
   # Launch through $SERVER_LAUNCH_PREFIX (adapter contract): it puts the server in its
   # own session so teardown can prove the process group is ours. Empty when unset.
   # shellcheck disable=SC2086
   ${SERVER_LAUNCH_PREFIX:-} env $EXTRA_ENV \
     ${_ga:+GPU_ARCHS=$_ga} \
-    HIP_VISIBLE_DEVICES=$GPU CUDA_VISIBLE_DEVICES=$GPU \
+    "${_NATIVE_GPU_ENV[@]}" \
     OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}" \
     "${_prof_env[@]}" \
     PYTHONPATH="${OVERLAY_PYTHONPATH:+$OVERLAY_PYTHONPATH:}${PYTHONPATH:-}" \

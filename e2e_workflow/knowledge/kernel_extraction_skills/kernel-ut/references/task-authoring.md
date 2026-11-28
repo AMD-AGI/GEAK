@@ -124,7 +124,9 @@ The shared leg runner already performs this isolation.
 1. Run the frozen seeded/structural inputs through the baseline; verify output structure and full
    numerical/semantic contract. Reconstruct implicit state and all required glue.
 2. Build candidate overlay; prove distinct baseline/candidate entries in every
-   phase and actual execution of every claimed editable leaf.
+   phase and actual execution of every claimed editable leaf. Record each
+   leaf's launch census so the same check binds a candidate by what it
+   launches ([candidate gates](candidate-gates.md)).
 3. Obtain baseline outputs with `h.baseline_random_outputs` (see *Seeded inputs*).
 4. In the candidate process, use `h.run_correctness(regime, eager_cases=...,
    current_call=..., random_shapes=..., tol=..., baseline_outputs=...,
@@ -144,7 +146,10 @@ The shared leg runner already performs this isolation.
    tolerance by a wide margin.** A control that "passed" without its deviation ever
    being measured is not evidence of anything.
    Preserve the mutation and logs, restore pristine source, then rerun final
-   normal checks before recording completion.
+   normal checks before recording completion. Record each mutation in
+   `meta.leaves[]` and apply it to a copy of `kernel_src/`, so on a candidate the
+   UT runs it only for leaves still launched, alongside the controls the
+   candidate declares ([candidate gates](candidate-gates.md)).
 7. Timing is not part of qualification. `unittest.py --validation-mode correctness`
    runs steps 1-6 only and records `performance_measured: false`.
 

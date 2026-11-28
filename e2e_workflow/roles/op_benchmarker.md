@@ -167,6 +167,16 @@ well (Tier C), not just tuned — that is the lever the old design skipped.
   only burns a lane that fails on import and then gets mislabeled "infeasible" / silently dropped. `triton`
   is always available; `flydsl`/`ck`/`hip` only when present. If `available_backends` is empty/unknown,
   fall back to probing (`is_flydsl_available()`, `command -v ckProfiler`) before emitting that language.
+- **Gate every author language on the UT's own gates too.** A prepared UT from kernel extraction (its
+  `meta.json` has a `kernel_extraction` block and `kernel_src/` holds the delivered leaves) fails a
+  candidate whose kernels it cannot attribute to the task's own `kernel_src/`. When its
+  `meta.candidate_gates.launchers` lists languages, the UT attributes and controls kernels built in them:
+  plan `route: rewrite` in the leaves' own language and `route: author` only in a listed language. A UT
+  without `candidate_gates` proves on every run that each editable leaf executes and that a reversible
+  mutation of each leaf is caught, so only an in-place rewrite of those leaves can pass it: plan the
+  rewrite and no `route: author` entry. The orchestrator drops the author entries a UT cannot accept
+  while a rewrite is planned. The "at minimum triton" rule above does not apply to such a task; name the
+  languages the gates rule out in `reason`.
 - **When a backend is the MANDATED/highest-ROI lever for this op but is ABSENT, do NOT silently drop it —
   emit a `backend_absent` advisory and fall back to the next language.** Add an entry to the output
   `backend_absent[]` with the language, the missing-piece probe, and the actionable two-part remedy
@@ -293,8 +303,9 @@ runs with now; absent when there is no server, e.g. a standalone kernel_workflow
      capture (do NOT return a known-0-engagement env; it wastes the Integrator's gate). **Never TunableOp /
      `HIPBLASLT_TUNING_FILE`** (zero engagement on this stack).
 4. **ALWAYS build `author_plan` for the head op (Tier C, the workflows route)** — at minimum
-   `{language: triton, route: author|rewrite, rationale}`. **For a GEMM head, add `{language: flydsl,
-   route: author}` and list it FIRST** (SOTA GEMM DSL; baseline reuses aiter's flydsl GEMM). Add
+   `{language: triton, route: author|rewrite, rationale}`, or for a prepared UT, the rewrite of its
+   leaves plus author entries only in its `candidate_gates.launchers` (see DECIDE). **For a GEMM head,
+   add `{language: flydsl, route: author}` and list it FIRST** (SOTA GEMM DSL; baseline reuses aiter's flydsl GEMM). Add
    `hip`/`ck` when headroom is large and the image supports them. `route=author` (no existing editable impl) → orchestrator runs `kernel_workflow`
    `mode=author target_language=<lang>` on the op task dir (writes a fresh baseline, then optimizes it
    against the immutable oracle); `route=rewrite` (existing editable impl) → `mode=optimize`. You do NOT

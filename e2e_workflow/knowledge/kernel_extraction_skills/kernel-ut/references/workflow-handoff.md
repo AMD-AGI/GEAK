@@ -46,6 +46,10 @@ author UTs. Cases, weights and source binding remain fixed; optimization runs th
 existing UT (bare `unittest.py`, i.e. `--validation-mode performance`, which adds the
 timing legs that UT qualification skipped) against changed candidate code and gates each
 integration with E2E A/B.
+A UT declaring `candidate_gates` binds and controls the kernels each candidate
+launches: a candidate that adds or rewrites kernels declares their controls in
+`kernel_src/negative_controls.json`, and author lanes use only its `launchers`
+languages ([candidate gates](candidate-gates.md)).
 Head wins and completed milestones do not refresh extraction. Saved cost weights
 remain those measured during preparation, not measurements of the optimized stack.
 Queue exhaustion ends dispatch; undispatched tasks remain in carried state. Fast
@@ -53,16 +57,20 @@ and deep modes retain their head-only scheduling. Missing or stale UT evidence
 fails that task rather than invoking another extractor from an optimization phase.
 
 Declare `required_gpu_count` for multi-rank tasks in `run/requested_kernel.json`.
-Current head/milestone lanes allocate one GPU per task. Completed multi-GPU UTs
-remain in the delivery and are listed as deferred for optimization, with evidence
-paths; they are not retried on one card. A collective without an explicit rank
-requirement is deferred as well. Its extraction coverage remains recorded.
+Head and milestone lanes lease that many GPUs from `GPU_LIST` for the task. A
+multi-GPU UT is listed in `deferred_tasks`, with its reason and evidence paths, only
+when its run cannot place it: it needs more GPUs than `GPU_LIST` holds, or it is
+queued for fast- or deep-mode head lanes, which lease one card each. It is never
+retried on one card. A collective without an explicit rank requirement is deferred
+as well. Its extraction coverage remains recorded.
 
 ## Package the completed tasks
 
 Run the skill's own per-task preflight first, preserving `run/requested_kernel.json`
 and `run/RETURN.json`. The workflow adapter reads these existing files; it does not
-repeat kernel selection or GPU validation. Write a `workflow_tasks.json` containing:
+repeat kernel selection or GPU validation. Put the task's `meta.candidate_gates` in
+the return as `candidate_gates`: the workflow plans author lanes from that copy.
+Write a `workflow_tasks.json` containing:
 
 ```json
 {

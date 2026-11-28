@@ -109,6 +109,15 @@ Read, as reference, before writing:
    become the denominator.
    If `TARGET_LANGUAGE` differs from the online kernel's language (e.g. authoring HIP against an online
    Triton kernel), the baseline STILL stays the online Triton kernel — your HIP competes against it.
+1b. **When `meta.json` declares `candidate_gates`, the UT judges the kernels your implementation
+   launches.** Each must come from `WORKSPACE/kernel_src/`, loaded the way the bound module loads its
+   siblings, and needs a reversible mutation in `kernel_src/negative_controls.json`, e.g.
+   `{"controls": [{"id": "epilogue_scale", "file": "<op>_<lang>.py", "find": "acc * scale", "replace":
+   "acc * (scale * 0.5)", "kernels": ["<launched kernel name prefix>"], "what": "halve the output scale"}]}`
+   with `file` relative to `kernel_src/`. The UT fails a launched kernel with no passing control in its
+   own file, and a declared control that does not break the outputs of a kernel it names.
+   `meta.candidate_gates.launchers` lists the languages whose kernels it can attribute; a kernel in
+   another language fails binding.
 2. Preserve the **callable signature the unittest imports/calls** (read the unittest to learn the exact
    entry point name + argument order it expects). Your implementation must be a drop-in for it.
 3. NEVER set `HIP_VISIBLE_DEVICES` directly — run correctness/benchmark via

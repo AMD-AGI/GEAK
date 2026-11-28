@@ -1734,9 +1734,14 @@ function agentxValidateSkip(adoptedNothing, leftMs) {
   return leftMs < AGENTX_VALIDATE_WINDOWS_MS ? 'no_time' : '';
 }
 // A trace replay benches its A/Bs on the search window but curTput starts at Setup's canonical number,
-// and the two are not comparable: an accepted same-window win is kept for Validate's canonical A/B to
-// judge. A sub-threshold `stack` result still has to beat curTput.
+// and the two are not comparable. Its results are judged by their own A/B, whose reference leg already
+// carries everything banked: an accepted win, or a sub-threshold `stack` result that did not lose to
+// that reference. Validate's canonical A/B judges what was kept.
 function beatsCurTput(integ, curTput) {
+  if (IS_AGENTX && integ.gate === 'stack') {
+    const ref = Number(integ.ref_med);
+    return ref > 0 && Number(integ.cand_med) >= ref;
+  }
   return (IS_AGENTX && integ.gate === 'accepted') || integ.e2e_throughput_tok_s > curTput;
 }
 
@@ -3214,9 +3219,9 @@ if (FAST_MODE && typeof setTimeout === 'function' && FAST_HEAD_DEADLINE_MS > 0) 
 // implementation cap (ABL_NESTED_CAP_MS, set by the head loop; null = none) and the trace-replay
 // reserve bound. On expiry it resolves null, which callers treat as "no kernel".
 let ABL_NESTED_CAP_MS = null;
-async function fastBoundedWorkflow(ref, wfArgs, label) {
+async function fastBoundedWorkflow(ref, wfArgs, label, windowAbs = 0) {
   if (laneWindowShort(`nested kernel workflow ${label || ''}`)) return null;
-  wfArgs = { ...wfArgs, ...(await laneDeadlineArgs(label, 'HeadKernel')) };
+  wfArgs = { ...wfArgs, ...(await laneDeadlineArgs(label, 'HeadKernel', windowAbs)) };
   // noteKernelKB returns `r` unchanged, so the caller's null-guards are untouched.
   const p = workflow(ref, laneArgs(wfArgs)).then((r) => noteKernelKB(r, label));
   const ablCap = ABL('B4') && ABL_NESTED_CAP_MS != null ? ABL_NESTED_CAP_MS : null;
@@ -3233,9 +3238,9 @@ async function fastBoundedWorkflow(ref, wfArgs, label) {
   });
 }
 // Milestone lanes: the trace-replay reserve bound alone.
-async function reserveBoundedWorkflow(ref, wfArgs, label) {
+async function reserveBoundedWorkflow(ref, wfArgs, label, windowAbs = 0) {
   if (laneWindowShort(`nested kernel workflow ${label || ''}`)) return null;
-  wfArgs = { ...wfArgs, ...(await laneDeadlineArgs(label, 'Milestone')) };
+  wfArgs = { ...wfArgs, ...(await laneDeadlineArgs(label, 'Milestone', windowAbs)) };
   const p = workflow(ref, laneArgs(wfArgs)).then((r) => noteKernelKB(r, label));
   const capMs = laneReserveCapMs();
   if (typeof setTimeout !== 'function' || !(capMs > 0)) return p;
@@ -3367,14 +3372,31 @@ async function epochNow(phaseName) {
   if (t0 == null) EPOCH_AT_T0 = null;
   return t0 == null ? null : t0 + Math.floor(ELAPSED_MS / 1000);
 }
-async function laneDeadlineArgs(label, phaseName) {
+// A window lane (windowAbs > 0: nothing is queued behind its batch, which has windowAbs A/Bs to run
+// after it) is the run's last search work. It runs rounds until the window less those A/Bs and one
+// round; its direction budget and plateau cap are sized not to bind first, and its TechLead stops are
+// refused (up to the lane's max_forced_replans) until one round is left, so the window is spent on the
+// search rather than handed back. Rounds can outlast AGENTX_LANE_ROUND_S, and a lane still running
+// at the final reserve is abandoned with its result, so the lane starts no round that its longest
+// finished round says would outlast that one round past its deadline (round_tail_s). Under two
+// rounds of window, it is an ordinary lane.
+async function laneDeadlineArgs(label, phaseName, windowAbs = 0) {
   if (!agentxGuardsOn()) return {};
-  const stopInS = Math.floor((searchWindowMs() - agentxLaneTailMs()) / 1000);
+  const windowStopS = windowAbs > 0
+    ? Math.floor((searchWindowMs() - windowAbs * agentxAbMs(2) - AGENTX_LANE_ROUND_S * 1000) / 1000) : 0;
+  const windowRounds = Math.floor(windowStopS / AGENTX_LANE_ROUND_S);
+  const stopInS = windowRounds >= 2 ? windowStopS : Math.floor((searchWindowMs() - agentxLaneTailMs()) / 1000);
   if (!(stopInS > 0)) return {};
   const now = await epochNow(phaseName);
   if (now == null) {
     log(`  [time-budget] ${label}: wall clock unreadable, no round deadline.`);
     return {};
+  }
+  if (windowRounds >= 2) {
+    log(`  [time-budget] ${label}: window lane, rounds until ~${Math.round(stopInS / 60)}min ` +
+      `(${windowAbs} A/B(s) and one round before the final reserve).`);
+    return { deadline_epoch: now + stopInS, no_stop_s: AGENTX_LANE_ROUND_S, round_tail_s: AGENTX_LANE_ROUND_S,
+      budget: windowRounds * KERNEL_BUDGET, max_no_improve: windowRounds };
   }
   log(`  [time-budget] ${label}: no new round after ~${Math.round(stopInS / 60)}min ` +
     `(${Math.round(agentxLaneTailMs() / 60000)}min before the final reserve).`);
@@ -3454,8 +3476,9 @@ function multiGpuLaneArgs(c, ext, g) {
       ...(ext.workload_path ? { workload_path: ext.workload_path } : {}) } };
 }
 // The path a queue takes in THIS run ('' = not dispatched here; the run that dispatches it decides).
-// Milestone and serial HeadKernel lease a group from GPU_LIST; fast and deep head lanes lease one
-// card each (makeSem.with(1)), so they are not wired for multi-GPU jobs.
+// Milestone and the default HeadKernel track ('serial', whether its heads run one at a time or at
+// once) lease a group from GPU_LIST; fast and deep head lanes lease one card each (makeSem.with(1)),
+// so they are not wired for multi-GPU jobs.
 function queuePath(track) {
   if (track === 'kernel') return want('kernel') ? 'milestone' : '';
   if (!(want('head') && HEAD_BUDGET > 0)) return '';
@@ -3534,18 +3557,30 @@ if (!MODEL_PATH && KERNEL_PATH) {
 // dispatcher seam (a dense GEMM candidate has no live call site), so tag it op_kind='moe' (keeps
 // gemmSynthFor's dense synth off); it is never skipped. Detected from is_fused_kernel or the
 // profile class/name. Shared by every strategize call site, and it also admits the queue.
+// Only an unset or GEMM kind is re-tagged: is_fused_kernel also marks fused non-GEMM chains (an
+// attention scorer + select, a collective + norm), and a prepared UT's validated kind must equal its
+// declaration (preparedUtDefect), so a kind the extraction settled is never rewritten.
 const _isFusedOp = (c) => (c && c.is_fused_kernel === true) ||
   /(?:^|[^a-z])moe(?:[^a-z]|$)|group(?:ed)?[_ ]?gemm|ck_moe|expert|fused[_ ]?moe|fmoe|asm_moe|fused_custom/i
     .test(`${(c && c.op_kind) || ''} ${(c && c.short_name) || ''} ${(c && c.name) || ''} ${(c && c.classification) || ''} ${(c && c.class) || ''} ${(c && c.backend) || ''}`);
+const _RETAGGABLE_OP_KINDS = new Set(['', 'gemm', 'grouped_gemm', 'moe']);
 function applyOpIdentityGuard(queue, stage) {
   let tagged = 0;
+  const kept = [];
   for (const c of (queue || [])) {
     if (!_isFusedOp(c)) continue;
+    const kind = String(c.op_kind || '').toLowerCase();
+    const prepared = c.prepared_ut && c.prepared_ut.result ? String(c.prepared_ut.result.op_kind || '') : '';
+    if (!_RETAGGABLE_OP_KINDS.has(kind) || (prepared && prepared !== 'moe')) {
+      kept.push(`${c.short_name || c.name || '?'}=${kind || prepared}`);
+      continue;
+    }
     c.op_kind = 'moe';
     tagged++;
   }
   const admitted = admitHeads(queue, stage);
   if (tagged) log(`[op-identity] ${tagged} fused/grouped head(s): op_kind=moe (never dense-GEMM), bound at live seam — optimized as the fused op, never skipped.`);
+  if (kept.length) log(`[op-identity] ${kept.length} fused head(s) keep their declared op_kind: ${kept.join(', ')}.`);
   return admitted;
 }
 
@@ -4883,6 +4918,28 @@ function engineRegimes() {
   return { REQUIRE_DECODE_BUCKET: true, DECODE_M_BUCKETS: [1, CONC],
     PREFILL_M_NOTE: 'also include the profiled large prefill M (chunk size, ~thousands) per (N,K)' };
 }
+
+// The author lanes a head's plan becomes. A source-delivered prepared UT fails a candidate whose kernels
+// it cannot attribute to the task's own source. One with candidate gates attributes kernels built in its
+// `launchers` languages; one without proves on every run that each extracted leaf executes and that a
+// mutation of it is caught, so only a rewrite of those leaves can pass. While the plan has a rewrite, the
+// author entries its UT cannot accept are dropped. HEAD_AUTHOR_MAX applies after.
+function headAuthorPlan(h, authorPlan) {
+  let planned = authorPlan || [];
+  const gates = (h.prepared_ut && h.prepared_ut.result && h.prepared_ut.result.candidate_gates) || {};
+  const launchers = new Set((Array.isArray(gates.launchers) ? gates.launchers : []).map((l) => String(l).toLowerCase()));
+  const accepted = (ap) => !!ap && (ap.route === 'rewrite' || launchers.has(String(ap.language || '').toLowerCase()));
+  const leafGated = h.source_delivery_required === true && planned.some((ap) => ap && ap.route === 'rewrite');
+  if (leafGated && planned.some((ap) => !accepted(ap))) {
+    const dropped = planned.filter((ap) => !accepted(ap)).map((ap) => (ap && ap.language) || '?');
+    const why = launchers.size ? `the prepared UT attributes only ${[...launchers].join('/')} kernels to its own source`
+      : 'the prepared UT gates on its own editable leaves, so only a rewrite of them can pass';
+    log(`  ${h.short_name}: dropped author lane(s) ${dropped.join(', ')}: ${why}.`);
+    planned = planned.filter(accepted);
+  }
+  return planned.slice(0, HEAD_AUTHOR_MAX);
+}
+
 // ===========================================================================
 // PHASE: TuningSkillset — the VENDORED tuning skillset, run WHOLE and STANDALONE, BEFORE HeadKernel.
 // TUNING_SKILLSET_DIR is one hash-pinned tree (scripts/tuning_skillset_sync.py). tuning_specialist
@@ -5230,7 +5287,7 @@ function tuningIntegrateInputs() {
 // ===========================================================================
 // PHASE: HeadKernel — the highest-pct_gpu_time ops (GEMM / attention), optimized regardless of the
 // edit flag, via the bake-off ladder. Runs BEFORE the editable-kernel loop. The op-identity guard has
-// already forced fused/monolithic heads to op_kind=moe (dense-GEMM synth off, live seam kept), so
+// already tagged fused MoE/GEMM heads op_kind=moe (dense-GEMM synth off, live seam kept), so
 // each head is optimized AS the op the live kernel dispatches, never as an un-integrable dense GEMM.
 // ===========================================================================
 if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
@@ -5693,7 +5750,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         st.cands.push({ kind: 'direct_light', source: bake.winner_backend, winner_kind: bake.winner_kind,
           apply_env: bake.apply_env || '', apply_flags: bake.apply_flags || '', code_patch: bake.code_patch || '',
           tuning_artifact: bake.tuning_artifact || '', isolated: bake.isolated_speedup, parity_note: bake.parity_note || 'expected_close' });
-      for (const ap of (bake && bake.author_plan ? bake.author_plan.slice(0, HEAD_AUTHOR_MAX) : []))
+      for (const ap of (bake ? headAuthorPlan(h, bake.author_plan) : []))
         authorJobs.push({ short_name: h.short_name, h, ext, ap, best_known_ms: bake.best_known_ms });
     }
 
@@ -5824,21 +5881,37 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
       }
     }
   } else {
-  // A multi-GPU head holds ONE group of required_gpu_count GPU_LIST cards for its bake-off and author
-  // lanes (AgentX extraction reuses the prepared UT: no GPU work); heads run one at a time, so the
-  // group is released when the next head starts.
-  const headGpus = heads.some((h) => gpuNeed(h) !== 1) ? makeSem(GPU_LIST) : null;
+  // AgentX heads reuse UTs prepared against the baseline, so with more than one card every head's
+  // bake-off and author lanes run at once, each on its own lease, on the serial loop's per-lane
+  // budgets; the A/Bs below stay serial, in head order. Fixed ISL/OSL extracts each head on the
+  // stack the previous one left, and an ablation arm times each head on its own clock: both serial.
+  const headPool = KERNEL_EXTRACT_ON && !ABLATION_ARM && GPU_LIST.length > 1 && heads.length ? makeSem(GPU_LIST) : null;
+  // Serial, a multi-GPU head holds ONE group of required_gpu_count GPU_LIST cards for its bake-off and
+  // author lanes (AgentX extraction reuses the prepared UT: no GPU work); heads run one at a time, so
+  // the group is released when the next head starts.
+  const headGpus = !headPool && heads.some((h) => gpuNeed(h) !== 1) ? makeSem(GPU_LIST) : null;
   let headGroup = null;
-  for (const h of heads) {
-    if (headGroup) { headGpus.release(headGroup); headGroup = null; }
-    // Budget guard: start no new head op after a dispatch deadline (FAST_DEADLINE_HIT in fast mode;
-    // TIME_DEADLINE_HIT in all modes when time_budget_s is set).
+  // fn(gpu, group): group is a multi-GPU head's whole set of cards, null for a one-card job. In
+  // parallel each job leases its own: one card, or a group of required_gpu_count cards.
+  const onCard = (h, fn) => {
+    if (!headPool) return fn(headGroup ? headGroup[0] : h.gpu_id, headGroup);
+    const n = gpuNeed(h);
+    return headPool.with(n, (g) => fn(g[0], n === 1 ? null : g));
+  };
+  // A/Bs owed after the parallel heads' lanes when nothing is queued behind them (window lanes).
+  let headWindowAbs = 0;
+  // Budget guard: start no new head op after a dispatch deadline (FAST_DEADLINE_HIT in fast mode;
+  // TIME_DEADLINE_HIT in all modes when time_budget_s is set).
+  const dispatchHead = (h) => {
     if ((FAST_MODE && FAST_DEADLINE_HIT) || TIME_DEADLINE_HIT) {
       log(`[budget] dispatch deadline reached — stopping head dispatch before ${h.short_name} (${headDispatched}/${heads.length} heads done).`);
-      break;
+      return false;
     }
     headDispatched++;
     if (KERNEL_EXTRACT_ON) headQueue = headQueue.filter(c => c.prepared_ut !== h.prepared_ut);
+    return true;
+  };
+  const prepareHead = async (h) => {
     // B4 measures THIS head's trial against its own start, not the run clock.
     const ablHeadStart = ELAPSED_MS;
     if (headGpus && gpuNeed(h) !== 1) headGroup = await headGpus.acquire(gpuNeed(h));
@@ -5862,21 +5935,21 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         log(`  ${h.short_name}: op extraction failed (${why}); skipping.`);
         history.ledger.push({ direction: h.short_name, verdict: 'dead_end', lesson: 'op extraction failed' });
       }
-      continue;
+      return null;
     }
     // (h2) DISCOVER existing impls + tune cheap levers + DECIDE an author_plan.
-    const bake = await safeAgent(
-      roleAgent('op_benchmarker', 'bakeoff', 'DISCOVER existing impls, tune cheap levers, DECIDE author_plan.' + (headGroup
-        ? ` This op's UT runs ${headGroup.length} ranks: run it only under ONE lease of the whole UT_GPU_SET ` +
+    const bake = await onCard(h, (gpu, group) => safeAgent(
+      roleAgent('op_benchmarker', 'bakeoff', 'DISCOVER existing impls, tune cheap levers, DECIDE author_plan.' + (group
+        ? ` This op's UT runs ${group.length} ranks: run it only under ONE lease of the whole UT_GPU_SET ` +
           '(bash $KERNEL_WF_DIR/scripts/gpu_lock.sh group:$UT_GPU_SET -- python3 unittest.py), never on GPU_ID ' +
           'alone and never inside another lease; a single-process bench cannot time it.' : ''), {
         EVAL_DIR, OP_TASK_DIR: ext.task_dir, OP_KIND: ext.op_kind, PCT_GPU_TIME: h.pct_gpu_time,
         CANDIDATE_BACKENDS: ext.candidate_backends || h.candidate_backends || [],
-        GPU_ID: h.gpu_id, ENABLE_FP8, KERNEL_WF_DIR, KERNEL_BUDGET, SKILL_DIR: WORKFLOW_DIR,
+        GPU_ID: gpu, ENABLE_FP8, KERNEL_WF_DIR, KERNEL_BUDGET, SKILL_DIR: WORKFLOW_DIR,
         CURRENT_ENV: curEnv,
-        ...(headGroup ? { GPU_ID: headGroup[0], UT_GPU_SET: headGroup.join(',') } : {}),
+        ...(group ? { UT_GPU_SET: group.join(',') } : {}),
       }),
-      { phase: 'HeadKernel', label: `bakeoff ${h.short_name}`, schema: OPBENCH_SCHEMA });
+      { phase: 'HeadKernel', label: `bakeoff ${h.short_name}`, schema: OPBENCH_SCHEMA }));
     if (!bake || (bake.gate !== 'have_winner' && bake.gate !== 'author_recommended')) {
       const gate = bake ? bake.gate : 'null';
       const harness = !!(bake && (bake.gate === 'harness_error' || bake.harness_suspect));
@@ -5887,12 +5960,12 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         log(`  ⚠️ FLAG ${h.short_name}: ${isDominant ? `DOMINANT head (${(h.pct_gpu_time || 0).toFixed(1)}% GPU)` : 'head'} bake-off gate=${gate}${harness ? ' (HARNESS ERROR — bake-off could not measure; NOT a real no-win)' : ''}. ${hasPlan ? 'Proceeding to author route anyway.' : 'No author_plan to fall back on.'}`);
         flaggedHeads.push({ short_name: h.short_name, pct_gpu_time: h.pct_gpu_time, stage: 'bakeoff', gate, harness_error: harness, had_author_plan: hasPlan, reason: bake ? bake.reason || gate : 'bakeoff returned null' });
         history.ledger.push({ direction: h.short_name, isolated_speedup: bake ? bake.isolated_speedup : 0, verdict: harness ? 'harness_error' : 'flagged', lesson: bake ? bake.reason || gate : 'bakeoff null' });
-        if (!hasPlan) continue;       // can't author -> FLAGGED (surfaced in report), not a silent skip
-        // else: fall through to the author route below (do NOT continue)
+        if (!hasPlan) return null;    // can't author -> FLAGGED (surfaced in report), not a silent skip
+        // else: fall through to the author route below (do NOT return)
       } else {
         log(`  ${h.short_name}: no win and nothing worth authoring (${bake ? bake.reason || gate : 'none'}); skipping.`);
         history.ledger.push({ direction: h.short_name, isolated_speedup: bake ? bake.isolated_speedup : 0, verdict: 'dead_end', lesson: bake ? bake.reason || 'no op win' : 'bakeoff failed' });
-        continue;
+        return null;
       }
     }
 
@@ -5906,7 +5979,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     }
     // Author/rewrite route per planned language via the kernel layer: mode=author writes from scratch
     // then optimizes, mode=optimize rewrites an existing impl; the oracle in ext.task_dir judges both.
-    let plan = (bake.author_plan || []).slice(0, HEAD_AUTHOR_MAX);
+    let plan = headAuthorPlan(h, bake.author_plan);
     // ---- B4 gate ----
     // One bounded trial for the author route (the expensive part of a head): at the deadline it
     // continues only if the head already holds a non-incumbent candidate, else it pauses, with a
@@ -5943,27 +6016,13 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
           candidates: headCands.length, impl_cap_ms: ablImplCap });
       }
     }
-    for (const ap of plan) {
-      // GATE 2 -- implementation: the cap is checked before every language AND handed to the
-      // nested workflow, the only boundary that can contain work already in flight.
-      if (ABL('B4')) {
-        const implMs = ELAPSED_MS - ablImplStart;
-        if (implMs >= ablImplCap) {
-          ablEvent({ event: 'impl_gate', head: h.short_name, action: 'stop',
-            impl_ms: implMs, impl_cap_ms: ablImplCap, audited: ablAudited,
-            remaining_plan: plan.length, reason: 'implementation trial budget exhausted' });
-          log(`  [${ABLATION_ARM}] ${h.short_name}: implementation budget spent (${Math.round(implMs / 60000)}min of ${Math.round(ablImplCap / 60000)}min) — stopping the author route.`);
-          history.ledger.push({ direction: h.short_name, verdict: 'paused',
-            lesson: `${ABLATION_ARM}: implementation trial budget expired` });
-          break;
-        }
-        ABL_NESTED_CAP_MS = Math.max(60000, ablImplCap - implMs);
-      }
+    // One author lane: its start check, then the kernel layer, retried if it dies transiently.
+    const authorLane = async (ap, gpu, group) => {
       const lang = ap.language || 'triton';
       if (laneWindowShort(`author lane ${h.short_name}:${lang}`)) {
         history.ledger.push({ direction: `${h.short_name}:${lang}`, verdict: 'paused',
           lesson: 'time-budget: too close to the final reserve for a kernel lane plus its A/B' });
-        break;
+        return null;
       }
       let al;
       // Retry a TRANSIENT failure (threw, or no final_geomean) so a language is not silently dropped;
@@ -5978,7 +6037,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
             perf_knowledge_dir: KERNEL_KNOWLEDGE_DIR,
             use_expert_skills: USE_EXPERT_SKILLS ? 'true' : 'false', expert_skills_dir: EXPERT_SKILLS_DIR,
             ...KB_ARGS,
-            budget: KERNEL_BUDGET, gpu_ids: engineGpu(h, h.gpu_id), exp_root: `${EVAL_DIR}/kernels/_exp`,
+            budget: KERNEL_BUDGET, gpu_ids: engineGpu(h, gpu), exp_root: `${EVAL_DIR}/kernels/_exp`,
             task: `Author+optimize a ${lang} implementation of this op vs the immutable oracle (beat ${bake.best_known_ms || '?'} ms). ` +
               `This kernel will be overlaid onto the LIVE sglang decode path, which is CUDA-graph captured: its STEADY-STATE hot ` +
               `path (2nd call onward) MUST be host-sync-free — NO .item()/.cpu()/.tolist()/.sum().item()/torch.cuda.synchronize() ` +
@@ -5991,8 +6050,8 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
               `only COMPACT fp8/preshuffled weights (~the model's own fp8 weight size), never a bf16 expansion. The integrated ` +
               `kernel MUST fit at the same mem-fraction the accepted config uses. ` + GRAPH_REQ + (TASK || ''),
             apply_to_original: 'false',
-            ...multiGpuLaneArgs(h, ext, headGroup),
-          }, `${h.short_name}:${lang}`);
+            ...multiGpuLaneArgs(h, ext, group),
+          }, `${h.short_name}:${lang}`, headWindowAbs);
         } catch (e) { al = { authored: false, validation_status: 'error', reason: String(e) }; }
         // A lane that could not record a baseline will not record one on a retry either: the UT is
         // the same, so is its run time. In GEAK #606 each such retry cost another 60+ min.
@@ -6002,6 +6061,9 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         if (!transient || attempt === AUTHOR_TRIES) break;
         log(`  ${h.short_name}: author ${lang} attempt ${attempt}/${AUTHOR_TRIES} died transiently (${al ? al.reason || al.validation_status : 'null'}) — retrying so this language isn't dropped.`);
       }
+      return { lang, al };
+    };
+    const addAuthored = ({ lang, al }) => {
       // Rank on the WORKLOAD-WEIGHTED speedup (same basis as bake.isolated_speedup), not the
       // geomean; only fixed-load runs fall back to the geomean.
       const alIso = al && (KERNEL_EXTRACT_ON ? (al.final_weighted ?? al.final_speedup ?? 0)
@@ -6014,7 +6076,53 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
         log(`  ${h.short_name}: author ${lang} produced no usable kernel (${al ? al.reason || al.validation_status : 'none'}).`);
         history.ledger.push({ direction: `${h.short_name}:${lang}`, verdict: 'dead_end', lesson: al ? al.reason || 'author no speedup' : 'author failed' });
       }
+    };
+    if (headPool) {
+      const lanes = await parallel(plan.map((ap) => () => onCard(h, (gpu, group) => {
+        log(`  ${h.short_name}: author ${ap.language || 'triton'} lane on GPU ${group ? `group {${group.join(',')}}` : gpu}.`);
+        return authorLane(ap, gpu, group);
+      })));
+      for (const r of lanes) if (r) addAuthored(r);
+    } else {
+      for (const ap of plan) {
+        // GATE 2 -- implementation: the cap is checked before every language AND handed to the
+        // nested workflow, the only boundary that can contain work already in flight.
+        if (ABL('B4')) {
+          const implMs = ELAPSED_MS - ablImplStart;
+          if (implMs >= ablImplCap) {
+            ablEvent({ event: 'impl_gate', head: h.short_name, action: 'stop',
+              impl_ms: implMs, impl_cap_ms: ablImplCap, audited: ablAudited,
+              remaining_plan: plan.length, reason: 'implementation trial budget exhausted' });
+            log(`  [${ABLATION_ARM}] ${h.short_name}: implementation budget spent (${Math.round(implMs / 60000)}min of ${Math.round(ablImplCap / 60000)}min) — stopping the author route.`);
+            history.ledger.push({ direction: h.short_name, verdict: 'paused',
+              lesson: `${ABLATION_ARM}: implementation trial budget expired` });
+            break;
+          }
+          ABL_NESTED_CAP_MS = Math.max(60000, ablImplCap - implMs);
+        }
+        const r = await onCard(h, (gpu, group) => authorLane(ap, gpu, group));
+        if (!r) break;
+        addAuthored(r);
+      }
     }
+    return { ext, isDominant, headCands };
+  };
+  // Parallel: dispatch every head now, then wait for all of their lanes before the first A/B.
+  let prepared = null;
+  if (headPool) {
+    const live = [];
+    for (const h of heads) { if (!dispatchHead(h)) break; live.push(h); }
+    if (!headQueue.length && !(want('kernel') && kernelQueue.length)) headWindowAbs = live.length;
+    log(`  [heads] ${live.length} head(s) at once on GPUs {${GPU_LIST.join(',')}}, one lease per bake-off or author lane; their A/Bs follow serially, in head order.`);
+    const got = await parallel(live.map((h) => () => prepareHead(h)));
+    prepared = new Map(live.map((h, i) => [h, got[i]]));
+  }
+  for (const h of heads) {
+    if (headGroup) { headGpus.release(headGroup); headGroup = null; }
+    if (prepared ? !prepared.has(h) : !dispatchHead(h)) break;
+    const p = prepared ? prepared.get(h) : await prepareHead(h);
+    if (!p) continue;
+    const { ext, isDominant, headCands } = p;
     if (!headCands.length) {
       if (isDominant) {
         log(`  ⚠️ FLAG ${h.short_name}: DOMINANT head (${(h.pct_gpu_time || 0).toFixed(1)}% GPU) produced NO candidate (bake-off + author route both empty) — flagged, NOT silently skipped.`);
@@ -6147,7 +6255,7 @@ if (want('head') && headQueue.length && HEAD_BUDGET > 0) {
     }
   }
   if (headGroup) headGpus.release(headGroup);
-  } // end serial head track (default path; runs for normal mode and fast-mode-single-GPU)
+  } // end default head track (normal mode and fast-mode-single-GPU; A/Bs always serial)
   // Head wins reshape the profile: re-profile before the kernel loop.
   if (!KERNEL_EXTRACT_ON && acceptedHeads.length && !searchClosed('post-head re-profile')) {
     profile = await safeAgent(
@@ -6220,6 +6328,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
   // AgentX selection inventories more work than this execution budget can run.
   // Preserve undispatched eligible candidates in carried state for resume.
   if (KERNEL_EXTRACT_ON) kernelQueue = planCands.slice(cands.length);
+  const mileWindowAbs = KERNEL_EXTRACT_ON && !kernelQueue.length ? cands.length : 0;
   dispatched += cands.length;
   log(`Milestone ${milestone}: ${cands.length} kernel candidate(s) [${cands.map(c => c.short_name).join(', ')}], dispatched ${dispatched}/${BUDGET} (floor ${MIN_KERNEL_TASKS})`);
 
@@ -6253,7 +6362,7 @@ while (want('kernel') && !TIME_DEADLINE_HIT && dispatched < BUDGET && (dispatche
           (c.lane_retried ? ' (Retry after a kernel-lane error.)' : ''),
         apply_to_original: 'false',
         ...multiGpuLaneArgs(c, ext, g),
-      }, String(c.short_name || ext.op_kind || 'milestone'));
+      }, String(c.short_name || ext.op_kind || 'milestone'), mileWindowAbs);
       if (r == null && IS_AGENTX) {
         return { c, skip: true, paused: true, reason: 'kernel lane not run to completion before the final reserve' };
       }
